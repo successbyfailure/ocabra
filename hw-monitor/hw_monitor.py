@@ -13,13 +13,13 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pynvml
 import redis.asyncio as aioredis
 import structlog
-from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import DateTime, Float, Index, Integer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -278,8 +278,18 @@ def _read_gpu(index: int) -> dict:
     """Read GPU state and return a dict matching GPUState dataclass fields."""
     handle = pynvml.nvmlDeviceGetHandleByIndex(index)
     mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-    temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+    # WSL2 can omit optional NVML telemetry. Keep publishing VRAM and the
+    # heartbeat so scheduling remains usable even when these fields are not.
+    try:
+        utilization_pct = float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+    except pynvml.NVMLError:
+        utilization_pct = 0.0
+    try:
+        temperature_c = float(
+            pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+        )
+    except pynvml.NVMLError:
+        temperature_c = 0.0
     try:
         power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)
         power_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
@@ -298,8 +308,8 @@ def _read_gpu(index: int) -> dict:
         "total_vram_mb": mem.total // (1024 * 1024),
         "free_vram_mb": mem.free // (1024 * 1024),
         "used_vram_mb": mem.used // (1024 * 1024),
-        "utilization_pct": float(util.gpu),
-        "temperature_c": float(temp),
+        "utilization_pct": utilization_pct,
+        "temperature_c": temperature_c,
         "power_draw_w": power_w,
         "power_limit_w": power_limit_w,
         "locked_vram_mb": 0,
@@ -556,7 +566,7 @@ async def main() -> None:
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=POLL_INTERVAL_S)
             break  # shutdown signalled
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass  # normal timeout, continue polling
 
     # Cleanup
@@ -585,7 +595,7 @@ async def main() -> None:
 
 async def _persist(gpu_history: dict[int, list[dict]], server_history: list[dict]) -> None:
     """Write averaged stats to the database."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     factory = _get_session_factory()
     try:
         async with factory() as session:

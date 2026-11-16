@@ -13,17 +13,17 @@ Multiple GPUs are supported. oCabra will detect and manage all available NVIDIA 
 
 ## Software Prerequisites
 
-1. **Linux** (Ubuntu 22.04+ recommended; other distros work with Docker support)
+1. **Linux** (Ubuntu 22.04+ recommended) or **Windows 11 with WSL2**
 2. **NVIDIA drivers** >= 535 (check with `nvidia-smi`)
-3. **Docker Engine** >= 24.0 ([install guide](https://docs.docker.com/engine/install/))
-4. **Docker Compose** v2 plugin (included with modern Docker Desktop/Engine)
-5. **NVIDIA Container Toolkit** ([install guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html))
+3. **Docker Engine** >= 24.0 on Linux, or current **Docker Desktop** on Windows
+4. **Docker Compose** >= 2.30 (included with current Docker Desktop/Engine)
+5. On Linux, **NVIDIA Container Toolkit** ([install guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)); Docker Desktop supplies the WSL2 GPU integration
 
 Verify the toolkit is configured:
 
 ```bash
 # Should show GPU info inside the container
-docker run --rm --runtime=nvidia --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
 ```
 
 ## Quick Start
@@ -41,12 +41,41 @@ bash setup.sh
 The script will:
 - Check all prerequisites
 - Create data directories
-- Generate `.env` with random secrets
-- Prompt for admin credentials and DB password
-- Build and start all Docker services
+- Generate `.env`, database credentials and random secrets
+- Prompt for optional admin credentials on the first interactive run
+- Build and start the core Docker services, including `hw-monitor`
 - Wait for the health check to pass
 
 Once complete, open **http://localhost:8484** in your browser.
+
+Optional UI/model services such as ComfyUI, A1111, TRELLIS.2 and Unsloth are
+not started by default. Build and start the available ones with:
+
+```bash
+bash setup.sh --with-services
+```
+
+## Windows 11 / WSL2
+
+oCabra runs as Linux containers through Docker Desktop's WSL2 backend; there
+is no native Windows-container mode. Install the current Windows NVIDIA
+driver, Docker Desktop with WSL integration enabled, and update WSL first:
+
+```powershell
+wsl --install -d Ubuntu-22.04
+wsl --update
+```
+
+Clone the repository inside the Ubuntu filesystem (for example under
+`~/src`), not under `/mnt/c`, and run `bash setup.sh` from that shell. The
+installer verifies GPU access with a CUDA container and changes model storage
+to `~/.local/share/ocabra` so root-level `/docker` paths are not required.
+
+Do not install a Linux display driver inside WSL. Power limits, persistence
+mode and oCabra's automatic thermal power cap are disabled on WSL because the
+Windows NVML bridge does not expose those mutable operations. GPU inference
+and VRAM-based scheduling remain enabled. On multi-GPU Windows systems,
+validate the CUDA/NVML device order before relying on per-GPU placement.
 
 ## Manual Setup
 
@@ -115,6 +144,7 @@ Key variables in `.env` (see `.env.example` for the full list):
 | `JWT_SECRET` | *(generated)* | Secret for signing JWT tokens. If empty, regenerated on every restart (invalidates sessions). |
 | `POSTGRES_PASSWORD` | `change_me_in_production` | PostgreSQL password |
 | `AI_MODELS_ROOT` | `/docker/ai-models` | Host path for model storage |
+| `ACESTEP_ROOT` | `/docker/ACE-Step-1.5` | Host checkout and outputs for ACE-Step |
 | `DEFAULT_GPU_INDEX` | `1` | Preferred GPU for loading models |
 | `VLLM_GPU_MEMORY_UTILIZATION` | `0.85` | Fraction of VRAM vLLM reserves (0.0-1.0) |
 | `IDLE_TIMEOUT_SECONDS` | `300` | Seconds before unloading idle models |
@@ -124,10 +154,11 @@ Key variables in `.env` (see `.env.example` for the full list):
 
 ### Changing the model storage path
 
-The default `docker-compose.yml` mounts `/docker/ai-models/ocabra` into containers. To use a different path:
+The Compose file uses `AI_MODELS_ROOT` for every model/cache bind mount. To use
+a different path, set it in `.env` before starting the stack:
 
 1. Set `AI_MODELS_ROOT` in `.env`
-2. Update the volume paths in `docker-compose.yml` to match
+2. Run `docker compose up -d` again; no Compose edit is required
 
 ## First Steps After Install
 

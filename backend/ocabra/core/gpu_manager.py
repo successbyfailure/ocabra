@@ -99,8 +99,18 @@ class GPUManager:
     def _read_gpu(self, index: int) -> GPUState:
         handle = pynvml.nvmlDeviceGetHandleByIndex(index)
         mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+        # WSL2 exposes the VRAM counters needed by the scheduler, but some
+        # driver builds omit optional utilization and temperature queries.
+        try:
+            utilization_pct = float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+        except pynvml.NVMLError:
+            utilization_pct = 0.0
+        try:
+            temperature_c = float(
+                pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            )
+        except pynvml.NVMLError:
+            temperature_c = 0.0
         try:
             power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)
             power_limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
@@ -120,8 +130,8 @@ class GPUManager:
             total_vram_mb=mem.total // (1024 * 1024),
             free_vram_mb=mem.free // (1024 * 1024),
             used_vram_mb=mem.used // (1024 * 1024),
-            utilization_pct=float(util.gpu),
-            temperature_c=float(temp),
+            utilization_pct=utilization_pct,
+            temperature_c=temperature_c,
             power_draw_w=power_w,
             power_limit_w=power_limit_w,
             locked_vram_mb=locked,

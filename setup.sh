@@ -1,18 +1,10 @@
 #!/usr/bin/env bash
-# oCabra — First-run installation script
-# Usage: bash setup.sh
-# Safe to run multiple times (idempotent).
+# oCabra — first-run installation for Linux and Windows/WSL2.
+# Usage: bash setup.sh [--with-services]
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Colors & helpers
-# ---------------------------------------------------------------------------
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -23,224 +15,212 @@ fatal() { err "$@"; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ---------------------------------------------------------------------------
-# 1. Check prerequisites
-# ---------------------------------------------------------------------------
-echo -e "\n${BOLD}=== oCabra Setup ===${NC}\n"
+WITH_SERVICES=false
+for arg in "$@"; do
+    case "$arg" in
+        --with-services) WITH_SERVICES=true ;;
+        -h|--help)
+            echo "Usage: bash setup.sh [--with-services]"
+            echo "  --with-services  Build and start optional UI/model services whose sources exist."
+            exit 0
+            ;;
+        *) fatal "Unknown option: $arg" ;;
+    esac
+done
 
-info "Checking prerequisites..."
-
-# Docker
-if ! command -v docker &>/dev/null; then
-    fatal "Docker is not installed. See https://docs.docker.com/engine/install/"
+IS_WSL=false
+if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+    IS_WSL=true
 fi
+
+env_value() {
+    local key="$1"
+    awk -v key="$key" 'index($0, key "=") == 1 {sub(/^[^=]*=/, ""); value=$0} END {print value}' .env
+}
+
+set_env_value() {
+    local key="$1" value="$2" tmp_file
+    tmp_file="$(mktemp "./.env.XXXXXX")"
+    awk -v key="$key" -v value="$value" '
+        BEGIN {found=0}
+        index($0, key "=") == 1 {if (!found) print key "=" value; found=1; next}
+        {print}
+        END {if (!found) print key "=" value}
+    ' .env >"$tmp_file"
+    chmod --reference=.env "$tmp_file" 2>/dev/null || true
+    mv "$tmp_file" .env
+}
+
+random_hex() {
+    local bytes="${1:-32}"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "import secrets; print(secrets.token_hex(${bytes}))"
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex "$bytes"
+    else
+        head -c "$bytes" /dev/urandom | od -An -tx1 | tr -d ' \n'
+    fi
+}
+
+urlencode() {
+    local value="$1"
+    if command -v python3 >/dev/null 2>&1; then
+        VALUE_TO_ENCODE="$value" python3 -c \
+            'import os, urllib.parse; print(urllib.parse.quote(os.environ["VALUE_TO_ENCODE"], safe=""))'
+    else
+        printf '%s' "$value"
+    fi
+}
+
+echo -e "\n${BOLD}=== oCabra Setup ===${NC}\n"
+if $IS_WSL; then
+    info "WSL2 detected; enabling Windows-compatible installation defaults."
+fi
+
+command -v docker >/dev/null 2>&1 || fatal "Docker is not installed. See https://docs.docker.com/engine/install/"
+docker info >/dev/null 2>&1 || fatal "The Docker daemon is not reachable. Start Docker Desktop or Docker Engine."
 ok "Docker found: $(docker --version)"
 
-# Docker Compose (plugin or standalone)
-if docker compose version &>/dev/null; then
-    COMPOSE="docker compose"
-    ok "Docker Compose found: $(docker compose version --short)"
-elif command -v docker-compose &>/dev/null; then
-    COMPOSE="docker-compose"
-    ok "Docker Compose found: $(docker-compose --version)"
-else
-    fatal "Docker Compose is not installed. See https://docs.docker.com/compose/install/"
+docker compose version >/dev/null 2>&1 \
+    || fatal "Docker Compose v2.30+ is required. See https://docs.docker.com/compose/install/"
+COMPOSE=(docker compose)
+COMPOSE_VERSION="$(docker compose version --short | sed 's/^v//')"
+if [ "$(printf '%s\n' 2.30.0 "$COMPOSE_VERSION" | sort -V | head -1)" != "2.30.0" ]; then
+    fatal "Docker Compose 2.30+ is required for portable GPU requests (found ${COMPOSE_VERSION})."
 fi
+ok "Docker Compose found: ${COMPOSE_VERSION}"
+command -v curl >/dev/null 2>&1 || fatal "curl is required by the setup health check."
 
-# NVIDIA driver
-if ! command -v nvidia-smi &>/dev/null; then
-    fatal "nvidia-smi not found. Install NVIDIA drivers first."
+# WSL exposes the Windows driver here even when nvidia-smi is not on PATH.
+NVIDIA_SMI="$(command -v nvidia-smi || true)"
+if [ -z "$NVIDIA_SMI" ] && [ -x /usr/lib/wsl/lib/nvidia-smi ]; then
+    NVIDIA_SMI=/usr/lib/wsl/lib/nvidia-smi
 fi
-ok "NVIDIA driver: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
+[ -n "$NVIDIA_SMI" ] || fatal "nvidia-smi not found. Install or update the NVIDIA host driver first."
+ok "NVIDIA driver: $($NVIDIA_SMI --query-gpu=driver_version --format=csv,noheader | head -1)"
 
-# NVIDIA Container Toolkit
-if ! docker info 2>/dev/null | grep -qi "nvidia\|Runtimes.*nvidia"; then
-    if [ -f /usr/bin/nvidia-container-runtime ] || [ -f /usr/bin/nvidia-container-toolkit ]; then
-        warn "NVIDIA Container Toolkit is installed but may not be configured as a Docker runtime."
-        warn "Run: sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
-    else
-        fatal "NVIDIA Container Toolkit not found. See https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
+# Test the capability instead of looking for Linux-specific toolkit files.
+GPU_TEST_IMAGE="${OCABRA_GPU_TEST_IMAGE:-nvidia/cuda:12.4.1-base-ubuntu22.04}"
+info "Checking CUDA access from a Linux container..."
+if ! docker run --rm --gpus all "$GPU_TEST_IMAGE" nvidia-smi >/dev/null 2>&1; then
+    if $IS_WSL; then
+        fatal "Docker cannot access the GPU. Update WSL and the Windows NVIDIA driver, then enable Docker Desktop's WSL2 backend."
     fi
+    fatal "Docker cannot access the GPU. Check NVIDIA Container Toolkit configuration."
 fi
-ok "NVIDIA Container Toolkit available"
+ok "CUDA is available inside Docker"
 
-# Show GPU info
-echo ""
 info "Detected GPUs:"
-nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader | while IFS= read -r line; do
+$NVIDIA_SMI --query-gpu=index,name,memory.total --format=csv,noheader | while IFS= read -r line; do
     echo "      GPU $line"
 done
-echo ""
 
-# ---------------------------------------------------------------------------
-# 2. Create required directories
-# ---------------------------------------------------------------------------
-info "Creating data directories..."
-
-# Default AI models root (can be overridden in .env)
-AI_MODELS_ROOT="${AI_MODELS_ROOT:-/docker/ai-models}"
-
-dirs=(
-    "./data/postgres_data"
-    "./caddy/caddy_data"
-    "./caddy/caddy_config"
-    "${AI_MODELS_ROOT}/ocabra/models"
-    "${AI_MODELS_ROOT}/ocabra/hf_cache"
-    "${AI_MODELS_ROOT}/ollama"
-)
-
-for d in "${dirs[@]}"; do
-    if [ ! -d "$d" ]; then
-        mkdir -p "$d"
-        ok "Created $d"
-    else
-        ok "Exists  $d"
-    fi
-done
-
-# ---------------------------------------------------------------------------
-# 3. Generate .env from .env.example
-# ---------------------------------------------------------------------------
-if [ -f .env ]; then
-    ok ".env already exists (not overwriting)"
-else
-    if [ ! -f .env.example ]; then
-        fatal ".env.example not found in project root"
-    fi
-
-    info "Creating .env from .env.example..."
+# Create configuration before resolving host paths so .env is authoritative.
+ENV_CREATED=false
+if [ ! -f .env ]; then
     cp .env.example .env
+    ENV_CREATED=true
+    ok ".env created from .env.example"
+fi
 
-    # Generate a stable JWT_SECRET
-    JWT_SECRET="$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null \
-                 || openssl rand -hex 32 2>/dev/null \
-                 || head -c 32 /dev/urandom | xxd -p | tr -d '\n')"
+if $IS_WSL; then
+    if [ "$(env_value AI_MODELS_ROOT)" = "/docker/ai-models" ]; then
+        set_env_value AI_MODELS_ROOT "${HOME}/.local/share/ocabra/ai-models"
+    fi
+    if [ -z "$(env_value ACESTEP_ROOT)" ] || [ "$(env_value ACESTEP_ROOT)" = "/docker/ACE-Step-1.5" ]; then
+        set_env_value ACESTEP_ROOT "${HOME}/.local/share/ocabra/ACE-Step-1.5"
+    fi
+    set_env_value THERMAL_CAP_ENABLED false
+    set_env_value GPU_THROTTLE_ENABLED false
+fi
 
-    # Generate a gateway service token
-    GATEWAY_TOKEN="$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null \
-                     || openssl rand -hex 32 2>/dev/null \
-                     || head -c 32 /dev/urandom | xxd -p | tr -d '\n')"
+[ -n "$(env_value JWT_SECRET)" ] || set_env_value JWT_SECRET "$(random_hex 32)"
+[ -n "$(env_value GATEWAY_SERVICE_TOKEN)" ] || set_env_value GATEWAY_SERVICE_TOKEN "$(random_hex 32)"
 
-    # Write secrets into .env (append to the auth section)
-    {
-        echo ""
-        echo "# --- Generated by setup.sh ---"
-        echo "JWT_SECRET=${JWT_SECRET}"
-        echo "GATEWAY_SERVICE_TOKEN=${GATEWAY_TOKEN}"
-    } >> .env
-
-    ok ".env created with generated secrets"
-
-    # Prompt for optional customization
-    echo ""
+if $ENV_CREATED && [ -t 0 ]; then
     read -rp "$(echo -e "${CYAN}Admin username${NC} [ocabra]: ")" admin_user
-    admin_user="${admin_user:-ocabra}"
-
-    read -rp "$(echo -e "${CYAN}Admin password${NC} [ocabra]: ")" admin_pass
-    admin_pass="${admin_pass:-ocabra}"
-
-    read -rp "$(echo -e "${CYAN}PostgreSQL password${NC} [change_me_in_production]: ")" pg_pass
-    pg_pass="${pg_pass:-change_me_in_production}"
-
-    # Apply values
-    sed -i "s|^OCABRA_ADMIN_USER=.*|OCABRA_ADMIN_USER=${admin_user}|" .env 2>/dev/null || true
-    sed -i "s|^OCABRA_ADMIN_PASS=.*|OCABRA_ADMIN_PASS=${admin_pass}|" .env 2>/dev/null || true
-    # Commented out in .env.example, so append if not already set
-    if ! grep -q "^OCABRA_ADMIN_USER=" .env; then
-        echo "OCABRA_ADMIN_USER=${admin_user}" >> .env
-    fi
-    if ! grep -q "^OCABRA_ADMIN_PASS=" .env; then
-        echo "OCABRA_ADMIN_PASS=${admin_pass}" >> .env
-    fi
-
-    if [ "$pg_pass" != "change_me_in_production" ]; then
-        sed -i "s|change_me_in_production|${pg_pass}|g" .env
-    fi
-
-    ok "Configuration applied"
+    set_env_value OCABRA_ADMIN_USER "${admin_user:-ocabra}"
+    read -rsp "$(echo -e "${CYAN}Admin password${NC} [generated]: ")" admin_pass
+    echo
+    set_env_value OCABRA_ADMIN_PASS "${admin_pass:-$(random_hex 16)}"
 fi
 
-# ---------------------------------------------------------------------------
-# 4. Determine which services to build
-# ---------------------------------------------------------------------------
-# Core services that always run
-CORE_SERVICES="api frontend postgres redis caddy"
-
-# Optional GPU services — only include if their build context exists
-OPTIONAL_SERVICES=""
-
-if [ -d "./Hunyuan3D-2.1" ]; then
-    OPTIONAL_SERVICES="$OPTIONAL_SERVICES hunyuan"
+POSTGRES_USER="$(env_value POSTGRES_USER)"; POSTGRES_USER="${POSTGRES_USER:-ocabra}"
+POSTGRES_DB="$(env_value POSTGRES_DB)"; POSTGRES_DB="${POSTGRES_DB:-ocabra}"
+POSTGRES_PASSWORD="$(env_value POSTGRES_PASSWORD)"
+if [ -z "$POSTGRES_PASSWORD" ] || [ "$POSTGRES_PASSWORD" = "change_me_in_production" ]; then
+    POSTGRES_PASSWORD="$(random_hex 24)"
+    set_env_value POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
 fi
-if [ -d "./services/comfyui" ]; then
-    OPTIONAL_SERVICES="$OPTIONAL_SERVICES comfyui"
+ENCODED_POSTGRES_PASSWORD="$(urlencode "$POSTGRES_PASSWORD")"
+set_env_value DATABASE_URL \
+    "postgresql+asyncpg://${POSTGRES_USER}:${ENCODED_POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+
+AI_MODELS_ROOT="$(env_value AI_MODELS_ROOT)"; AI_MODELS_ROOT="${AI_MODELS_ROOT:-/docker/ai-models}"
+ACESTEP_ROOT="$(env_value ACESTEP_ROOT)"; ACESTEP_ROOT="${ACESTEP_ROOT:-/docker/ACE-Step-1.5}"
+
+info "Creating data directories..."
+dirs=(
+    ./data/postgres_data ./data/openai_files ./data/image_outputs ./data/ollama
+    ./caddy/caddy_data ./caddy/caddy_config
+    "$AI_MODELS_ROOT/ocabra/models" "$AI_MODELS_ROOT/ocabra/hf_cache"
+    "$AI_MODELS_ROOT/ollama" "$ACESTEP_ROOT/checkpoints"
+)
+for directory in "${dirs[@]}"; do
+    mkdir -p "$directory" || fatal "Cannot create $directory; choose writable AI_MODELS_ROOT/ACESTEP_ROOT paths in .env."
+done
+ok "Data directories ready"
+
+"${COMPOSE[@]}" config -q || fatal "docker-compose.yml is not valid with the current .env."
+
+CORE_SERVICES=(api frontend postgres redis hw-monitor ollama caddy)
+BUILD_SERVICES=(api frontend hw-monitor ollama)
+START_SERVICES=("${CORE_SERVICES[@]}")
+
+if $WITH_SERVICES; then
+    START_SERVICES+=(gateway unsloth-studio)
+    BUILD_SERVICES+=(gateway)
+    if [ -d ./TRELLIS.2 ]; then START_SERVICES+=(trellis2); BUILD_SERVICES+=(trellis2); fi
+    if [ -d ./services/comfyui ]; then START_SERVICES+=(comfyui); BUILD_SERVICES+=(comfyui); fi
+    if [ -d ./services/a1111 ]; then START_SERVICES+=(a1111); BUILD_SERVICES+=(a1111); fi
+    if [ -f "$ACESTEP_ROOT/Dockerfile" ]; then START_SERVICES+=(acestep); BUILD_SERVICES+=(acestep); fi
 fi
-if [ -d "./services/a1111" ]; then
-    OPTIONAL_SERVICES="$OPTIONAL_SERVICES a1111"
-fi
 
-# Build only available services
-BUILD_SERVICES="$CORE_SERVICES $OPTIONAL_SERVICES"
-
-info "Services to build: ${BUILD_SERVICES}"
-
-# ---------------------------------------------------------------------------
-# 5. Build
-# ---------------------------------------------------------------------------
-echo ""
-info "Building Docker images (this may take a while on first run)..."
-$COMPOSE build $BUILD_SERVICES
-
+info "Building Docker images: ${BUILD_SERVICES[*]}"
+"${COMPOSE[@]}" build "${BUILD_SERVICES[@]}"
 ok "Docker images built"
 
-# ---------------------------------------------------------------------------
-# 6. Start
-# ---------------------------------------------------------------------------
-echo ""
-info "Starting oCabra..."
-$COMPOSE up -d $BUILD_SERVICES ollama gateway
-
+info "Starting oCabra services: ${START_SERVICES[*]}"
+"${COMPOSE[@]}" up -d "${START_SERVICES[@]}"
 ok "Containers started"
 
-# ---------------------------------------------------------------------------
-# 7. Wait for health check
-# ---------------------------------------------------------------------------
 info "Waiting for API to become healthy..."
-
-MAX_WAIT=120
-ELAPSED=0
-while [ $ELAPSED -lt $MAX_WAIT ]; do
-    if curl -sf http://localhost:8484/health >/dev/null 2>&1; then
-        break
-    fi
+MAX_WAIT=120; ELAPSED=0
+while [ "$ELAPSED" -lt "$MAX_WAIT" ]; do
+    if curl -sf http://localhost:8484/health >/dev/null 2>&1; then break; fi
     sleep 3
     ELAPSED=$((ELAPSED + 3))
-    printf "."
+    printf '.'
 done
-echo ""
+echo
 
-if [ $ELAPSED -ge $MAX_WAIT ]; then
-    warn "API did not become healthy within ${MAX_WAIT}s. Check logs with: docker compose logs api"
-else
-    ok "API is healthy"
+if [ "$ELAPSED" -ge "$MAX_WAIT" ]; then
+    err "API did not become healthy within ${MAX_WAIT}s."
+    "${COMPOSE[@]}" ps
+    fatal "Inspect logs with: docker compose logs api hw-monitor"
+fi
+ok "API is healthy"
+
+if $IS_WSL; then
+    warn "WSL2 GPU inference is enabled, but power limits and thermal caps are disabled."
+    warn "Validate GPU ordering before relying on per-GPU placement on a multi-GPU Windows host."
 fi
 
-# ---------------------------------------------------------------------------
-# 8. Summary
-# ---------------------------------------------------------------------------
-echo ""
-echo -e "${BOLD}=== oCabra is running ===${NC}"
-echo ""
-echo -e "  Dashboard:    ${GREEN}http://localhost:8484${NC}"
-echo -e "  OpenAI API:   ${GREEN}http://localhost:8484/v1${NC}"
-echo -e "  Ollama API:   ${GREEN}http://localhost:8484/api${NC}"
-echo -e "  API docs:     ${GREEN}http://localhost:8484/docs${NC}"
-echo ""
-echo -e "  Admin user:   ${CYAN}$(grep '^OCABRA_ADMIN_USER=' .env 2>/dev/null | cut -d= -f2 || echo 'ocabra')${NC}"
-echo -e "  Admin pass:   ${CYAN}(as configured in .env)${NC}"
-echo ""
-echo -e "  Useful commands:"
-echo -e "    ${BOLD}docker compose logs -f api${NC}      Follow API logs"
-echo -e "    ${BOLD}docker compose ps${NC}               Show running services"
-echo -e "    ${BOLD}docker compose down${NC}             Stop all services"
-echo ""
+echo -e "\n${BOLD}=== oCabra is running ===${NC}\n"
+echo -e "  Dashboard:  ${GREEN}http://localhost:8484${NC}"
+echo -e "  OpenAI API: ${GREEN}http://localhost:8484/v1${NC}"
+echo -e "  Ollama API: ${GREEN}http://localhost:8484/api${NC}"
+echo -e "  API docs:   ${GREEN}http://localhost:8484/docs${NC}\n"
+echo -e "  ${BOLD}docker compose logs -f api${NC}   Follow API logs"
+echo -e "  ${BOLD}docker compose ps${NC}            Show running services"
+echo -e "  ${BOLD}docker compose down${NC}          Stop all services\n"

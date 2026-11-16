@@ -8,7 +8,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile.slim
     image: ocabra-api:slim
-    runtime: nvidia
+    gpus: all
     ipc: host
     shm_size: "8gb"
     environment:
@@ -68,8 +68,8 @@ services:
 #    ports:
 #      - "8000:8000"
     volumes:
-      - /docker/ai-models/ocabra/models:/data/models
-      - /docker/ai-models/ocabra/hf_cache:/data/hf_cache
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models:/data/models
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/hf_cache:/data/hf_cache
       - ./data/openai_files:/data/openai_files
       - ./data/image_outputs:/data/image_outputs
       - backends_data:/data/backends
@@ -77,7 +77,7 @@ services:
       # can surface Ollama-pulled GGUFs as llama.cpp candidates without a
       # second download. Disabled by default (no OLLAMA_SHARED_MODELS_DIR);
       # set to /data/ollama_models in .env to enable.
-      - /docker/ai-models/ollama/models:/data/ollama_models:ro
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ollama/models:/data/ollama_models:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker-compose.yml:/opt/ocabra/docker-compose.yml:ro
       - ./.env:/opt/ocabra/.env:ro
@@ -98,17 +98,17 @@ services:
       - ./services:/opt/ocabra/services:ro
       # TRELLIS.2 + ACE-Step are external repos used as compose build
       # contexts (paths declared in docker-compose.yml: ./TRELLIS.2 and
-      # /docker/ACE-Step-1.5). The api needs to see them at the same path
+      # ${ACESTEP_ROOT}. The api needs to see it at the same path
       # so `docker compose up -d <service>` finds the build context.
       - ./TRELLIS.2:/opt/ocabra/TRELLIS.2:ro
-      - /docker/ACE-Step-1.5:/docker/ACE-Step-1.5:ro
+      - ${ACESTEP_ROOT:-/docker/ACE-Step-1.5}:${ACESTEP_ROOT:-/docker/ACE-Step-1.5}:ro
       # ACE-Step weights checkpoint dir (~11 GB) is mounted into the modular
       # install path so the cloned src/ tree finds them where the acestep
       # server expects (<project_root>/checkpoints/). Avoids re-downloading
       # at first generation. NOT read-only — ACE-Step writes minor config
       # syncs (configuration_*.py) into the checkpoint subdirs on first
       # init. Bloque 15 — 2026-04-25.
-      - /docker/ACE-Step-1.5/checkpoints:/data/backends/acestep/src/checkpoints
+      - ${ACESTEP_ROOT:-/docker/ACE-Step-1.5}/checkpoints:/data/backends/acestep/src/checkpoints
     depends_on:
       postgres:
         condition: service_healthy
@@ -159,11 +159,12 @@ services:
       context: ./hw-monitor
       dockerfile: Dockerfile
     privileged: true
-    runtime: nvidia
+    gpus: all
     environment:
       REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql+asyncpg://ocabra:${POSTGRES_PASSWORD:-ocabra}@postgres:5432/ocabra
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://ocabra:ocabra@postgres:5432/ocabra}
       NVIDIA_VISIBLE_DEVICES: all
+      THERMAL_CAP_ENABLED: ${THERMAL_CAP_ENABLED:-true}
     volumes:
       - /sys/class/powercap:/sys/class/powercap:ro
       - /sys/class/hwmon:/sys/class/hwmon:ro
@@ -191,7 +192,7 @@ services:
       context: .
       dockerfile: Dockerfile.ollama
     image: ocabra-ollama:latest
-    runtime: nvidia
+    gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
@@ -212,7 +213,7 @@ services:
       - path: ./data/ollama/ollama.env
         required: false
     volumes:
-      - /docker/ai-models/ollama:/root/.ollama
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ollama:/root/.ollama
     # Solo desde el propio host. oCabra habla con Ollama por la red de compose
     # (http://ollama:11434) y lo protege con claves, grupos y estadísticas;
     # publicado en todas las interfaces, cualquiera de la red usaba, descargaba
@@ -234,7 +235,7 @@ services:
               "--cache-path", "./gradio_cache",
               "--root-path", "${TRELLIS2_ROOT_PATH:-}",
               "--public-url", "${TRELLIS2_UI_URL:-}"]
-    runtime: nvidia
+    gpus: all
     environment:
       # NOT "all": CUDA orders GPUs by "fastest first" inside the container
       # (cuda:0=3090, cuda:1=3060) while oCabra's own NVML-based indexing
@@ -266,8 +267,8 @@ services:
       GATEWAY_SERVICE_TOKEN: ${GATEWAY_SERVICE_TOKEN:-}
       OCABRA_SERVICE_ID: trellis2
     volumes:
-      - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
-      - /docker/ai-models/ocabra/models/trellis2:/workspace/TRELLIS.2/gradio_cache
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/hf_cache:/root/.cache/huggingface
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/trellis2:/workspace/TRELLIS.2/gradio_cache
     ports:
       - "${TRELLIS2_PORT:-8481}:8080"
     healthcheck:
@@ -283,21 +284,21 @@ services:
     build:
       context: ./services/comfyui
       dockerfile: Dockerfile
-    runtime: nvidia
+    gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       HF_HOME: /root/.cache/huggingface
       HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
     volumes:
-      - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
-      - /docker/ai-models/ocabra/models/image/checkpoints:/opt/ComfyUI/models/checkpoints
-      - /docker/ai-models/ocabra/models/image/vae:/opt/ComfyUI/models/vae
-      - /docker/ai-models/ocabra/models/image/loras:/opt/ComfyUI/models/loras
-      - /docker/ai-models/ocabra/models/image/embeddings:/opt/ComfyUI/models/embeddings
-      - /docker/ai-models/ocabra/models/image/controlnet:/opt/ComfyUI/models/controlnet
-      - /docker/ai-models/ocabra/models/image/upscalers:/opt/ComfyUI/models/upscale_models
-      - /docker/ai-models/ocabra/models/comfyui:/opt/ComfyUI/user
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/hf_cache:/root/.cache/huggingface
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/checkpoints:/opt/ComfyUI/models/checkpoints
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/vae:/opt/ComfyUI/models/vae
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/loras:/opt/ComfyUI/models/loras
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/embeddings:/opt/ComfyUI/models/embeddings
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/controlnet:/opt/ComfyUI/models/controlnet
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/upscalers:/opt/ComfyUI/models/upscale_models
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/comfyui:/opt/ComfyUI/user
     ports:
       - "${COMFYUI_PORT:-8188}:8188"
     healthcheck:
@@ -313,7 +314,7 @@ services:
     build:
       context: ./services/a1111
       dockerfile: Dockerfile
-    runtime: nvidia
+    gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
@@ -322,14 +323,14 @@ services:
       HUGGINGFACE_HUB_CACHE: /home/a1111/.cache/huggingface/hub
       COMMANDLINE_ARGS: --listen --api --port 7860 --skip-torch-cuda-test --enable-insecure-extension-access
     volumes:
-      - /docker/ai-models/ocabra/hf_cache:/home/a1111/.cache/huggingface
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/hf_cache:/home/a1111/.cache/huggingface
       - a1111_venv:/opt/stable-diffusion-webui/venv
-      - /docker/ai-models/ocabra/models/image/checkpoints:/opt/stable-diffusion-webui/models/Stable-diffusion
-      - /docker/ai-models/ocabra/models/image/vae:/opt/stable-diffusion-webui/models/VAE
-      - /docker/ai-models/ocabra/models/image/loras:/opt/stable-diffusion-webui/models/Lora
-      - /docker/ai-models/ocabra/models/image/embeddings:/opt/stable-diffusion-webui/embeddings
-      - /docker/ai-models/ocabra/models/image/upscalers:/opt/stable-diffusion-webui/models/ESRGAN
-      - /docker/ai-models/ocabra/models/a1111:/opt/stable-diffusion-webui/config_states
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/checkpoints:/opt/stable-diffusion-webui/models/Stable-diffusion
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/vae:/opt/stable-diffusion-webui/models/VAE
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/loras:/opt/stable-diffusion-webui/models/Lora
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/embeddings:/opt/stable-diffusion-webui/embeddings
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/upscalers:/opt/stable-diffusion-webui/models/ESRGAN
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/a1111:/opt/stable-diffusion-webui/config_states
       - ./services/a1111/ocabra-free-memory:/opt/stable-diffusion-webui/extensions/ocabra-free-memory
     ports:
       - "${A1111_PORT:-7860}:7860"
@@ -344,11 +345,11 @@ services:
   acestep:
     profiles: ["services"]
     build:
-      context: /docker/ACE-Step-1.5
+      context: ${ACESTEP_ROOT:-/docker/ACE-Step-1.5}
       dockerfile: Dockerfile
     image: acestep:latest
     container_name: ocabra-acestep-1
-    runtime: nvidia
+    gpus: all
     ipc: host
     shm_size: "2gb"
     environment:
@@ -372,10 +373,10 @@ services:
       - path: .env
         required: false
     volumes:
-      - /docker/ai-models/ocabra/hf_cache:/root/.cache/huggingface
-      - /docker/ACE-Step-1.5/checkpoints:/app/checkpoints
-      - /docker/ACE-Step-1.5/gradio_outputs:/app/gradio_outputs
-      - /docker/ACE-Step-1.5/lora_output:/app/lora_output
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/hf_cache:/root/.cache/huggingface
+      - ${ACESTEP_ROOT:-/docker/ACE-Step-1.5}/checkpoints:/app/checkpoints
+      - ${ACESTEP_ROOT:-/docker/ACE-Step-1.5}/gradio_outputs:/app/gradio_outputs
+      - ${ACESTEP_ROOT:-/docker/ACE-Step-1.5}/lora_output:/app/lora_output
     ports:
       # Gradio mode (default): port 7860
       - "${ACESTEP_GRADIO_PORT:-7862}:7860"
@@ -396,7 +397,7 @@ services:
     profiles: ["services"]
     image: ${UNSLOTH_IMAGE:-unsloth/unsloth:latest}
     container_name: ocabra-unsloth-studio-1
-    runtime: nvidia
+    gpus: all
     ipc: host
     shm_size: "4gb"
     environment:
@@ -410,8 +411,8 @@ services:
       HUGGINGFACE_HUB_CACHE: /workspace/work/hf_cache/hub
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
-      - /docker/ai-models/ocabra/unsloth/work:/workspace/work
-      - /docker/ai-models/ocabra/unsloth/exports:/workspace/exports
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/unsloth/work:/workspace/work
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/unsloth/exports:/workspace/exports
     ports:
       # Unsloth Studio UI (entrypoint principal: training + chat + export)
       - "${UNSLOTH_STUDIO_PORT:-8889}:8000"

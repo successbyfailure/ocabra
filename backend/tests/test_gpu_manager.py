@@ -2,6 +2,7 @@ import asyncio
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pynvml
 import pytest
 
 from ocabra.core.gpu_manager import GPUManager
@@ -62,6 +63,28 @@ async def test_start_detects_gpus():
         assert len(states) == 2
         assert states[0].index == 0
         assert states[1].index == 1
+
+
+def test_read_gpu_keeps_vram_when_optional_nvml_metrics_are_unavailable():
+    """WSL2 may expose memory while rejecting optional NVML telemetry."""
+    patches = _make_mock_nvml(gpu_count=1, free_mb=10000, used_mb=2000)
+    patches["pynvml.nvmlDeviceGetUtilizationRates"] = MagicMock(
+        side_effect=pynvml.NVMLError_NotSupported()
+    )
+    patches["pynvml.nvmlDeviceGetTemperature"] = MagicMock(
+        side_effect=pynvml.NVMLError_NotSupported()
+    )
+
+    with ExitStack() as stack:
+        for key, value in patches.items():
+            stack.enter_context(patch(key, value))
+
+        state = GPUManager()._read_gpu(0)
+
+    assert state.free_vram_mb == 10000
+    assert state.used_vram_mb == 2000
+    assert state.utilization_pct == 0.0
+    assert state.temperature_c == 0.0
 
 
 @pytest.mark.asyncio
