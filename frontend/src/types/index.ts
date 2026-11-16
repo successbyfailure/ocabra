@@ -1787,6 +1787,12 @@ export interface FederationPeer {
   join_verification_code: string | null;
   /** The peer's privacy mode (heartbeat); null from nodes older than 0.92.1. */
   privacy_mode?: "functional" | "zero_data" | null;
+  /** «rules» mode: our adjustments for this peer over the node defaults. */
+  rules?: Partial<FederationRules> | null;
+  /** What we apply to it (null = everything allowed: swarm). */
+  effective_rules?: FederationRules | null;
+  /** What it applies to us (its heartbeat). */
+  their_rules?: FederationRules | null;
   dial_state: string | null;
   last_error: string | null;
   tunnel_connected: boolean;
@@ -1983,6 +1989,34 @@ export interface FederationPeerUpdate {
   access_level?: "inference" | "full";
   enabled?: boolean;
   notes?: string | null;
+  mode?: "swarm" | "rules";
+  rules?: Partial<FederationRules> | null;
+}
+
+/** «Mi servidor, mis reglas»: what a peer in rules mode may do on a node. */
+export interface FederationRules {
+  local_first: boolean;
+  allow_loads: boolean;
+  allow_evict: boolean;
+  max_requests_per_hour: number | null;
+  max_wh_per_month: number | null;
+  allow_downloads: boolean;
+  allow_admin: boolean;
+  offered_models: string[] | null;
+  hours: [number, number] | null;
+}
+
+export interface FederationNodeRules {
+  base: Partial<FederationRules>;
+  defaults: Partial<FederationRules>;
+  effective: FederationRules;
+}
+
+export interface FederationRulesUsage {
+  requests_last_hour: number;
+  max_requests_per_hour: number | null;
+  wh_this_month: number;
+  max_wh_per_month: number | null;
 }
 
 export interface FederationTestResult {

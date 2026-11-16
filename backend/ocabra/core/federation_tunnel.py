@@ -319,6 +319,9 @@ class LocalServer:
     api_key: Callable[[], str | None]
     access_level: Callable[[], str]
     node_id: str = ""
+    # «Mi servidor, mis reglas» (core/federation_rules.py): (method, path, body)
+    # → (status, body) to refuse the request, or None to serve it.
+    gate: Callable[[str, str, bytes], Awaitable[tuple[int, dict[str, Any]] | None]] | None = None
 
 
 class TunnelConnection:
@@ -468,6 +471,11 @@ class TunnelConnection:
                     stream_id, 403, {"detail": f"path not offered to the federation: {path}"}
                 )
                 return
+            if server.gate is not None:
+                refusal = await server.gate(method, path, bytes(st.body))
+                if refusal is not None:
+                    await self._reply(stream_id, refusal[0], refusal[1])
+                    return
             headers = [
                 (str(k), str(v))
                 for k, v in st.head.get("headers", [])

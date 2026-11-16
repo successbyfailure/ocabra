@@ -29,6 +29,7 @@ from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
 from ocabra.core.federation import PeerState, new_tunnel_token
 from ocabra.schemas.federation import (
+    FederationRules,
     HeartbeatGpu,
     HeartbeatLoad,
     HeartbeatModel,
@@ -48,6 +49,13 @@ from ocabra.schemas.federation import (
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["federation"])
+
+
+def _effective_rules_out(p: PeerState) -> dict | None:
+    from ocabra.core.federation_rules import ALL_ALLOWED, effective_rules
+
+    rules = effective_rules(p)
+    return None if rules == ALL_ALLOWED else rules.to_dict()
 
 
 def _peer_out(p: PeerState, cls: type[PeerOut] = PeerOut, **extra) -> PeerOut:
@@ -83,6 +91,9 @@ def _peer_out(p: PeerState, cls: type[PeerOut] = PeerOut, **extra) -> PeerOut:
         join_state=p.join_state,
         join_verification_code=p.join_verification_code,
         privacy_mode=p.privacy_mode,
+        rules=p.rules,
+        effective_rules=_effective_rules_out(p),
+        their_rules=p.their_rules,
         dial_state=dialer.state if dialer is not None else None,
         last_error=dialer.last_error if dialer is not None else None,
         requests_proxied=p.requests_proxied,
@@ -205,10 +216,24 @@ async def heartbeat(
     cuda = await _asyncio.to_thread(probe_cuda)
 
     from ocabra.core import privacy
+    from ocabra.core.federation_rules import ALL_ALLOWED
+
+    # «Mi servidor, mis reglas»: the caller sees the rules we apply to it, and
+    # only the models offered to it (so it doesn't send what we'd refuse).
+    rules = fm.rules_for_user(getattr(_user, "user_id", None))
+    rules_out = None
+    if rules is not None and rules != ALL_ALLOWED:
+        rules_out = rules.to_dict()
+        if rules.offered_models is not None:
+            offered = set(rules.offered_models)
+            models = [
+                m for m in models if m.model_id in offered or offered & set(m.profiles or [])
+            ]
 
     return HeartbeatResponse(
         cuda=cuda,
         privacy_mode=privacy.mode(),
+        rules=rules_out,
         node_id=fm.node_id,
         node_name=fm.node_name,
         version=settings.app_version,
@@ -301,6 +326,10 @@ async def update_peer(
     """
     fm = _get_federation_manager(request)
     patch = body.model_dump(exclude_unset=True)
+    if "rules" in patch:
+        from ocabra.core.federation_rules import clean_rules
+
+        patch["rules"] = clean_rules(patch["rules"]) if patch["rules"] else None
     state = await fm.update_peer(peer_id, **patch)
     if state is None:
         raise HTTPException(status_code=404, detail=f"Peer '{peer_id}' not found")
@@ -1124,3 +1153,84 @@ async def remote_panel_proxy(
         headers=out_headers,
         background=BackgroundTask(resp.aclose),
     )
+
+
+# ── «Mi servidor, mis reglas» ────────────────────────────────────
+
+
+@router.get(
+    "/federation/rules",
+    summary="Node rules for peers in rules mode",
+    description=(
+        "«Mi servidor, mis reglas»: what peers in `rules` mode may do on this node. "
+        "`base` is where rules mode starts from, `defaults` this node's changes to it, "
+        "and `effective` the result before each peer's own adjustments."
+    ),
+)
+async def get_rules(
+    request: Request, _user: UserContext = Depends(require_role("system_admin"))
+) -> dict:
+    """Node defaults for rules mode.
+
+    Returns:
+        ``{"base": {...}, "defaults": {...}, "effective": {...}}``.
+    """
+    from ocabra.core.federation_rules import RULES_MODE_BASE, PeerRules
+
+    fm = _get_federation_manager(request)
+    return {
+        "base": RULES_MODE_BASE,
+        "defaults": fm.default_rules,
+        "effective": PeerRules.from_dict({**RULES_MODE_BASE, **fm.default_rules}).to_dict(),
+    }
+
+
+@router.put(
+    "/federation/rules",
+    summary="Set node rules for peers in rules mode",
+    description="Replace this node's default rules (fields left out fall back to the base).",
+)
+async def set_rules(
+    body: FederationRules,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Set the node defaults.
+
+    Returns:
+        The same shape as ``GET /federation/rules``.
+    """
+    fm = _get_federation_manager(request)
+    await fm.set_default_rules(body.model_dump(exclude_unset=True))
+    return await get_rules(request, _user)
+
+
+@router.get(
+    "/federation/peers/{peer_id}/rules-usage",
+    summary="What a peer in rules mode has used",
+    description="Requests in the last hour and Wh this month served to the peer, against its limits.",
+    responses={404: {"description": "Peer not found"}},
+)
+async def get_rules_usage(
+    peer_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Usage of a peer against its rules.
+
+    Returns:
+        ``{"requests_last_hour", "max_requests_per_hour", "wh_this_month", "max_wh_per_month"}``.
+    """
+    from ocabra.core import federation_rules as fr
+
+    fm = _get_federation_manager(request)
+    peer = next((p for p in fm.get_all_peers() if p.peer_id == peer_id), None)
+    if peer is None:
+        raise HTTPException(status_code=404, detail=f"Peer '{peer_id}' not found")
+    rules = fm.rules_for(peer)
+    return {
+        "requests_last_hour": fr.requests_last_hour(peer.peer_id),
+        "max_requests_per_hour": rules.max_requests_per_hour,
+        "wh_this_month": round(await fr.energy_this_month(fm, peer), 2),
+        "max_wh_per_month": rules.max_wh_per_month,
+    }

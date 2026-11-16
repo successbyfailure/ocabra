@@ -807,6 +807,9 @@ async def lifespan(app: FastAPI):
 
         federation_manager = FederationManager(settings, _ASL)
         federation_manager.gpu_manager = gpu_manager
+        # «Mi servidor, mis reglas»: what is loaded here, and public names → ids.
+        federation_manager.model_manager = model_manager
+        federation_manager.profile_registry = getattr(app.state, "profile_registry", None)
         await federation_manager.start()
         app.state.federation_manager = federation_manager
         logger.info("federation_manager_ready")

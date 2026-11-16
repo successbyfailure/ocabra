@@ -24,6 +24,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { NodeRulesCard, PeerRulesDialog, rulesSummary } from "@/components/federation/RulesEditor"
 import { CloudSection } from "@/components/federation/CloudSection"
 import { enterRemoteNode } from "@/lib/remoteNode"
 import type {
@@ -169,9 +170,11 @@ function ModePicker() {
           bajarlos.
         </p>
       </div>
-      <div className="cursor-not-allowed rounded-md border border-dashed border-border p-3 opacity-60">
-        <div className="text-sm font-medium">Mi server mis reglas</div>
-        <p className="mt-1 text-xs text-muted-foreground">Eliges qué ofreces y qué permites. Próximamente.</p>
+      <div className="rounded-md border border-dashed border-border p-3">
+        <div className="text-sm font-medium">Mi servidor, mis reglas</div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Eliges qué ofreces y qué permites. Se cambia después en la tarjeta del nodo («Le sirvo como»).
+        </p>
       </div>
     </div>
   )
@@ -587,7 +590,15 @@ function StatusPill({ peer }: { peer: FederationPeer }) {
   )
 }
 
-function PeerCard({ peer, onChanged }: { peer: FederationPeer; onChanged: () => void }) {
+function PeerCard({
+  peer,
+  onChanged,
+  onEditRules,
+}: {
+  peer: FederationPeer
+  onChanged: () => void
+  onEditRules: (peer: FederationPeer) => void
+}) {
   const [busy, setBusy] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [notes, setNotes] = useState(peer.notes ?? "")
@@ -641,6 +652,7 @@ function PeerCard({ peer, onChanged }: { peer: FederationPeer; onChanged: () => 
           {conn.icon} {conn.text}
         </Pill>
         {peer.mode === "swarm" && <Pill tone="info">enjambre</Pill>}
+        {peer.mode === "rules" && <Pill tone="info">mis reglas</Pill>}
       </div>
 
       {editing ? (
@@ -675,6 +687,43 @@ function PeerCard({ peer, onChanged }: { peer: FederationPeer; onChanged: () => 
       )}
 
       <div className="mt-3 space-y-2 text-xs">
+        {(peer.mode === "swarm" || peer.mode === "rules") && peer.local_access_level && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-muted-foreground">Le sirvo como:</span>
+            {(["swarm", "rules"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                className={`${btnCls} ${peer.mode === m ? "border-primary bg-primary/10" : ""}`}
+                disabled={busy !== null || peer.mode === m}
+                onClick={() =>
+                  void run(
+                    "mode",
+                    () => api.federation.updatePeer(peer.peer_id, { mode: m }),
+                    m === "swarm" ? "Enjambre: puede hacerlo todo" : "Ahora se sirve con tus reglas",
+                  )
+                }
+              >
+                {m === "swarm" ? "Enjambre" : "Mis reglas"}
+              </button>
+            ))}
+            {peer.mode === "rules" && (
+              <>
+                <span className="text-muted-foreground" title="Lo que le aplicas">
+                  {rulesSummary(peer.effective_rules)}
+                </span>
+                <button type="button" className={btnCls} onClick={() => onEditRules(peer)}>
+                  Ajustar
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        {peer.their_rules && (
+          <div className="text-muted-foreground" title="Lo que este nodo te aplica a ti">
+            Sus reglas contigo: {rulesSummary(peer.their_rules)}
+          </div>
+        )}
         {peer.connection_mode === "http" && <div className="truncate text-muted-foreground">{peer.url}</div>}
         {peer.connection_mode === "tunnel_out" && <div className="truncate text-muted-foreground">→ {peer.url}</div>}
         {peer.tunnel && (
@@ -894,6 +943,7 @@ export function Federation() {
   const [nodeName, setNodeName] = useState("")
   const [savingName, setSavingName] = useState(false)
   const [joinOpen, setJoinOpen] = useState(false)
+  const [rulesPeer, setRulesPeer] = useState<FederationPeer | null>(null)
   const [inviteOpen, setInviteOpen] = useState(false)
   const [manualOpen, setManualOpen] = useState(false)
   const [accepting, setAccepting] = useState<FederationJoinRequest | null>(null)
@@ -1036,6 +1086,9 @@ export function Federation() {
         )}
       </div>
 
+      {enabled && peers.some((p) => p.mode === "rules") && <NodeRulesCard />}
+      <PeerRulesDialog peer={rulesPeer} onOpenChange={(v) => !v && setRulesPeer(null)} onSaved={() => void load()} />
+
       {!enabled ? (
         <div className="rounded-lg border border-dashed border-border bg-card/50 px-6 py-10 text-center">
           <Network size={32} className="mx-auto text-muted-foreground/50" />
@@ -1080,7 +1133,12 @@ export function Federation() {
             ) : (
               <div className="grid gap-3 lg:grid-cols-2">
                 {active.map((p) => (
-                  <PeerCard key={p.peer_id} peer={p} onChanged={() => void load()} />
+                  <PeerCard
+                    key={p.peer_id}
+                    peer={p}
+                    onChanged={() => void load()}
+                    onEditRules={setRulesPeer}
+                  />
                 ))}
               </div>
             )}

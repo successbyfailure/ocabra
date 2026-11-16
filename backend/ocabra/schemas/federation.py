@@ -45,6 +45,31 @@ class PeerUpdate(BaseModel):
     access_level: str | None = Field(default=None, pattern=r"^(inference|full)$")
     enabled: bool | None = None
     notes: str | None = Field(default=None, max_length=4000)
+    mode: str | None = Field(
+        default=None,
+        pattern=r"^(swarm|rules)$",
+        description="swarm: everything allowed; rules: «Mi servidor, mis reglas»",
+    )
+    rules: dict[str, Any] | None = Field(
+        default=None,
+        description="«rules» mode: adjustments for this peer over the node defaults (null clears)",
+    )
+
+
+class FederationRules(BaseModel):
+    """«Mi servidor, mis reglas»: conditions on what peers in rules mode may do here."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    local_first: bool | None = None
+    allow_loads: bool | None = None
+    allow_evict: bool | None = None
+    max_requests_per_hour: int | None = Field(default=None, ge=0)
+    max_wh_per_month: float | None = Field(default=None, ge=0)
+    allow_downloads: bool | None = None
+    allow_admin: bool | None = None
+    offered_models: list[str] | None = None
+    hours: list[int] | None = Field(default=None, min_length=2, max_length=2)
 
 
 class PeerOut(BaseModel):
@@ -77,6 +102,15 @@ class PeerOut(BaseModel):
     join_verification_code: str | None = None
     privacy_mode: str | None = Field(
         default=None, description="The peer's privacy mode from its heartbeat: functional | zero_data"
+    )
+    rules: dict[str, Any] | None = Field(
+        default=None, description="«rules» mode: our adjustments for this peer over the node defaults"
+    )
+    effective_rules: dict[str, Any] | None = Field(
+        default=None, description="What we apply to this peer (None = all allowed: swarm)"
+    )
+    their_rules: dict[str, Any] | None = Field(
+        default=None, description="What this peer applies to us (from its heartbeat)"
     )
     dial_state: str | None = Field(
         default=None,
@@ -147,6 +181,10 @@ class HeartbeatResponse(BaseModel):
     privacy_mode: str | None = Field(
         default=None,
         description="functional | zero_data (see core/privacy.py); None from nodes older than 0.92.1",
+    )
+    rules: dict[str, Any] | None = Field(
+        default=None,
+        description="«Mi servidor, mis reglas»: the rules this node applies to the caller (None = all allowed)",
     )
 
 

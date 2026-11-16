@@ -1834,6 +1834,11 @@ export function toFederationPeer(raw: unknown): FederationPeer {
     join_state: (d.join_state ?? null) as FederationPeer["join_state"],
     join_verification_code: (d.join_verification_code ?? null) as string | null,
     privacy_mode: (d.privacy_mode ?? d.privacyMode ?? null) as "functional" | "zero_data" | null,
+    rules: (isRecord(d.rules) ? d.rules : null) as import("@/types").FederationPeer["rules"],
+    effective_rules: (isRecord(d.effective_rules) ? d.effective_rules : null) as
+      import("@/types").FederationRules | null,
+    their_rules: (isRecord(d.their_rules) ? d.their_rules : null) as
+      import("@/types").FederationRules | null,
     dial_state: (d.dial_state ?? null) as string | null,
     last_error: (d.last_error ?? null) as string | null,
     tunnel_connected: Boolean(d.tunnel_connected ?? false),
@@ -3685,6 +3690,17 @@ export const api = {
         }),
       ),
 
+    getRules: async (): Promise<import("@/types").FederationNodeRules> =>
+      request<import("@/types").FederationNodeRules>("GET", "/ocabra/federation/rules"),
+    setRules: async (
+      rules: Partial<import("@/types").FederationRules>,
+    ): Promise<import("@/types").FederationNodeRules> =>
+      request<import("@/types").FederationNodeRules>("PUT", "/ocabra/federation/rules", rules),
+    rulesUsage: async (id: string): Promise<import("@/types").FederationRulesUsage> =>
+      request<import("@/types").FederationRulesUsage>(
+        "GET",
+        `/ocabra/federation/peers/${encodeURIComponent(id)}/rules-usage`,
+      ),
     updatePeer: async (
       id: string,
       data: FederationPeerUpdate,

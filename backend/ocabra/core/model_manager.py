@@ -2081,6 +2081,13 @@ class ModelManager:
         allow_pressure_eviction: bool = True,
     ) -> "ModelState":
         state = self._states[model_id]
+        # «Mi servidor, mis reglas»: a load a peer triggers may not push out a
+        # model in use here if its rules say so (core/federation_rules.py).
+        from ocabra.core.federation_rules import current_peer_rules
+
+        peer_rules = current_peer_rules.get()
+        if peer_rules is not None and not peer_rules.allow_evict:
+            allow_pressure_eviction = False
 
         async with self._acquire_model_load_lock(model_id):
             if state.status == ModelStatus.LOADED:

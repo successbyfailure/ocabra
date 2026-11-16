@@ -786,6 +786,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
             )
         if mm and inflight_model_id:
             auth_meta = await _resolve_inflight_auth_meta(request)
+            _apply_peer_rules(request, auth_meta)
             remote_bound = await _request_bound_for_peer(request, mm, inflight_model_id)
             inflight_request_id = mm.try_begin_request(
                 inflight_model_id,
@@ -1870,3 +1871,26 @@ def _federation_fields(
     elif info.get("reason") and (remote_node_id or info.get("reason") != "local_loaded"):
         route = str(info["reason"])[:64]
     return name, inbound, route
+
+
+def _apply_peer_rules(request: Request, auth_meta: dict) -> None:
+    """If the caller is a federation peer served under rules, carry them along.
+
+    ``request.state.federation_rules`` (read by ``is_batch_origin_request`` for
+    «me first») and the ``current_peer_rules`` contextvar (read by the model
+    loader for «may it evict»). The identity is the authenticated service user
+    of the peer, never a header.
+    """
+    fm = getattr(getattr(request.app, "state", None), "federation_manager", None)
+    if fm is None or not auth_meta.get("user_id"):
+        return
+    try:
+        rules = fm.rules_for_user(auth_meta.get("user_id"))
+    except Exception:  # noqa: BLE001 — never block a request on this
+        return
+    from ocabra.core.federation_rules import ALL_ALLOWED, current_peer_rules
+
+    if rules is None or rules == ALL_ALLOWED:
+        return
+    request.state.federation_rules = rules
+    current_peer_rules.set(rules)

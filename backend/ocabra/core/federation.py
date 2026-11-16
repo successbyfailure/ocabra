@@ -147,6 +147,8 @@ class PeerState:
     # What the peer reports about its own CUDA (see core/cuda_probe.py).
     cuda: dict[str, Any] | None = None
     privacy_mode: str | None = None  # from its heartbeat: functional | zero_data
+    rules: dict[str, Any] | None = None  # our adjustments for it in «rules» mode
+    their_rules: dict[str, Any] | None = None  # what it applies to us (its heartbeat)
     requests_proxied: int = 0
     last_proxied_at: float | None = None
 
@@ -197,6 +199,11 @@ class FederationManager:
         self._local_client: httpx.AsyncClient | None = None
         self.join_service: Any = None  # FederationJoinService, set in start()
         self.gpu_manager: Any = None  # set by main; used to describe us when joining
+        # Set by main: «rules» mode checks what is loaded and resolves names.
+        self.model_manager: Any = None
+        self.profile_registry: Any = None
+        # «Mi servidor, mis reglas»: this node's defaults (core/federation_rules.py).
+        self.default_rules: dict[str, Any] = {}
         self.cloud: Any = None  # CloudNodeManager (nodes we rent), set in start()
         self._self_destruct: Any = None  # NodeSelfDestruct when *we* are a cloud pod
 
@@ -210,6 +217,7 @@ class FederationManager:
         for the first ``federation_heartbeat_interval`` seconds and we'd
         fall back to local even when a peer is ready.
         """
+        await self.load_default_rules()
         self._started_at = time.monotonic()
         self._http_client = httpx.AsyncClient(
             verify=self._settings.federation_verify_ssl,
@@ -396,6 +404,7 @@ class FederationManager:
             "local_api_key": _dec(getattr(row, "local_api_key_encrypted", None)),
             "local_user_id": str(local_user_id) if local_user_id else None,
             "local_access_level": getattr(row, "local_access_level", None),
+            "rules": getattr(row, "rules", None),
             "join_state": getattr(row, "join_state", None),
             "join_request_id": getattr(row, "join_request_id", None),
             "join_poll_secret": _dec(getattr(row, "join_poll_secret_encrypted", None)),
@@ -561,7 +570,14 @@ class FederationManager:
         if kwargs.get("tunnel_token"):
             db_updates["tunnel_token_hash"] = hash_tunnel_token(kwargs["tunnel_token"])
         # Internal fields (join / tunnel bookkeeping), set by the join service.
-        for plain in ("mode", "remote_node_id", "local_access_level", "join_state", "join_request_id"):
+        for plain in (
+            "mode",
+            "remote_node_id",
+            "local_access_level",
+            "join_state",
+            "join_request_id",
+            "rules",
+        ):
             if plain in kwargs:
                 db_updates[plain] = kwargs[plain]
         if "local_api_key" in kwargs:
@@ -623,6 +639,7 @@ class FederationManager:
             "local_api_key",
             "local_user_id",
             "join_poll_secret",
+            "rules",
         ):
             if plain in kwargs:
                 setattr(peer, plain, kwargs[plain])
@@ -702,6 +719,7 @@ class FederationManager:
             peer.privacy_mode = (
                 str(data["privacy_mode"]) if isinstance(data.get("privacy_mode"), str) else None
             )
+            peer.their_rules = data.get("rules") if isinstance(data.get("rules"), dict) else None
             logger.info(
                 "federation_peer_heartbeat_ok",
                 peer=peer.name,
@@ -878,12 +896,70 @@ class FederationManager:
 
         if self._local_client is None:
             return None
+        from ocabra.core import federation_rules
+
+        async def _gate(method: str, path: str, body: bytes):
+            return await federation_rules.gate(self, peer, method, path, body)
+
         return LocalServer(
             client=self._local_client,
             api_key=lambda: peer.local_api_key if peer.enabled else None,
             access_level=lambda: peer.local_access_level or "inference",
             node_id=self._node_id,
+            gate=_gate,
         )
+
+    # ── «Mi servidor, mis reglas» ─────────────────────────────────
+
+    def rules_for(self, peer: PeerState) -> Any:
+        from ocabra.core.federation_rules import effective_rules
+
+        return effective_rules(peer, self.default_rules)
+
+    def rules_for_user(self, user_id: str | None) -> Any:
+        """Rules of the peer whose service user is *user_id* (None if not a peer)."""
+        if not user_id:
+            return None
+        peer = next((p for p in self._peers.values() if p.local_user_id == str(user_id)), None)
+        return self.rules_for(peer) if peer is not None else None
+
+    async def load_default_rules(self) -> None:
+        import json as _json
+
+        import sqlalchemy as sa
+
+        from ocabra.core.federation_rules import DEFAULTS_KEY
+        from ocabra.db.server_config import ServerConfigOverride
+
+        try:
+            async with self._session_factory() as session:
+                raw = (
+                    await session.execute(
+                        sa.select(ServerConfigOverride.value).where(
+                            ServerConfigOverride.key == DEFAULTS_KEY
+                        )
+                    )
+                ).scalar_one_or_none()
+            self.default_rules = _json.loads(raw) if raw else {}
+            from ocabra.core import federation_rules as _fr
+
+            _fr.NODE_DEFAULTS.clear()
+            _fr.NODE_DEFAULTS.update(self.default_rules)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("federation_default_rules_load_failed", error=str(exc))
+
+    async def set_default_rules(self, rules: dict[str, Any]) -> dict[str, Any]:
+        from ocabra.core import federation_rules as _fr
+        from ocabra.core.federation_rules import DEFAULTS_KEY, clean_rules
+        from ocabra.db.server_config import save_override
+
+        self.default_rules = clean_rules(rules)
+        _fr.NODE_DEFAULTS.clear()
+        _fr.NODE_DEFAULTS.update(self.default_rules)
+        async with self._session_factory() as session:
+            await save_override(session, DEFAULTS_KEY, self.default_rules)
+            await session.commit()
+        return self.default_rules
 
     def tunnel_hello(self, peer: PeerState) -> dict[str, Any]:
         """HELLO we send when dialing *peer* (token = stored api_key)."""

@@ -16,6 +16,31 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.95.0 — 2026-11-16
+
+### Novedades
+
+- **Federación «Mi servidor, mis reglas».** Un nodo puede servir a cada
+  vecino en modo **enjambre** (todo permitido, como hasta ahora) o **mis
+  reglas**: `PATCH /ocabra/federation/peers/{id}` con `mode: "rules"` y, si
+  hace falta, `rules` con ajustes para ese nodo. Las reglas por defecto se
+  leen y cambian en `GET/PUT /ocabra/federation/rules`:
+  - *Yo primero*: las peticiones del vecino ceden el paso a las locales.
+  - *Solo lo cargado*: no puede provocar cargas de modelos.
+  - *Sin expulsar*: sus cargas no echan un modelo en uso aquí.
+  - Límites de peticiones por hora y de Wh al mes, modelos ofrecidos, franja
+    horaria, y panel remoto y descargas permitidos o no.
+- Una petición que no cumple una regla se rechaza con **503**
+  (`hourly_quota`, `energy_quota`, `model_not_warm`, `outside_hours`), **404**
+  (`model_not_offered`) o **403** (`read_only`, `downloads_not_allowed`); el
+  nodo que la envió la resuelve por su cuenta, como hasta ahora.
+- El heartbeat de federación publica a cada nodo las reglas que se le aplican
+  (`rules`) y le lista solo los modelos que se le ofrecen.
+  `GET /ocabra/federation/peers/{id}/rules-usage` da el consumo de un vecino
+  frente a sus límites.
+
+---
+
 ## 0.94.1 — 2026-11-16
 
 ### Correcciones

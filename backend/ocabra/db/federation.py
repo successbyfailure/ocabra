@@ -33,8 +33,10 @@ class FederationPeer(Base):
     )
     # What the *peer* may do on us (None = we don't serve it).
     local_access_level: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # "manual" | "swarm" (mutual, full control) | "rules" (future)
+    # "manual" | "swarm" (mutual, full control) | "rules" («Mi servidor, mis reglas»)
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
+    # «rules» mode: our adjustments for this peer over the node defaults.
+    rules: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     remote_node_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Outgoing join request still being decided by the other side.

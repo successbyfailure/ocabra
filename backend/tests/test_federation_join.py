@@ -279,3 +279,29 @@ async def test_remote_panel_reaches_the_node_api_but_not_its_access_control(two_
 
     # Looking at a node's panel is not traffic: it must not keep it from idling.
     assert peer_on_a.requests_proxied == before
+
+
+@requires_db
+async def test_rules_mode_limits_what_a_peer_may_do_over_the_tunnel(two_nodes):
+    """«Mi servidor, mis reglas»: A serves B under rules — read-only admin, and
+    B's requests still reach A's API for inference."""
+    fm_a, fm_b, url_a, _, local_a = two_nodes
+    invite = await fm_a.join_service.create_invite(label="reglas")
+    peer_on_b = await fm_b.join_service.join(url_a, invite_code=invite["code"])
+    peer_on_a = _only_peer(fm_a)
+    assert await _wait(lambda: peer_on_a.online and peer_on_b.online)
+
+    await fm_a.update_peer(peer_on_a.peer_id, mode="rules", rules={"local_first": False})
+    assert fm_a.rules_for(peer_on_a).allow_admin is False
+
+    seen = len(local_a.seen)
+    resp = await fm_b.proxy_request(peer_on_b, "/ocabra/models/x/load", {}, {})
+    assert resp.status_code == 403 and resp.json()["error"]["code"] == "read_only"
+    assert len(local_a.seen) == seen  # never reached A's API
+    resp = await fm_b.proxy_request(peer_on_b, "/v1/echo", {"de": "b"}, {})
+    assert resp.status_code == 201  # inference still served
+
+    # Back to the swarm: everything allowed again.
+    await fm_a.update_peer(peer_on_a.peer_id, mode="swarm")
+    resp = await fm_b.proxy_request(peer_on_b, "/ocabra/models/x/load", {}, {})
+    assert resp.status_code == 200

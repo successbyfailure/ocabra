@@ -1564,6 +1564,13 @@ def is_batch_origin_request(request: Request) -> bool:
     """
     from ocabra.config import settings
 
+    # «Mi servidor, mis reglas» — «me first»: a peer's requests get the batch
+    # class, so local ones go ahead and may preempt them. Set from the
+    # authenticated service user (not a header a client could send).
+    peer_rules = getattr(getattr(request, "state", None), "federation_rules", None)
+    if peer_rules is not None and getattr(peer_rules, "local_first", False):
+        return True
+
     gw_token = request.headers.get("X-Gateway-Token", "")
     if (
         not gw_token
