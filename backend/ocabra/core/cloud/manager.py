@@ -599,20 +599,24 @@ class CloudNodeManager:
                             (p for p in self.fm.get_all_peers() if p.peer_id == str(row.peer_id)),
                             None,
                         )
+                    from ocabra.core.cloud import preload
+
                     if (
                         peer is not None
                         and peer.online
                         and row.preload_models
                         and any(
-                            i.get("status") in ("pending", "downloading", "loading")
+                            i.get("status") in ("pending", *preload.ACTIVE)
                             for i in row.preload_models
                         )
                     ):
-                        from ocabra.core.cloud import preload
-
                         row.preload_models = await preload.drive(
                             self.fm, peer, row.preload_models, self._preload_tasks
                         )
+                        # Getting models ready is not idling: a big diffusers
+                        # copy (backend install + tens of GB) outlasts the
+                        # idle timeout.
+                        row.last_active_at = now
                     if peer is not None and peer.last_proxied_at:
                         active = datetime.fromtimestamp(peer.last_proxied_at, UTC)
                         if row.last_active_at is None or active > row.last_active_at:

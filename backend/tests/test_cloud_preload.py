@@ -293,7 +293,232 @@ def test_profile_with_parked_backend_capacity_serializes():
         "ollama",
     )
     parsed = RuntimePolicy.model_validate(policy)
-    assert parsed.validated_by_backend["llamacpp_mks"]["validated_context_tokens"]["normal"] == 131072
+    assert (
+        parsed.validated_by_backend["llamacpp_mks"]["validated_context_tokens"]["normal"] == 131072
+    )
     # Round-trip keeps it, so switching back can restore it.
     back = swap_validated_capacity(parsed.model_dump(), "ollama", "llamacpp_mks")
     assert back["validated_context_tokens"] == {"normal": 131072, "dual-gpu": 40960}
+
+
+# ── diffusers: rebuilt on the node from the same Hugging Face files ──
+
+
+def _fake_hf_cache(tmp_path):
+    """A models dir laid out like ours: the tree is a symlink into a HF cache
+    snapshot whose files are symlinks into ``blobs/``, and the GGUF lives in
+    another repo's snapshot."""
+    import os
+
+    cache = tmp_path / "hf_cache" / "hub"
+    blobs = cache / "models--Qwen--Qwen-Image-2.1" / "blobs"
+    snap = cache / "models--Qwen--Qwen-Image-2.1" / "snapshots" / "rev1"
+    blobs.mkdir(parents=True)
+    for rel, size in {
+        "model_index.json": 10,
+        "vae/w.safetensors": 300,
+        "transformer/config.json": 5,
+    }.items():
+        blob = blobs / rel.replace("/", "_")
+        blob.write_bytes(b"x" * size)
+        (snap / rel).parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(blob, snap / rel)
+    g_blobs = cache / "models--Abiray--Qwen-Image-2.1-GGUF" / "blobs"
+    g_snap = cache / "models--Abiray--Qwen-Image-2.1-GGUF" / "snapshots" / "rev2"
+    g_blobs.mkdir(parents=True)
+    g_snap.mkdir(parents=True)
+    (g_blobs / "sha").write_bytes(b"g" * 1000)
+    os.symlink(g_blobs / "sha", g_snap / "q5.gguf")
+    models = tmp_path / "models"
+    models.mkdir()
+    os.symlink(snap, models / "qwen-image-2.1")
+    return str(models), str(g_snap / "q5.gguf")
+
+
+def _diffusers_row(gguf):
+    return SimpleNamespace(
+        backend_type="diffusers",
+        model_id="diffusers/qwen-image-2.1",
+        model_key="qwen-image-2.1",
+        display_name="Qwen-Image 2.1",
+        artifact={"ref": "qwen-image-2.1", "kind": "diffusers_tree", "source": "local"},
+        extra_config={
+            "diffusers": {
+                "pipeline_class": "QwenImage21Pipeline",
+                "text_encoder_quant": "nf4",
+                "gguf_transformer_path": gguf,
+            },
+            "preferred_gpus": [1],
+        },
+    )
+
+
+def test_diffusers_plan_copies_exactly_our_files(tmp_path):
+    from ocabra.core.cloud.preload import plan_replication
+
+    models_dir, gguf = _fake_hf_cache(tmp_path)
+    plan = plan_replication(_diffusers_row(gguf), 24564, models_dir)
+    kinds = [s["kind"] for s in plan["steps"]]
+    assert kinds == ["backend", "download", "download", "register", "load"]
+    base, weights = plan["steps"][1]["body"], plan["steps"][2]["body"]
+    # The pipeline repo minus the transformer weights we never downloaded.
+    assert base == {
+        "source": "huggingface",
+        "model_ref": "Qwen/Qwen-Image-2.1",
+        "revision": "rev1",
+        "allow_patterns": ["model_index.json", "transformer/config.json", "vae/w.safetensors"],
+        "local_dir": "qwen-image-2.1",
+        "register": False,
+    }
+    assert weights["model_ref"] == "Abiray/Qwen-Image-2.1-GGUF"
+    assert weights["allow_patterns"] == ["q5.gguf"] and weights["revision"] == "rev2"
+    reg = plan["steps"][3]["body"]
+    assert reg["model_id"] == "diffusers/qwen-image-2.1"
+    # Relative to the node's models dir; our GPU choice stays here.
+    cfg = reg["extra_config"]
+    assert (
+        cfg["diffusers"]["gguf_transformer_path"]
+        == "huggingface/Abiray--Qwen-Image-2.1-GGUF/q5.gguf"
+    )
+    assert "preferred_gpus" not in cfg and cfg["diffusers"]["text_encoder_quant"] == "nf4"
+    assert plan["size_bytes"] == 10 + 300 + 5 + 1000
+
+
+def test_diffusers_with_files_only_here_is_not_replicable(tmp_path):
+    from ocabra.core.cloud.preload import plan_replication
+
+    models_dir, gguf = _fake_hf_cache(tmp_path)
+    local = tmp_path / "mine.gguf"
+    local.write_bytes(b"1")
+    with pytest.raises(CloudError) as exc:
+        plan_replication(_diffusers_row(str(local)), None, models_dir)
+    assert "GGUF" in str(exc.value)
+    plain = tmp_path / "models" / "plain"
+    plain.mkdir()
+    row = _diffusers_row(gguf)
+    row.artifact = {"ref": "plain", "kind": "diffusers_tree", "source": "local"}
+    with pytest.raises(CloudError):
+        plan_replication(row, None, models_dir)
+
+
+def test_relative_gguf_path_resolves_on_the_node(monkeypatch, tmp_path):
+    from ocabra.backends.diffusers_backend import _models_path
+    from ocabra.config import settings
+
+    monkeypatch.setattr(settings, "models_dir", str(tmp_path))
+    assert _models_path("huggingface/x/q.gguf") == tmp_path / "huggingface/x/q.gguf"
+    assert str(_models_path("/abs/q.gguf")) == "/abs/q.gguf"
+
+
+class _Resp:
+    """Streamed response stand-in for ``proxy_raw``."""
+
+    status_code = 200
+
+    async def aiter_bytes(self):
+        yield b'data: {"install_status": "installing"}\n\n'
+
+    async def aclose(self):
+        self.closed = True
+
+
+async def test_drive_walks_install_downloads_register_load(tmp_path, monkeypatch):
+    import asyncio
+
+    from ocabra.core.cloud import preload
+
+    models_dir, gguf = _fake_hf_cache(tmp_path)
+    row = _diffusers_row(gguf)
+
+    async def rows(_sf, ids):
+        return {row.model_id: row}
+
+    monkeypatch.setattr(preload, "load_model_rows", rows)
+    real_plan = preload.plan_replication
+    monkeypatch.setattr(preload, "plan_replication", lambda r, g: real_plan(r, g, models_dir))
+
+    node = {"backend": "not_installed", "jobs": {}, "registered": False}
+    calls = []
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        calls.append(("GET", path))
+        if path == "/ocabra/backends/diffusers":
+            return httpx.Response(200, json={"install_status": node["backend"]})
+        if path.startswith("/ocabra/downloads/"):
+            return httpx.Response(200, json=node["jobs"][path.rsplit("/", 1)[1]])
+        if path == "/ocabra/models/diffusers/qwen-image-2.1":
+            return httpx.Response(200 if node["registered"] else 404, json={})
+        raise AssertionError(path)
+
+    async def proxy_raw(peer, method, path, content, headers=None):
+        calls.append((method, path))
+        node["backend"] = "installing"
+        return _Resp()
+
+    async def proxy_request(peer, path, body, headers, timeout=None):  # noqa: ASYNC109
+        calls.append(("POST", path))
+        if path == "/ocabra/downloads":
+            jid = f"j{len(node['jobs'])}"
+            node["jobs"][jid] = {"status": "downloading", "progress_pct": 10}
+            return httpx.Response(200, json={"job_id": jid})
+        if path == "/ocabra/models":
+            node["registered"] = True
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={"status": "loaded"})
+
+    fm = SimpleNamespace(
+        session_factory=None, proxy_get=proxy_get, proxy_raw=proxy_raw, proxy_request=proxy_request
+    )
+    session = SimpleNamespace(remote_info={"version": "0.87.0"})
+    peer = SimpleNamespace(peer_id="p", gpus=[], tunnel_session=session)
+    tasks: dict = {}
+    items = [{"model_id": row.model_id, "status": "pending"}]
+
+    items = await preload.drive(fm, peer, items, tasks)
+    assert items[0]["status"] == "installing"
+    items = await preload.drive(fm, peer, items, tasks)
+    assert items[0]["status"] == "installing"  # still going
+    node["backend"] = "installed"
+    items = await preload.drive(fm, peer, items, tasks)
+    assert items[0]["status"] == "downloading" and items[0]["job_id"] == "j0"
+    node["jobs"]["j0"] = {"status": "completed", "progress_pct": 100}
+    items = await preload.drive(fm, peer, items, tasks)
+    assert items[0]["job_id"] == "j1" and items[0]["step"] == 2
+    node["jobs"]["j1"] = {"status": "completed", "progress_pct": 100}
+    items = await preload.drive(fm, peer, items, tasks)  # register (instant) → load
+    assert items[0]["status"] == "loading" and node["registered"]
+    await asyncio.sleep(0)
+    items = await preload.drive(fm, peer, items, tasks)
+    assert items[0]["status"] == "loaded", items[0]
+    assert ("POST", "/ocabra/models/diffusers/qwen-image-2.1/load") in calls
+
+
+async def test_drive_refuses_diffusers_on_an_old_node(tmp_path, monkeypatch):
+    from ocabra.core.cloud import preload
+
+    models_dir, gguf = _fake_hf_cache(tmp_path)
+    row = _diffusers_row(gguf)
+
+    async def rows(_sf, ids):
+        return {row.model_id: row}
+
+    monkeypatch.setattr(preload, "load_model_rows", rows)
+    real_plan = preload.plan_replication
+    monkeypatch.setattr(preload, "plan_replication", lambda r, g: real_plan(r, g, models_dir))
+    fm = SimpleNamespace(session_factory=None)
+    peer = SimpleNamespace(
+        peer_id="p", gpus=[], tunnel_session=SimpleNamespace(remote_info={"version": "0.86.1"})
+    )
+    items = await preload.drive(fm, peer, [{"model_id": row.model_id, "status": "pending"}], {})
+    assert items[0]["status"] == "error" and "0.86.1" in items[0]["error"]
+
+
+def test_exact_files_download_stays_inside_the_models_dir(monkeypatch, tmp_path):
+    from ocabra.api.internal.downloads import _safe_local_dir
+    from ocabra.config import settings
+
+    monkeypatch.setattr(settings, "models_dir", str(tmp_path))
+    assert _safe_local_dir("huggingface/a--b") == tmp_path / "huggingface/a--b"
+    for bad in ("../etc", "/etc", "", "a/../../x", "."):
+        with pytest.raises(ValueError):
+            _safe_local_dir(bad)

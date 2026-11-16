@@ -1,11 +1,20 @@
 """Replicate our models onto a cloud node: download there, then load.
 
 A node launched from the cloud panel can carry a list of *our* model ids. Once
-it has joined, the cloud watchdog drives each one through
-``pending → downloading → loading → loaded`` (or ``error``) using the node's own
-API over the tunnel: ``POST /ocabra/downloads`` with the same source as ours
-(an Ollama tag or a Hugging Face GGUF) and the same llama.cpp settings, minus
-what only makes sense on our machine, then ``POST /ocabra/models/{id}/load``.
+it has joined, the cloud watchdog walks each one through a short list of
+*steps* run with the node's own API over the tunnel:
+
+* llama.cpp — ``download`` (same Ollama tag or Hugging Face GGUF as ours, with
+  our settings minus what only makes sense on this machine; the node registers
+  it itself) → ``load``.
+* diffusers — ``backend`` (install diffusers on the node if it isn't) →
+  ``download`` of exactly the files we have of each Hugging Face repo (the base
+  pipeline without the transformer weights we don't use, the GGUF transformer)
+  → ``register`` with the paths made relative to the node's models directory →
+  ``load``.
+
+An item's ``status`` is what the panel shows: ``pending``, ``installing``,
+``downloading``, ``loading``, ``loaded`` or ``error``.
 
 The node registers the model under the **same id** as ours, so the federation
 routes requests for it there when we don't have it loaded.
@@ -13,7 +22,11 @@ routes requests for it there when we don't have it loaded.
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import os
+import re
+from pathlib import Path
 from typing import Any
 
 from ocabra.core.cloud.manager import CloudError
@@ -23,6 +36,9 @@ _HOST_SPECIFIC = ("disabled_gpus", "main_gpu", "tensor_split", "preferred_gpus",
 # Left free on the node's GPU for the CUDA context and the projector/draft.
 GPU_MARGIN_MB = 1500
 MIN_CONTEXT = 32768
+# First node version whose download API takes exact files into a folder.
+EXACT_FILES_MIN_VERSION = (0, 87, 0)
+_HF_CACHE_RE = re.compile(r"/models--([^/]+)/snapshots/([^/]+)(?:/(.*))?$")
 
 
 def download_source(artifact: dict[str, Any] | None) -> dict[str, Any]:
@@ -81,6 +97,172 @@ def replication_request(model_row: Any, gpu_total_mb: int | None) -> tuple[str, 
     return build_model_ref(backend, model_key), body
 
 
+def _hf_cache_origin(path: str | Path) -> tuple[str, str, str] | None:
+    """``(repo_id, revision, path_in_repo)`` if *path* lives in a HF cache snapshot."""
+    # Resolve the folder, not the file: a snapshot's files are symlinks into
+    # ``blobs/<sha>``, which says nothing about where they sit in the repo.
+    path = str(path).rstrip("/")
+    if os.path.isdir(path):
+        resolved = os.path.realpath(path)
+    else:
+        resolved = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+    m = _HF_CACHE_RE.search(resolved)
+    if not m:
+        return None
+    repo = m.group(1).replace("--", "/", 1)
+    return repo, m.group(2), m.group(3) or ""
+
+
+def _tree_files(root: str) -> tuple[list[str], int]:
+    """Relative file paths under *root* (following the cache's symlinks) and their size."""
+    files: list[str] = []
+    total = 0
+    for dirpath, _dirs, names in os.walk(root, followlinks=True):
+        for name in names:
+            full = os.path.join(dirpath, name)
+            files.append(os.path.relpath(full, root))
+            try:
+                total += os.stat(full).st_size
+            except OSError:
+                pass
+    return sorted(files), total
+
+
+def _absolute_paths(value: Any, prefix: str = "") -> list[str]:
+    """Keys of *value* (nested) holding an absolute path."""
+    out: list[str] = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            out += _absolute_paths(v, f"{prefix}{k}.")
+    elif isinstance(value, str) and value.startswith("/"):
+        out.append(prefix.rstrip("."))
+    return out
+
+
+def _diffusers_plan(model_row: Any, models_dir: str) -> dict[str, Any]:
+    """Steps to rebuild one of our diffusers models on a node (see module doc)."""
+    art = model_row.artifact if isinstance(model_row.artifact, dict) else {}
+    folder = str(art.get("ref") or str(model_row.model_id).split("/", 1)[-1])
+    local_only = CloudError(
+        "Este modelo no se puede replicar: sus ficheros no vienen de un repo de "
+        "Hugging Face (están solo en este servidor)",
+        400,
+    )
+    tree = os.path.join(models_dir, folder)
+    origin = _hf_cache_origin(tree) if os.path.isdir(tree) else None
+    if origin is None or origin[2]:
+        raise local_only
+    repo, revision, _ = origin
+    files, size = _tree_files(tree)
+    if not files:
+        raise local_only
+
+    extra = copy.deepcopy(
+        model_row.extra_config if isinstance(model_row.extra_config, dict) else {}
+    )
+    for key in _HOST_SPECIFIC:
+        extra.pop(key, None)
+    section = extra.get("diffusers") if isinstance(extra.get("diffusers"), dict) else {}
+    for key in _HOST_SPECIFIC:
+        section.pop(key, None)
+    steps: list[dict[str, Any]] = [{"kind": "backend", "backend": "diffusers"}]
+    steps.append(
+        {
+            "kind": "download",
+            "label": repo,
+            "body": {
+                "source": "huggingface",
+                "model_ref": repo,
+                "revision": revision,
+                "allow_patterns": files,
+                "local_dir": folder,
+                "register": False,
+            },
+        }
+    )
+    gguf = section.get("gguf_transformer_path")
+    if gguf:
+        g_origin = _hf_cache_origin(gguf)
+        if g_origin is None or not g_origin[2]:
+            raise CloudError(
+                "Este modelo no se puede replicar: su transformer GGUF está solo en este servidor",
+                400,
+            )
+        g_repo, g_rev, g_file = g_origin
+        g_dir = f"huggingface/{g_repo.replace('/', '--')}"
+        try:
+            size += os.stat(gguf).st_size
+        except OSError:
+            pass
+        steps.append(
+            {
+                "kind": "download",
+                "label": g_repo,
+                "body": {
+                    "source": "huggingface",
+                    "model_ref": g_repo,
+                    "revision": g_rev,
+                    "allow_patterns": [g_file],
+                    "local_dir": g_dir,
+                    "register": False,
+                },
+            }
+        )
+        section["gguf_transformer_path"] = f"{g_dir}/{g_file}"
+    if section:
+        extra["diffusers"] = section
+    leftovers = _absolute_paths(extra)
+    if leftovers:
+        raise CloudError(
+            "Este modelo no se puede replicar: apunta a ficheros de este servidor "
+            f"({', '.join(leftovers)})",
+            400,
+        )
+    steps.append(
+        {
+            "kind": "register",
+            "body": {
+                "model_id": str(model_row.model_id),
+                "backend_type": "diffusers",
+                "display_name": model_row.display_name or None,
+                "load_policy": "on_demand",
+                "extra_config": extra or None,
+            },
+        }
+    )
+    steps.append({"kind": "load"})
+    return {
+        "node_model_id": str(model_row.model_id),
+        "steps": steps,
+        "size_bytes": size,
+        "min_node_version": EXACT_FILES_MIN_VERSION,
+    }
+
+
+def plan_replication(
+    model_row: Any, gpu_total_mb: int | None, models_dir: str | None = None
+) -> dict[str, Any]:
+    """``{node_model_id, steps, size_bytes, min_node_version}`` for *model_row*.
+
+    Touches the filesystem (diffusers trees): call it off the event loop.
+    Raises :class:`CloudError` (400) with the reason when it can't be copied.
+    """
+    if str(model_row.backend_type) == "diffusers":
+        from ocabra.config import settings
+
+        return _diffusers_plan(model_row, models_dir or settings.models_dir)
+    node_model_id, body = replication_request(model_row, gpu_total_mb)
+    return {
+        "node_model_id": node_model_id,
+        "steps": [{"kind": "download", "body": body}, {"kind": "load"}],
+        "size_bytes": None,
+        "min_node_version": None,
+    }
+
+
+REPLICABLE_BACKENDS = ("diffusers",)
+
+
 async def load_model_rows(session_factory: Any, model_ids: list[str]) -> dict[str, Any]:
     import sqlalchemy as sa
 
@@ -108,7 +290,7 @@ async def validate_models(session_factory: Any, model_ids: list[str]) -> None:
         row = rows.get(mid)
         if row is None:
             raise CloudError(f"Modelo desconocido: {mid}", 400)
-        replication_request(row, None)
+        await asyncio.to_thread(plan_replication, row, None)
 
 
 def _node_gpu_total(peer: Any) -> int | None:
@@ -117,17 +299,140 @@ def _node_gpu_total(peer: Any) -> int | None:
     return max(totals) if totals else None
 
 
+def _node_version(peer: Any) -> tuple[int, ...] | None:
+    session = getattr(peer, "tunnel_session", None)
+    raw = str(getattr(session, "remote_info", {}).get("version") or "") if session else ""
+    nums = re.findall(r"\d+", raw)[:3]
+    return tuple(int(n) for n in nums) if nums else None
+
+
+ACTIVE = ("installing", "downloading", "registering", "loading")
+
+
+def _load_task(fm: Any, peer: Any, node_model_id: str) -> asyncio.Task:
+    return asyncio.create_task(
+        fm.proxy_request(peer, f"/ocabra/models/{node_model_id}/load", {}, {}, timeout=900),
+        name=f"cloud-preload-load-{node_model_id}",
+    )
+
+
+async def _start_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) -> bool:
+    """Begin the item's current step. ``True`` when it finished on the spot."""
+    step = item["steps"][item["step"]]
+    kind = step["kind"]
+    item.pop("progress", None)
+    item["phase"] = step.get("label")
+    if kind == "backend":
+        backend = step["backend"]
+        resp = await fm.proxy_get(peer, f"/ocabra/backends/{backend}")
+        if resp.status_code >= 400:
+            raise CloudError(f"El nodo no conoce el backend {backend}: {resp.text[:200]}", 502)
+        if resp.json().get("install_status") == "installed":
+            return True
+        item.update(status="installing", phase=f"instalando {backend}")
+        # The install runs detached on the node: read the first event (so a
+        # refusal shows up) and hang up; the next ticks poll its state.
+        install = await fm.proxy_raw(
+            peer,
+            "POST",
+            f"/ocabra/backends/{backend}/install",
+            b'{"method": "source"}',
+            {"content-type": "application/json"},
+        )
+        try:
+            if install.status_code >= 400 and install.status_code != 409:
+                body = (await install.aread()).decode(errors="replace")
+                raise CloudError(f"El nodo no pudo instalar {backend}: {body[:200]}", 502)
+            async for _chunk in install.aiter_bytes():
+                break
+        finally:
+            await install.aclose()
+        return False
+    if kind == "download":
+        resp = await fm.proxy_request(peer, "/ocabra/downloads", step["body"], {})
+        if resp.status_code >= 400:
+            raise CloudError(f"El nodo rechazó la descarga: {resp.text[:200]}", 502)
+        item.update(status="downloading", job_id=resp.json().get("job_id"), progress=0)
+        return False
+    if kind == "register":
+        model_id = step["body"]["model_id"]
+        existing = await fm.proxy_get(peer, f"/ocabra/models/{model_id}")
+        if existing.status_code == 200:
+            return True
+        resp = await fm.proxy_request(peer, "/ocabra/models", step["body"], {})
+        if resp.status_code >= 400:
+            raise CloudError(f"El nodo no pudo registrar el modelo: {resp.text[:200]}", 502)
+        return True
+    if kind == "load":
+        item["status"] = "loading"
+        tasks[key] = _load_task(fm, peer, item["node_model_id"])
+        return False
+    raise CloudError(f"Paso desconocido: {kind}", 500)
+
+
+async def _poll_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) -> bool:
+    """Check the item's running step. ``True`` once it is done."""
+    step = item["steps"][item["step"]]
+    kind = step["kind"]
+    if kind == "backend":
+        resp = await fm.proxy_get(peer, f"/ocabra/backends/{step['backend']}")
+        if resp.status_code >= 400:
+            raise CloudError(f"No se pudo consultar la instalación: {resp.text[:200]}", 502)
+        state = resp.json()
+        status = state.get("install_status")
+        if status == "installed":
+            return True
+        if status == "error":
+            raise CloudError(
+                f"Falló la instalación de {step['backend']}: {state.get('error')}", 502
+            )
+        if status == "not_installed":
+            # Lost (the node restarted mid-install): ask again.
+            return await _start_step(fm, peer, item, tasks, key)
+        if state.get("install_progress") is not None:
+            item["progress"] = round(float(state["install_progress"]), 1)
+        return False
+    if kind == "download":
+        resp = await fm.proxy_get(peer, f"/ocabra/downloads/{item['job_id']}")
+        if resp.status_code >= 400:
+            raise CloudError(f"No se pudo consultar la descarga: {resp.text[:200]}", 502)
+        job = resp.json()
+        item["progress"] = round(float(job.get("progress_pct") or 0), 1)
+        if job.get("status") in ("failed", "error", "cancelled"):
+            raise CloudError(f"La descarga falló: {job.get('error') or job.get('status')}", 502)
+        return job.get("status") == "completed"
+    if kind == "load":
+        task = tasks.get(key)
+        if task is None:
+            # Lost across a restart: ask again (loading an already loaded
+            # model is a no-op on the node).
+            tasks[key] = _load_task(fm, peer, item["node_model_id"])
+            return False
+        if not task.done():
+            return False
+        tasks.pop(key, None)
+        resp = task.result()
+        data = resp.json() if resp.content else {}
+        if resp.status_code >= 400 or data.get("status") != "loaded":
+            detail = data.get("detail") or data.get("error_message") or resp.text[:200]
+            raise CloudError(f"No se pudo cargar: {detail}", 502)
+        return True
+    return True
+
+
 async def drive(
     fm: Any, peer: Any, items: list[dict[str, Any]], tasks: dict
 ) -> list[dict[str, Any]]:
-    """Advance each preload item one step. Returns the updated list.
+    """Advance the preload one tick. Returns the updated list.
 
-    One model is worked on at a time (download, then load) so a node isn't
-    asked to fill its disk and VRAM with everything at once. Loads can take
-    minutes, so they run as background tasks tracked in *tasks*.
+    One model is worked on at a time (so a node isn't asked to fill its disk
+    and VRAM with everything at once), one step after another. Steps that
+    finish immediately (backend already installed, model already registered)
+    chain within the same tick; loads can take minutes, so they run as
+    background tasks tracked in *tasks*.
     """
     items = [dict(i) for i in items]
-    active = next((i for i in items if i["status"] in ("downloading", "loading")), None)
+    active = next((i for i in items if i["status"] in ACTIVE), None)
     if active is None:
         active = next((i for i in items if i["status"] == "pending"), None)
     if active is None:
@@ -135,59 +440,31 @@ async def drive(
 
     key = (peer.peer_id, active["model_id"])
     try:
-        if active["status"] == "pending":
+        if active["status"] == "pending" or "steps" not in active:
             rows = await load_model_rows(fm.session_factory, [active["model_id"]])
             row = rows.get(active["model_id"])
             if row is None:
                 raise CloudError("El modelo ya no existe aquí", 400)
-            node_model_id, body = replication_request(row, _node_gpu_total(peer))
-            resp = await fm.proxy_request(peer, "/ocabra/downloads", body, {})
-            if resp.status_code >= 400:
-                raise CloudError(f"El nodo rechazó la descarga: {resp.text[:200]}", 502)
-            active.update(
-                status="downloading",
-                job_id=resp.json().get("job_id"),
-                node_model_id=node_model_id,
-                progress=0,
-            )
-        elif active["status"] == "downloading":
-            resp = await fm.proxy_get(peer, f"/ocabra/downloads/{active['job_id']}")
-            if resp.status_code >= 400:
-                raise CloudError(f"No se pudo consultar la descarga: {resp.text[:200]}", 502)
-            job = resp.json()
-            active["progress"] = round(float(job.get("progress_pct") or 0), 1)
-            if job.get("status") in ("failed", "error", "cancelled"):
-                raise CloudError(f"La descarga falló: {job.get('error') or job.get('status')}", 502)
-            if job.get("status") == "completed":
-                import asyncio
-
-                active["status"] = "loading"
-                tasks[key] = asyncio.create_task(
-                    fm.proxy_request(
-                        peer, f"/ocabra/models/{active['node_model_id']}/load", {}, {}, timeout=900
-                    ),
-                    name=f"cloud-preload-load-{active['node_model_id']}",
+            plan = await asyncio.to_thread(plan_replication, row, _node_gpu_total(peer))
+            need = plan.get("min_node_version")
+            have = _node_version(peer)
+            if need and have is not None and have < tuple(need):
+                raise CloudError(
+                    "El nodo es de una versión anterior que no sabe copiar este modelo "
+                    f"(tiene {'.'.join(map(str, have))}); lánzalo de nuevo con la imagen actual",
+                    409,
                 )
-        elif active["status"] == "loading":
-            task = tasks.get(key)
-            if task is None:
-                # Lost across a restart: ask again (loading an already loaded
-                # model is a no-op on the node).
-                import asyncio
-
-                tasks[key] = asyncio.create_task(
-                    fm.proxy_request(
-                        peer, f"/ocabra/models/{active['node_model_id']}/load", {}, {}, timeout=900
-                    )
-                )
-            elif task.done():
-                tasks.pop(key, None)
-                resp = task.result()
-                data = resp.json() if resp.content else {}
-                if resp.status_code >= 400 or data.get("status") != "loaded":
-                    detail = data.get("detail") or data.get("error_message") or resp.text[:200]
-                    raise CloudError(f"No se pudo cargar: {detail}", 502)
-                active["status"] = "loaded"
+            active.update(steps=plan["steps"], step=0, node_model_id=plan["node_model_id"])
+            done = await _start_step(fm, peer, active, tasks, key)
+        else:
+            done = await _poll_step(fm, peer, active, tasks, key)
+        while done:
+            active["step"] += 1
+            if active["step"] >= len(active["steps"]):
+                active.update(status="loaded", phase=None)
+                active.pop("progress", None)
+                break
+            done = await _start_step(fm, peer, active, tasks, key)
     except Exception as exc:  # noqa: BLE001 — one model failing must not stop the rest
         tasks.pop(key, None)
         active.update(status="error", error=str(exc)[:300])
@@ -212,7 +489,9 @@ async def replicable_models(
         rows = (
             (
                 await session.execute(
-                    sa.select(ModelConfig).where(ModelConfig.backend_type.in_(LLAMA_CPP_FAMILY))
+                    sa.select(ModelConfig).where(
+                        ModelConfig.backend_type.in_((*LLAMA_CPP_FAMILY, *REPLICABLE_BACKENDS))
+                    )
                 )
             )
             .scalars()
@@ -225,14 +504,21 @@ async def replicable_models(
                 states[st.model_id] = st
         except Exception:  # noqa: BLE001 — sizes/status are a nicety
             states = {}
+
+    def _plans() -> list[tuple[dict | None, str | None]]:
+        out_: list[tuple[dict | None, str | None]] = []
+        for row in rows:
+            try:
+                out_.append((plan_replication(row, None), None))
+            except CloudError as exc:
+                out_.append((None, str(exc)))
+        return out_
+
+    plans = await asyncio.to_thread(_plans)
     out = []
-    for row in rows:
+    for row, (plan, reason) in zip(rows, plans, strict=True):
         st = states.get(row.model_id)
-        try:
-            replication_request(row, None)
-            replicable, reason = True, None
-        except CloudError as exc:
-            replicable, reason = False, str(exc)
+        replicable = plan is not None
         status = getattr(getattr(st, "status", None), "value", None)
         out.append(
             {
@@ -240,7 +526,11 @@ async def replicable_models(
                 "display_name": getattr(st, "display_name", None)
                 or row.display_name
                 or row.model_id,
-                "size_bytes": getattr(st, "disk_size_bytes", None),
+                "backend_type": str(row.backend_type),
+                # What the node will download (diffusers: only the files we
+                # use, not the whole repo), else what it takes on our disk.
+                "size_bytes": (plan or {}).get("size_bytes")
+                or getattr(st, "disk_size_bytes", None),
                 "loaded": status == "loaded",
                 "replicable": replicable,
                 "reason": reason,

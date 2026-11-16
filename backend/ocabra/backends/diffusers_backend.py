@@ -55,6 +55,17 @@ _SIZE_MAP: dict[str, tuple[int, int]] = {
 }
 
 
+
+def _models_path(value: str | Path) -> Path:
+    """An extra_config path: absolute as is, relative to the models directory.
+
+    Relative paths are what a model copied to another node carries (see
+    ``core/cloud/preload.py``): the files land in the same place under that
+    node's models directory, wherever it is mounted.
+    """
+    path = Path(value)
+    return path if path.is_absolute() else Path(settings.models_dir) / path
+
 class DiffusersBackend(BackendInterface):
 
     @classmethod
@@ -166,7 +177,7 @@ class DiffusersBackend(BackendInterface):
                 env["DIFFUSERS_PIPELINE_OVERRIDE"] = str(pipeline_override)
             gguf_transformer = diffusers_cfg.get("gguf_transformer_path")
             if gguf_transformer:
-                env["DIFFUSERS_GGUF_TRANSFORMER_PATH"] = str(gguf_transformer)
+                env["DIFFUSERS_GGUF_TRANSFORMER_PATH"] = str(_models_path(gguf_transformer))
             transformer_class = diffusers_cfg.get("transformer_class")
             if transformer_class:
                 env["DIFFUSERS_TRANSFORMER_CLASS"] = str(transformer_class)
@@ -306,6 +317,7 @@ class DiffusersBackend(BackendInterface):
         if isinstance(diffusers_cfg, dict):
             gguf_path = diffusers_cfg.get("gguf_transformer_path")
             if gguf_path:
+                gguf_path = _models_path(gguf_path)
                 # GGUF weights stay quantized in VRAM (~5 bpw for Q5_K_M),
                 # so file size ≈ transformer VRAM footprint. NF4 text
                 # encoder budget ≈ 4 GB (Qwen*-VL 7-8B), VAE ≈ 500 MB,

@@ -164,3 +164,11 @@ class DownloadJob(BaseModel):
     # identical (the registry deduplicates blobs by digest); the field exists
     # so the UI can label progress correctly.
     kind: Literal["install", "update"] = "install"
+    # Exact-files mode (replicating a model onto another node): fetch only
+    # ``allow_patterns`` of ``model_ref`` at ``revision`` into
+    # ``<models_dir>/<local_dir>``, and don't auto-register — the caller
+    # registers the model itself once every piece is in place.
+    allow_patterns: list[str] | None = None
+    local_dir: str | None = None
+    revision: str | None = None
+    register: bool = True

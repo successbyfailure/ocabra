@@ -16,6 +16,39 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.87.0 — 2026-11-16
+
+### Novedades
+
+- **Los nodos en la nube también llevan modelos de imagen (diffusers).** Al
+  lanzar un nodo, o con `POST /ocabra/cloud/nodes/{id}/models`, ya se pueden
+  elegir modelos diffusers cuyos ficheros vienen de Hugging Face (p. ej.
+  `diffusers/qwen-image-2.1`, `diffusers/qwen-image-edit-plus`). El nodo
+  instala el backend diffusers si no lo tiene, descarga **solo los ficheros
+  que usamos aquí** (el pipeline sin los pesos del transformer que no se usan,
+  y el transformer GGUF de su repo), lo registra con el mismo id y lo carga.
+  Requiere un nodo con la imagen 0.87.0 o posterior; en uno anterior el
+  modelo queda en error con el motivo.
+- `GET /ocabra/cloud/replicable-models` incluye los modelos diffusers y un
+  campo nuevo `backend_type`. Para estos, `size_bytes` es lo que el nodo va a
+  descargar.
+- Cada elemento de `preload_models` de un nodo puede pasar ahora por
+  `installing` (instalando el backend) y lleva `steps`, `step` y `phase` (qué
+  repo se está descargando).
+- `POST /ocabra/downloads` acepta un modo de ficheros exactos para Hugging
+  Face: `allow_patterns`, `local_dir` (relativo al directorio de modelos),
+  `revision` y `register: false` para no autorregistrar el modelo al acabar.
+- En diffusers, `gguf_transformer_path` puede ser relativo al directorio de
+  modelos.
+
+### Correcciones
+
+- Los modelos que se preparan en un nodo en la nube ya no cuentan como
+  inactividad: una copia grande podía hacer que el nodo se apagara por
+  inactividad a mitad de la descarga.
+
+---
+
 ## 0.86.1 — 2026-11-16
 
 ### Novedades

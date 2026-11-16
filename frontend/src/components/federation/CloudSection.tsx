@@ -42,7 +42,10 @@ function ModelPicker({
   const shown = (models ?? []).filter(
     (m) =>
       !exclude.includes(m.model_id) &&
-      (!filter || `${m.display_name} ${m.model_id}`.toLowerCase().includes(filter.toLowerCase())),
+      (!filter ||
+        `${m.display_name} ${m.model_id} ${m.backend_type === "diffusers" ? "imagen" : ""}`
+          .toLowerCase()
+          .includes(filter.toLowerCase())),
   )
   const totalBytes = (models ?? [])
     .filter((m) => picked.includes(m.model_id))
@@ -98,13 +101,18 @@ function ModelPicker({
                   }
                 />
                 <span className="truncate">{m.display_name}</span>
+                {m.backend_type === "diffusers" && (
+                  <span className="rounded-full border border-violet-500/40 px-1.5 text-[10px] text-violet-600 dark:text-violet-300">
+                    imagen
+                  </span>
+                )}
                 {m.loaded && (
                   <span className="rounded-full border border-emerald-500/40 px-1.5 text-[10px] text-emerald-600 dark:text-emerald-300">
                     cargado aquí
                   </span>
                 )}
                 <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
-                  {m.replicable ? gb(m.size_bytes) : "solo en este servidor"}
+                  {m.replicable ? gb(m.size_bytes) : "no replicable"}
                 </span>
               </label>
             )
@@ -423,7 +431,10 @@ function LaunchDialog({
         toast.error(errMsg(err))
         setGpus([])
       })
-  }, [open, info.settings])
+    // Only when the dialog opens: the section polls every 5 s and hands a new
+    // `info` object each time, which used to reset the form under the user.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   const priceOf = useCallback(
     (g: CloudGpuType) => (cloudType === "COMMUNITY" ? g.price_community : g.price_secure),
@@ -583,23 +594,29 @@ function LaunchDialog({
 }
 
 function PreloadChip({ item }: { item: CloudPreloadItem }) {
+  const pct = item.progress != null ? ` ${Math.round(item.progress)} %` : ""
+  const steps = item.steps?.length ? ` (paso ${(item.step ?? 0) + 1}/${item.steps.length})` : ""
   const label = {
     pending: "en cola",
-    downloading: `descargando${item.progress != null ? ` ${Math.round(item.progress)} %` : ""}`,
+    installing: `instalando backend${pct}`,
+    registering: "registrando",
+    downloading: `descargando${pct}${steps}`,
     loading: "cargando",
     loaded: "listo",
     error: "error",
   }[item.status]
   const cls = {
     pending: "border-border text-muted-foreground",
+    installing: "border-sky-500/40 text-sky-700 dark:text-sky-300",
+    registering: "border-sky-500/40 text-sky-700 dark:text-sky-300",
     downloading: "border-sky-500/40 text-sky-700 dark:text-sky-300",
     loading: "border-sky-500/40 text-sky-700 dark:text-sky-300",
     loaded: "border-emerald-500/40 text-emerald-600 dark:text-emerald-300",
     error: "border-red-500/40 text-red-600 dark:text-red-300",
   }[item.status]
   return (
-    <span title={item.error ?? undefined} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${cls}`}>
-      {(item.status === "downloading" || item.status === "loading") && <Loader2 size={10} className="animate-spin" />}
+    <span title={item.error ?? item.phase ?? undefined} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${cls}`}>
+      {item.status !== "pending" && item.status !== "loaded" && item.status !== "error" && <Loader2 size={10} className="animate-spin" />}
       <span className="font-mono">{item.model_id.split("/").pop()}</span> · {label}
     </span>
   )

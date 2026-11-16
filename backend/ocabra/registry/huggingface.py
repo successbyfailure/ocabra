@@ -456,6 +456,55 @@ class HuggingFaceRegistry:
         progress_callback(100.0, None)
         return Path(downloaded)
 
+    async def download_files(
+        self,
+        repo_id: str,
+        target_dir: Path,
+        allow_patterns: list[str],
+        progress_callback: Callable[[float, float | None], None],
+        revision: str | None = None,
+    ) -> Path:
+        """Fetch exactly *allow_patterns* of *repo_id* into *target_dir*.
+
+        No backend inference and no compatibility checks: the caller already
+        knows which files make up the model (it is copying them from a node
+        that serves it). Progress is the share of bytes, computed up front.
+        """
+        import fnmatch
+
+        await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
+        token = settings.hf_token or None
+        info = await asyncio.to_thread(
+            lambda: model_info(
+                repo_id=repo_id, revision=revision, files_metadata=True, token=token
+            )
+        )
+        wanted = [
+            s
+            for s in (info.siblings or [])
+            if any(fnmatch.fnmatch(s.rfilename, p) for p in allow_patterns)
+        ]
+        if not wanted:
+            raise ValueError(f"{repo_id}: none of the requested files exist in the repo")
+        total = sum(int(getattr(s, "size", 0) or 0) for s in wanted) or 1
+        done = 0
+        start = time.monotonic()
+        for sibling in wanted:
+            await asyncio.to_thread(
+                hf_hub_download,
+                repo_id=repo_id,
+                filename=sibling.rfilename,
+                revision=revision,
+                local_dir=str(target_dir),
+                token=token,
+                cache_dir=settings.hf_cache_dir or None,
+            )
+            done += int(getattr(sibling, "size", 0) or 0)
+            elapsed = max(time.monotonic() - start, 1e-6)
+            progress_callback(min(100.0, done * 100.0 / total), done / 1048576 / elapsed)
+        progress_callback(100.0, None)
+        return target_dir
+
     def _infer_backend(
         self,
         task: str | None,

@@ -78,6 +78,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
     && pip install -e "." \
     && apt-get purge -y build-essential && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
+# Backends installed on demand (diffusers, to carry our image models) pip
+# install from git. Own layer so the Python deps above stay cached.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 COPY . .
 
 # llama.cpp registered as an installed backend, exactly where the installer

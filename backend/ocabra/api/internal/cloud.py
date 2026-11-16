@@ -203,7 +203,7 @@ async def terminate_orphan(
     "/cloud/replicable-models",
     summary="Models a cloud node can carry",
     description=(
-        "Our llama.cpp models with size, whether they are loaded here, and whether "
+        "Our llama.cpp and diffusers (image) models with size, whether they are loaded here, and whether "
         "they can be replicated on a node (with the reason when not: e.g. files "
         "that only exist on this server). Loaded ones first."
     ),

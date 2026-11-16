@@ -41,6 +41,23 @@ class DownloadCreateRequest(BaseModel):
     model_ref: str
     artifact: str | None = None
     register_config: dict | None = None
+    # Exact-files mode, Hugging Face only (see ``DownloadJob``).
+    allow_patterns: list[str] | None = None
+    local_dir: str | None = None
+    revision: str | None = None
+    register: bool = True
+
+
+def _safe_local_dir(local_dir: str) -> Path:
+    """``<models_dir>/<local_dir>``, refusing anything that escapes it."""
+    root = Path(settings.models_dir).resolve()
+    rel = Path(local_dir)
+    if not local_dir.strip() or rel.is_absolute() or ".." in rel.parts:
+        raise ValueError("local_dir must be a relative path inside the models directory")
+    target = (root / rel).resolve()
+    if not target.is_relative_to(root) or target == root:
+        raise ValueError("local_dir must be a relative path inside the models directory")
+    return target
 
 
 def _rc_get(register_config: dict, snake: str, default=None):
@@ -140,11 +157,21 @@ class DownloadManager:
         artifact: str | None = None,
         register_config: dict | None = None,
         kind: str = "install",
+        allow_patterns: list[str] | None = None,
+        local_dir: str | None = None,
+        revision: str | None = None,
+        register: bool = True,
     ) -> DownloadJob:
         if source not in {"huggingface", "ollama", "bitnet"}:
             raise ValueError("source must be 'huggingface', 'ollama' or 'bitnet'")
         if kind not in {"install", "update"}:
             raise ValueError("kind must be 'install' or 'update'")
+        if local_dir is not None or allow_patterns is not None:
+            if source != "huggingface" or not local_dir or not allow_patterns:
+                raise ValueError(
+                    "allow_patterns and local_dir go together, for Hugging Face downloads"
+                )
+            _safe_local_dir(local_dir)
 
         now = datetime.now(UTC)
         job = DownloadJob(
@@ -161,6 +188,10 @@ class DownloadManager:
             started_at=now,
             completed_at=None,
             kind=kind,
+            allow_patterns=allow_patterns,
+            local_dir=local_dir,
+            revision=revision,
+            register=register,
         )
 
         await set_key(f"download:job:{job.job_id}", job.model_dump(mode="json"))
@@ -283,7 +314,15 @@ class DownloadManager:
                     loop.call_soon_threadsafe(loop.create_task, self._save_and_publish(updated))
 
             target_dir = Path(settings.models_dir)
-            if downloading.source == "huggingface":
+            if downloading.source == "huggingface" and downloading.local_dir:
+                await self._hf_registry.download_files(
+                    repo_id=downloading.model_ref,
+                    target_dir=_safe_local_dir(downloading.local_dir),
+                    allow_patterns=list(downloading.allow_patterns or []),
+                    revision=downloading.revision,
+                    progress_callback=_progress,
+                )
+            elif downloading.source == "huggingface":
                 await self._hf_registry.download(
                     repo_id=downloading.model_ref,
                     target_dir=self._hf_download_dir(downloading),
@@ -335,9 +374,10 @@ class DownloadManager:
             # Updates refresh bytes and metadata for existing deployments.
             # Auto-registration belongs only to first-time installs; running it
             # here created duplicate logical models/backends on update-all.
-            if downloading.kind == "install":
+            if downloading.kind == "install" and downloading.register:
                 await self._auto_register_model(downloading)
-            await self._refresh_registry_metadata(downloading)
+            if downloading.register:
+                await self._refresh_registry_metadata(downloading)
         except asyncio.CancelledError:
             cancelled = downloading.model_copy(
                 update={"status": "cancelled", "completed_at": datetime.now(UTC)}
@@ -703,6 +743,10 @@ async def enqueue_download(
             model_ref=request.model_ref,
             artifact=request.artifact,
             register_config=request.register_config,
+            allow_patterns=request.allow_patterns,
+            local_dir=request.local_dir,
+            revision=request.revision,
+            register=request.register,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

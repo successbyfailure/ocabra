@@ -1855,6 +1855,7 @@ export interface CloudNode {
 export interface CloudReplicableModel {
   model_id: string;
   display_name: string;
+  backend_type?: string;
   size_bytes: number | null;
   loaded: boolean;
   replicable: boolean;
@@ -1863,10 +1864,15 @@ export interface CloudReplicableModel {
 
 export interface CloudPreloadItem {
   model_id: string;
-  status: "pending" | "downloading" | "loading" | "loaded" | "error";
+  status: "pending" | "installing" | "downloading" | "registering" | "loading" | "loaded" | "error";
   progress?: number;
   error?: string;
   node_model_id?: string;
+  /** Replication steps (backend install, downloads, register, load). */
+  steps?: { kind: string; label?: string }[];
+  step?: number;
+  /** What the current step is working on (e.g. the HF repo being fetched). */
+  phase?: string | null;
 }
 
 export interface CloudNodeLaunch {
