@@ -57,7 +57,7 @@ export function gpuOccupancy(g: GPUState, ownMb: number): GpuOccupancy {
 }
 
 /** Las GPUs con el hueco que da el servidor en la vista previa, si lo da. */
-export function withCapacity(gpus: GPUState[], capacity: { index: number; availableMb: number; budgetMb: number; systemMb: number }[] | undefined | null): GPUState[] {
+export function withCapacity(gpus: GPUState[], capacity: { index: number; totalMb?: number; availableMb: number; budgetMb: number; systemMb: number }[] | undefined | null): GPUState[] {
   if (!capacity?.length) return gpus
   const by = new Map(capacity.map((c) => [c.index, c]))
   return gpus.map((g) => {
