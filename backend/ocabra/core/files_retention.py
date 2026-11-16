@@ -1,6 +1,6 @@
 """Delete batch files and uploads once they are no longer needed.
 
-The "optimal" privacy mode promises that what oCabra writes temporarily gets
+The "functional" privacy mode promises that what oCabra writes temporarily gets
 cleaned up. Batch input/output/error files were never deleted: 1,964 of them
 (89 MB, since 2026-07-26) on the production server when this was written.
 

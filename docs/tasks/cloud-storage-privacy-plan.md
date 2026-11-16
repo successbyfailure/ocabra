@@ -48,10 +48,10 @@ todo en nodos ajenos como los pods) y el segundo modo de federación.
 
 ## 2. Modos de privacidad
 
-Dos modos por nodo (`privacy_mode`): **óptimo** (el de siempre) y **0 data**.
+Dos modos por nodo (`privacy_mode`): **funcional** (lo más privado posible sin entorpecer el funcionamiento; el de siempre) y **0 data**.
 El nodo publica su modo en el heartbeat; el hub lo enseña y puede exigirlo.
 
-### Óptimo — lo que hay, pero que de verdad se limpie
+### Funcional — lo más privado posible sin entorpecer, y que de verdad se limpie
 
 Se puede escribir lo imprescindible de forma temporal y se borra en cuanto no
 hace falta. **Fallo encontrado al revisarlo:** los ficheros de batches (entrada,
@@ -90,7 +90,7 @@ Inventario de esquinas, de lo más obvio a lo menos:
 
 ## 3. Federación «Mi servidor, mis reglas»
 
-**Estado de 1 y 2:** hechos (0.92.0 discos, 0.93.0–0.93.1 privacidad y
+**Estado de 1 y 2:** hechos (0.92.0 discos, 0.93.x privacidad y
 retención). Esto es lo siguiente.
 
 ### Idea

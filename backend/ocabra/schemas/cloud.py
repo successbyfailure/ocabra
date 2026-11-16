@@ -53,8 +53,8 @@ class CloudNodeLaunch(BaseModel):
         description="Our model ids to download and load on the node once it joins",
     )
     privacy_mode: str = Field(
-        default="optimal",
-        pattern=r"^(optimal|zero_data)$",
+        default="functional",
+        pattern=r"^(functional|zero_data)$",
         description=(
             "zero_data: the node keeps nothing about requests (core/privacy.py); forces "
             "Secure Cloud and never receives the HF token"

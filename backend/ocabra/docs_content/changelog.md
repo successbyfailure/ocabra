@@ -21,12 +21,13 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 ### Novedades
 
 - **Dos modos de privacidad por nodo** (`privacyMode` en
-  `PATCH /ocabra/config`): `optimal` (el de siempre) y `zero_data`. En
+  `PATCH /ocabra/config`): `functional` (el de siempre: lo más privado
+  posible sin entorpecer el funcionamiento) y `zero_data`. En
   `zero_data` el nodo no guarda nada de las peticiones ni de quién las hace:
   sin filas en las estadísticas, sin nombres en el feed en vivo, sin contenido
   en los logs y sin trazas externas. Pensado para nodos en máquinas ajenas;
   no protege frente al dueño de la máquina.
-- Cada respuesta lleva `X-Ocabra-Privacy: optimal` o `zero-data`, y el
+- Cada respuesta lleva `X-Ocabra-Privacy: functional` o `zero-data`, y el
   heartbeat de federación publica `privacy_mode` (los peers lo enseñan).
 - `POST /ocabra/cloud/nodes` acepta `privacy_mode: "zero_data"`: el pod va a
   Secure Cloud y no recibe el token de Hugging Face.

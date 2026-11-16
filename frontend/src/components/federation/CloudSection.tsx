@@ -640,7 +640,7 @@ function LaunchDialog({
                     gpu_count: count,
                     cloud_type: effectiveCloud,
                     volume_id: volumeId || undefined,
-                    privacy_mode: zeroData ? "zero_data" : "optimal",
+                    privacy_mode: zeroData ? "zero_data" : "functional",
                     max_runtime_minutes: ttl,
                     idle_shutdown_minutes: idle,
                     name: name.trim() || undefined,

@@ -175,9 +175,10 @@ class ServerConfigPatch(BaseModel):
     privacy_mode: str | None = Field(
         default=None,
         alias="privacyMode",
-        pattern=r"^(optimal|zero_data)$",
+        pattern=r"^(functional|zero_data)$",
         description=(
-            "optimal: per-request metadata and temporary files that get cleaned up; "
+            "functional: as private as possible without getting in the way — per-request "
+            "metadata and temporary files that get cleaned up; "
             "zero_data: nothing about requests or who made them is kept (see core/privacy.py)"
         ),
     )

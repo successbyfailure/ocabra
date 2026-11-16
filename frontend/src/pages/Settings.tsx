@@ -82,7 +82,7 @@ const EMPTY_CONFIG: ServerConfig = {
   federationEnabled: false,
   federationNodeName: "",
   federationAcceptJoinRequests: false,
-  privacyMode: "optimal",
+  privacyMode: "functional",
   openaiFilesRetentionHours: 168,
   batchPriorityEnabled: true,
   batchPreemptMode: "conditional",

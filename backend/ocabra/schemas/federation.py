@@ -76,7 +76,7 @@ class PeerOut(BaseModel):
     )
     join_verification_code: str | None = None
     privacy_mode: str | None = Field(
-        default=None, description="The peer's privacy mode from its heartbeat: optimal | zero_data"
+        default=None, description="The peer's privacy mode from its heartbeat: functional | zero_data"
     )
     dial_state: str | None = Field(
         default=None,
@@ -146,7 +146,7 @@ class HeartbeatResponse(BaseModel):
     )
     privacy_mode: str | None = Field(
         default=None,
-        description="optimal | zero_data (see core/privacy.py); None from nodes older than 0.92.1",
+        description="functional | zero_data (see core/privacy.py); None from nodes older than 0.92.1",
     )
 
 

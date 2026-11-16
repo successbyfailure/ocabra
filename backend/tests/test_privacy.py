@@ -18,16 +18,16 @@ def zero_data(monkeypatch):
     monkeypatch.setattr(settings, "privacy_mode", "zero_data")
 
 
-def test_mode_defaults_to_optimal(monkeypatch):
+def test_mode_defaults_to_functional(monkeypatch):
     monkeypatch.setattr(settings, "privacy_mode", "nonsense")
-    assert privacy.mode() == "optimal" and not privacy.zero_data()
+    assert privacy.mode() == "functional" and not privacy.zero_data()
 
 
 def test_preview_is_empty_in_zero_data(zero_data):
     assert privacy.preview("the secret answer") is None
 
 
-def test_preview_kept_in_optimal():
+def test_preview_kept_in_functional():
     assert privacy.preview("x" * 500) == "x" * 200
 
 
@@ -53,7 +53,7 @@ async def test_batches_and_files_refused_in_zero_data(zero_data):
     assert exc.value.detail["error"]["code"] == "zero_data_mode"
 
 
-async def test_batches_and_files_allowed_in_optimal():
+async def test_batches_and_files_allowed_in_functional():
     await privacy.require_storage_allowed()  # no exception
 
 
@@ -64,7 +64,7 @@ def test_images_inline_in_zero_data(zero_data):
     assert _default_response_format("x", "url") == "b64_json"
 
 
-def test_images_by_url_in_optimal():
+def test_images_by_url_in_functional():
     from ocabra.api.openai.images import _default_response_format
 
     assert _default_response_format("dall-e-3", None) == "url"
@@ -81,7 +81,7 @@ def test_no_tracing_in_zero_data(zero_data, monkeypatch):
 
 
 @requires_db
-@pytest.mark.parametrize("mode, rows", [("zero_data", 0), ("optimal", 1)])
+@pytest.mark.parametrize("mode, rows", [("zero_data", 0), ("functional", 1)])
 async def test_zero_data_writes_no_request_row(mode, rows, monkeypatch):
     monkeypatch.setattr(settings, "privacy_mode", mode)
     from types import SimpleNamespace
@@ -137,7 +137,7 @@ async def test_zero_data_writes_no_request_row(mode, rows, monkeypatch):
     async with AsyncSessionLocal() as s:
         await s.execute(sa.delete(RequestStat).where(RequestStat.requested_model == marker))
         await s.commit()
-    # The control (optimal) proves the call really reaches the write.
+    # The control (functional) proves the call really reaches the write.
     assert n == rows
     if mode == "zero_data" and seen:  # the feed still counts it, without who or what
         assert seen[0]["username"] is None and seen[0]["apiKeyName"] is None

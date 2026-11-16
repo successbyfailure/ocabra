@@ -446,7 +446,7 @@ class CloudNodeManager:
         models: list[str] | None = None,
         provider: str = "runpod",
         volume_id: str | None = None,
-        privacy_mode: str = "optimal",
+        privacy_mode: str = "functional",
     ) -> dict[str, Any]:
         """Create a pod that joins us as a swarm peer. Returns the node.
 

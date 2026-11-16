@@ -146,7 +146,7 @@ class PeerState:
     # nodes down and shown in the UI.
     # What the peer reports about its own CUDA (see core/cuda_probe.py).
     cuda: dict[str, Any] | None = None
-    privacy_mode: str | None = None  # from its heartbeat: optimal | zero_data
+    privacy_mode: str | None = None  # from its heartbeat: functional | zero_data
     requests_proxied: int = 0
     last_proxied_at: float | None = None
 

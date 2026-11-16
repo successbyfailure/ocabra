@@ -1,6 +1,7 @@
-"""Privacy modes: ``optimal`` (the default) and ``zero_data``.
+"""Privacy modes: ``functional`` (the default) and ``zero_data``.
 
-* **optimal** — what oCabra always did: it may write things temporarily
+* **functional** — as private as possible without getting in the way of how
+  things work: it may write things temporarily
   (batch input/output files, images served by URL) and cleans them up once they
   are no longer needed (``openai_files_retention_hours``, ``image_url_ttl_seconds``).
   Per-request metadata (who, which model, how long — never the content) goes to
@@ -21,15 +22,15 @@ from typing import Any
 
 from ocabra.config import settings
 
-OPTIMAL = "optimal"
+FUNCTIONAL = "functional"
 ZERO_DATA = "zero_data"
-MODES = (OPTIMAL, ZERO_DATA)
+MODES = (FUNCTIONAL, ZERO_DATA)
 HEADER = "X-Ocabra-Privacy"
 
 
 def mode() -> str:
-    value = str(getattr(settings, "privacy_mode", OPTIMAL) or OPTIMAL).strip().lower()
-    return value if value in MODES else OPTIMAL
+    value = str(getattr(settings, "privacy_mode", FUNCTIONAL) or FUNCTIONAL).strip().lower()
+    return value if value in MODES else FUNCTIONAL
 
 
 def zero_data() -> bool:

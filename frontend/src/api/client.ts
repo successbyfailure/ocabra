@@ -1643,7 +1643,7 @@ function toServerConfig(raw: unknown): ServerConfig {
       data.federationAcceptJoinRequests ?? data.federation_accept_join_requests ?? false,
     ),
     privacyMode:
-      (data.privacyMode ?? data.privacy_mode) === "zero_data" ? "zero_data" : "optimal",
+      (data.privacyMode ?? data.privacy_mode) === "zero_data" ? "zero_data" : "functional",
     openaiFilesRetentionHours: Number(
       data.openaiFilesRetentionHours ?? data.openai_files_retention_hours ?? 168,
     ),
@@ -1833,7 +1833,7 @@ export function toFederationPeer(raw: unknown): FederationPeer {
     local_access_level: (d.local_access_level ?? null) as "inference" | "full" | null,
     join_state: (d.join_state ?? null) as FederationPeer["join_state"],
     join_verification_code: (d.join_verification_code ?? null) as string | null,
-    privacy_mode: (d.privacy_mode ?? d.privacyMode ?? null) as "optimal" | "zero_data" | null,
+    privacy_mode: (d.privacy_mode ?? d.privacyMode ?? null) as "functional" | "zero_data" | null,
     dial_state: (d.dial_state ?? null) as string | null,
     last_error: (d.last_error ?? null) as string | null,
     tunnel_connected: Boolean(d.tunnel_connected ?? false),

@@ -10,10 +10,10 @@ interface PrivacySettingsProps {
 
 const MODES: { value: ServerConfig["privacyMode"]; title: string; text: string }[] = [
   {
-    value: "optimal",
-    title: "Óptimo",
+    value: "functional",
+    title: "Funcional",
     text:
-      "Guarda los metadatos de cada petición (quién, qué modelo, cuánto tardó; nunca el contenido) para las " +
+      "Lo más privado posible sin entorpecer el funcionamiento. Guarda los metadatos de cada petición (quién, qué modelo, cuánto tardó; nunca el contenido) para las " +
       "estadísticas, y escribe de forma temporal lo que haga falta (ficheros de batches, imágenes por URL), " +
       "que se borra en cuanto deja de hacer falta.",
   },
@@ -72,7 +72,7 @@ export function PrivacySettings({ config, onSave }: PrivacySettingsProps) {
           </label>
         ))}
       </div>
-      {mode === "optimal" && (
+      {mode === "functional" && (
         <label className="flex flex-wrap items-center gap-2 text-sm">
           <span>Borrar ficheros de batches y subidas</span>
           <input

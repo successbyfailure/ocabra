@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.93.1"
+APP_VERSION = "0.93.2"
 
 
 class Settings(BaseSettings):
@@ -800,9 +800,9 @@ class Settings(BaseSettings):
 
     # OpenAI Files + Batches API
     openai_files_dir: str = "/data/openai_files"
-    # Privacy (core/privacy.py): "optimal" keeps per-request metadata and
+    # Privacy (core/privacy.py): "functional" keeps per-request metadata and
     # temporary files that are cleaned up; "zero_data" keeps nothing.
-    privacy_mode: str = "optimal"
+    privacy_mode: str = "functional"
     # Batch input/output files and loose uploads are deleted this long after
     # their batch finishes (or after upload, if no batch uses them). 0 = keep.
     openai_files_retention_hours: int = 168
