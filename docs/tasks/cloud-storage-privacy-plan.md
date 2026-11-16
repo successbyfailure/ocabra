@@ -3,7 +3,7 @@
 **Fecha:** 2026-11-16 · **Estado:** 🟡 en curso
 
 Tres piezas, en este orden: discos de RunPod (para que un pod nuevo arranque
-con modelos y backends ya puestos), los dos modos de privacidad (pensando sobre
+con los modelos ya descargados), los dos modos de privacidad (pensando sobre
 todo en nodos ajenos como los pods) y el segundo modo de federación.
 
 ---
@@ -27,14 +27,16 @@ todo en nodos ajenos como los pods) y el segundo modo de federación.
 ### Diseño
 
 - **El disco solo guarda lo reproducible:** modelos (`/data/models`,
-  `/data/hf_cache`, `/data/ollama_models`) y backends (`/data/backends`).
+  `/data/hf_cache`, `/data/ollama_models`). **Los backends no**: un venv son
+  decenas de miles de ficheros pequeños y el disco de red paga un viaje por
+  fichero (el primer pod con disco tardó más de 10 min solo en desempaquetar
+  diffusers ahí; 35 s en disco local). Se instalan precompilados en el disco
+  local en ~90 s.
   **Nunca** la base de datos, Redis, ficheros de batches ni salidas: eso sigue
   en el disco efímero del contenedor (y en modo 0 data, en RAM). Así un disco
   compartido entre pods no arrastra datos de usuarios de un pod al siguiente.
-- Se monta en `/persist` y el entrypoint del nodo enlaza esas carpetas allí. Los
-  backends instalados por OCI tienen rutas absolutas `/data/backends/<tipo>`,
-  así que se enlaza el directorio entero y se copia una vez el llama.cpp que
-  trae la imagen.
+- Se monta en `/persist` y el entrypoint del nodo enlaza allí las carpetas de
+  modelos.
 - **Un disco, un pod a la vez** (la documentación no aclara el montaje
   simultáneo y escribir a la vez desde dos nodos corrompería descargas).
 - Al lanzar con disco: Secure Cloud forzado, `dataCenterIds` = el del disco y el
@@ -77,7 +79,7 @@ Inventario de esquinas, de lo más obvio a lo menos:
 | **Caché de prompt / KV** (llama.cpp guarda el prompt anterior en el slot; `--slot-save-path` lo escribiría a disco) | Nunca a disco; opcional «sin caché entre peticiones» (más privado, más lento) — decisión del usuario. |
 | **Base de datos y Redis del pod** | En `tmpfs`: al apagar no queda nada; Redis ya va sin persistencia. |
 | **Swap y volcados de memoria** | `ulimit -c 0`; sin swap en el contenedor. |
-| **Disco de modelos (network volume)** | Solo modelos y backends, nunca nada de usuarios (sección 1). |
+| **Disco de modelos (network volume)** | Solo modelos, nunca nada de usuarios (sección 1). |
 | **Langfuse / trazas externas** | Prohibidas (hoy desactivadas aquí). |
 | **Feed en vivo y panel remoto** | Sin nombre de usuario ni clave: «petición» y poco más. |
 | **Agentes y MCP** (ejecuciones, resultados de herramientas) | Sin persistir ejecuciones. |

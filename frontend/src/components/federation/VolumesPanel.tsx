@@ -58,7 +58,7 @@ function CreateVolumeDialog({
         <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[95vw] max-w-lg -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-card p-5">
           <Dialog.Title className="text-lg font-semibold">Nuevo disco de modelos</Dialog.Title>
           <Dialog.Description className="mt-1 text-sm text-muted-foreground">
-            Guarda modelos y backends entre pods: el siguiente nodo arranca con ellos ya descargados. Solo
+            Guarda los modelos entre pods: el siguiente nodo arranca con ellos ya descargados. Solo
             guarda eso: ni datos ni peticiones. Ata los pods a su centro de datos y a Secure Cloud, así que
             elige uno con las GPUs que vayas a usar.
           </Dialog.Description>
@@ -209,7 +209,7 @@ export function VolumesPanel() {
                 disabled={busy === v.id || Boolean(v.in_use_by)}
                 title={v.in_use_by ? "Termina antes el nodo que lo usa" : undefined}
                 onClick={async () => {
-                  if (!window.confirm(`¿Borrar ${v.name}? Se pierden los modelos y backends que guarda.`)) return
+                  if (!window.confirm(`¿Borrar ${v.name}? Se pierden los modelos que guarda.`)) return
                   setBusy(v.id)
                   try {
                     await api.federation.cloud.deleteVolume(v.id)

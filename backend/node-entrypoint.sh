@@ -15,12 +15,16 @@ ulimit -c 0 || true
 mkdir -p /data/models /data/hf_cache /data/ollama_models
 
 # Network volume (OCABRA_PERSIST_DIR, mounted by the hub when it launches the
-# pod with one): models, HF cache, Ollama store and backends live there, so a
-# new pod finds them already downloaded/installed. Nothing else goes there —
-# the database, Redis, batches and outputs stay on the ephemeral disk.
+# pod with one): models, HF cache and Ollama store live there, so a new pod
+# finds them already downloaded. Backends do NOT: a venv is tens of thousands
+# of small files, and the network volume pays a round trip per file — the
+# first pod with a volume spent over 10 minutes just unpacking diffusers there
+# (35 s on a local disk), and every import would pay it again. They install
+# prebuilt from GHCR to the local disk in ~90 s instead. The database, Redis,
+# batches and outputs stay on the ephemeral disk too.
 if [ -n "${OCABRA_PERSIST_DIR:-}" ] && [ -d "${OCABRA_PERSIST_DIR}" ]; then
     P="${OCABRA_PERSIST_DIR}"
-    mkdir -p "$P/models" "$P/hf_cache" "$P/ollama_models" "$P/backends"
+    mkdir -p "$P/models" "$P/hf_cache" "$P/ollama_models"
     for d in models hf_cache ollama_models; do
         if [ -d "/data/$d" ] && [ ! -L "/data/$d" ]; then
             cp -an "/data/$d/." "$P/$d/" 2>/dev/null || true
@@ -28,21 +32,7 @@ if [ -n "${OCABRA_PERSIST_DIR:-}" ] && [ -d "${OCABRA_PERSIST_DIR}" ]; then
         fi
         ln -sfn "$P/$d" "/data/$d"
     done
-    if [ ! -L /data/backends ]; then
-        # Backends the image ships (llama.cpp) win over an older copy on the
-        # volume; the rest (installed on demand) stay as they are there.
-        for b in /data/backends/*/; do
-            [ -d "$b" ] || continue
-            name="$(basename "$b")"
-            if ! cmp -s "$b/metadata.json" "$P/backends/$name/metadata.json"; then
-                rm -rf "$P/backends/$name"
-                cp -a "$b" "$P/backends/$name"
-            fi
-        done
-        rm -rf /data/backends
-        ln -s "$P/backends" /data/backends
-    fi
-    echo "[ocabra-node] models and backends on the network volume at $P ($(du -sh "$P" 2>/dev/null | cut -f1))"
+    echo "[ocabra-node] models on the network volume at $P"
 fi
 
 PG_BIN="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)"

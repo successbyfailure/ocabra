@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.95.2 — 2026-11-16
+
+### Cambios
+
+- Los discos de modelos de los nodos en la nube guardan solo los modelos (y
+  la caché de Hugging Face y de Ollama), ya no los backends: en un disco de
+  red, los miles de ficheros pequeños de un backend tardaban más de 10 minutos
+  en desempaquetarse. Los backends se instalan precompilados en el disco local
+  del nodo (~90 s).
+
+---
+
 ## 0.95.0 — 2026-11-16
 
 ### Novedades
