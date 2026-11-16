@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.84.3"
+APP_VERSION = "0.85.0"
 
 
 class Settings(BaseSettings):
@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     ai_models_root: str = "/docker/ai-models"
     hf_token: str = ""
     ollama_base_url: str = "http://ollama:11434"
+    # False on hosts without an Ollama daemon (the ocabra-node image): skips the
+    # inventory/spill loops and startup discovery, which otherwise warn every
+    # 15 s. Pulling Ollama tags still works (straight from the registry).
+    ollama_enabled: bool = True
     # One shared Ollama daemon (the per-GPU pools were retired 2026-11-12).
     # Its global parallelism and context live in ``ollama_env_file``, which the
     # ``ollama`` compose service reads; changing them from the UI rewrites the
@@ -311,7 +315,11 @@ class Settings(BaseSettings):
     # transcriptions without diarization peaked at 2,682 MiB, 2026-11-11), and
     # grow to the probed maximum only when a request needs it. Per preset:
     # runtime_policy.reserve_mb_by_preset.
-    llama_cpp_multi_gpu_reserve_mb: dict[str, int] = {"0": 2700}
+    # 2026-11-16: 2700 → 3300. Whisper already holds 2,838 MiB on the 3060 and
+    # the VRAM watchdog evicts above 96 % of the card (~490 MiB of headroom),
+    # so nemotron-3.5-lightning launched at its reserve-trimmed context still
+    # hit 96.9 % and was evicted and reloaded every minute or two.
+    llama_cpp_multi_gpu_reserve_mb: dict[str, int] = {"0": 3300}
     # After growing above that starting context, go back to it once the worker
     # has been idle this long, so the reserve is free again.
     llama_cpp_return_to_initial_seconds: int = 120

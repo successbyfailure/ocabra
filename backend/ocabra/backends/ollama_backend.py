@@ -159,6 +159,10 @@ class OllamaBackend(BackendInterface):
         the real (correctly reported by NVML, but unattributed) free memory.
         """
         discovered: list[dict[str, Any]] = []
+        from ocabra.config import settings as _settings
+
+        if not _settings.ollama_enabled:
+            return discovered
         url = self._endpoint()
         try:
             details = await self._registry_for(url).list_loaded_details()

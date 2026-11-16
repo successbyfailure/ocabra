@@ -507,3 +507,24 @@ def test_cuda_probe_outcomes(monkeypatch):
         raise OSError("not found")
 
     assert run(missing)["ok"] is None
+
+
+async def test_no_free_machine_is_a_clear_409():
+    async def handler(request):
+        return httpx.Response(
+            400,
+            json={
+                "title": "Bad Request",
+                "status": 400,
+                "detail": "This machine does not have the resources to deploy your pod. Please try a different machine",
+            },
+        )
+
+    client = _rp(handler)
+    with pytest.raises(CloudError) as exc:
+        await client.create_pod(
+            PodSpec("n", "i", "NVIDIA GeForce RTX 4090", 1, "COMMUNITY", 20, {})
+        )
+    await client.aclose()
+    assert exc.value.status == 409
+    assert "ninguna máquina libre" in str(exc.value) and "Community" in str(exc.value)

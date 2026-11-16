@@ -3,7 +3,9 @@ import * as Dialog from "@radix-ui/react-dialog"
 import { AlertTriangle, Cloud, Cpu, KeyRound, Loader2, Power, Rocket, Settings2, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
-import type { CloudGpuType, CloudNode, CloudProviderInfo, CloudSettings } from "@/types"
+import type { CloudGpuType, CloudNode, CloudPreloadItem, CloudProviderInfo, CloudSettings, ModelState } from "@/types"
+
+const LLAMA_FAMILY = new Set(["llama_cpp", "llamacpp_mks"])
 
 /**
  * Nube · RunPod. Un nodo en la nube es un pod con la imagen ocabra-node que se
@@ -235,9 +237,16 @@ function LaunchDialog({
   const [idle, setIdle] = useState(info.settings.default_idle_minutes)
   const [name, setName] = useState("")
   const [busy, setBusy] = useState(false)
+  const [ourModels, setOurModels] = useState<ModelState[]>([])
+  const [picked, setPicked] = useState<string[]>([])
 
   useEffect(() => {
     if (!open) return
+    setPicked([])
+    api.models
+      .list()
+      .then((all) => setOurModels(all.filter((m) => LLAMA_FAMILY.has(String(m.backendType)))))
+      .catch(() => setOurModels([]))
     setCloudType(info.settings.cloud_type)
     setTtl(info.settings.default_ttl_minutes)
     setIdle(info.settings.default_idle_minutes)
@@ -275,7 +284,7 @@ function LaunchDialog({
         <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[95vw] max-w-2xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-card p-5">
           <Dialog.Title className="text-lg font-semibold">Lanzar nodo en RunPod</Dialog.Title>
           <Dialog.Description className="mt-1 text-sm text-muted-foreground">
-            Se une solo a esta federación en modo enjambre. De momento arranca sin modelos: la precarga es lo siguiente que llega.
+            Se une solo a esta federación en modo enjambre y descarga y carga los modelos que elijas.
           </Dialog.Description>
 
           <div className="mt-4 flex gap-2">
@@ -350,6 +359,31 @@ function LaunchDialog({
             </label>
           </div>
 
+          <div className="mt-3">
+            <div className="text-sm text-muted-foreground">
+              Modelos a llevar <span className="text-xs">(se descargan y cargan al unirse; llegan con tu misma configuración)</span>
+            </div>
+            <div className="mt-1 flex max-h-28 flex-wrap gap-1.5 overflow-y-auto">
+              {ourModels.length === 0 ? (
+                <span className="text-xs text-muted-foreground">No hay modelos de llama.cpp que replicar.</span>
+              ) : (
+                ourModels.map((m) => {
+                  const on = picked.includes(m.modelId)
+                  return (
+                    <button
+                      key={m.modelId}
+                      type="button"
+                      className={`rounded-full border px-2 py-0.5 text-xs ${on ? "border-primary bg-primary/15" : "border-border hover:bg-muted"}`}
+                      onClick={() => setPicked(on ? picked.filter((x) => x !== m.modelId) : [...picked, m.modelId])}
+                    >
+                      {m.displayName || m.modelId}
+                    </button>
+                  )
+                })
+              )}
+            </div>
+          </div>
+
           <div className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
             {chosen ? (
               <>
@@ -381,6 +415,7 @@ function LaunchDialog({
                     max_runtime_minutes: ttl,
                     idle_shutdown_minutes: idle,
                     name: name.trim() || undefined,
+                    models: picked,
                   })
                   toast.success(`${node.name} lanzado: tardará unos minutos en unirse`)
                   onOpenChange(false)
@@ -398,6 +433,29 @@ function LaunchDialog({
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  )
+}
+
+function PreloadChip({ item }: { item: CloudPreloadItem }) {
+  const label = {
+    pending: "en cola",
+    downloading: `descargando${item.progress != null ? ` ${Math.round(item.progress)} %` : ""}`,
+    loading: "cargando",
+    loaded: "listo",
+    error: "error",
+  }[item.status]
+  const cls = {
+    pending: "border-border text-muted-foreground",
+    downloading: "border-sky-500/40 text-sky-700 dark:text-sky-300",
+    loading: "border-sky-500/40 text-sky-700 dark:text-sky-300",
+    loaded: "border-emerald-500/40 text-emerald-600 dark:text-emerald-300",
+    error: "border-red-500/40 text-red-600 dark:text-red-300",
+  }[item.status]
+  return (
+    <span title={item.error ?? undefined} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${cls}`}>
+      {(item.status === "downloading" || item.status === "loading") && <Loader2 size={10} className="animate-spin" />}
+      <span className="font-mono">{item.model_id.split("/").pop()}</span> · {label}
+    </span>
   )
 }
 
@@ -423,6 +481,13 @@ function NodeRow({ node, onChanged }: { node: CloudNode; onChanged: () => void }
         {node.requests_proxied ? ` · ${node.requests_proxied} peticiones` : ""}
         {!live && node.terminate_reason ? ` · terminado por ${REASONS[node.terminate_reason] ?? node.terminate_reason}` : ""}
       </span>
+      {node.preload_models.length > 0 && (
+        <div className="flex w-full flex-wrap gap-1.5">
+          {node.preload_models.map((p) => (
+            <PreloadChip key={p.model_id} item={p} />
+          ))}
+        </div>
+      )}
       {node.error && <span className="w-full text-xs text-red-600 dark:text-red-300">{node.error}</span>}
       {live && (
         <button

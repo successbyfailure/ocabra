@@ -1843,12 +1843,21 @@ export interface CloudNode {
   peer_name: string | null;
   peer_online: boolean;
   requests_proxied: number;
+  preload_models: CloudPreloadItem[];
   error: string | null;
   created_at: string | null;
   started_at: string | null;
   last_active_at: string | null;
   terminated_at: string | null;
   terminate_reason: string | null;
+}
+
+export interface CloudPreloadItem {
+  model_id: string;
+  status: "pending" | "downloading" | "loading" | "loaded" | "error";
+  progress?: number;
+  error?: string;
+  node_model_id?: string;
 }
 
 export interface CloudNodeLaunch {
@@ -1858,6 +1867,7 @@ export interface CloudNodeLaunch {
   max_runtime_minutes?: number;
   idle_shutdown_minutes?: number;
   name?: string;
+  models?: string[];
 }
 
 export interface FederationJoinOutgoing {

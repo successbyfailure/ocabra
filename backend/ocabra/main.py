@@ -167,6 +167,9 @@ async def _ollama_inventory_loop(
 ) -> None:
     from ocabra.registry.ollama_registry import OllamaRegistry
 
+    if not settings.ollama_enabled:
+        logger.info("ollama_inventory_loop_disabled")
+        return
     interval_s = max(5, int(settings.ollama_inventory_sync_interval_seconds))
     registry = OllamaRegistry()
     logger.info("ollama_inventory_loop_started", interval_s=interval_s)

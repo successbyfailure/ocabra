@@ -16,6 +16,26 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.85.0 — 2026-11-16
+
+### Novedades
+
+- **Los nodos en la nube llegan con modelos.** `POST /ocabra/cloud/nodes`
+  acepta `models`: identificadores de modelos de este servidor (de llama.cpp)
+  que el nodo descarga y carga en cuanto se une, con la misma configuración y
+  el mismo identificador, así que las peticiones a esos modelos pueden ir a él.
+  Si la reserva de memoria de un modelo no cabe en la GPU del nodo, se ajusta
+  (y se reduce su contexto) en vez de fallar. El progreso de cada modelo
+  aparece en `preload_models` de `GET /ocabra/cloud/nodes`.
+
+### Correcciones
+
+- **"No hay máquina libre" en RunPod se explica.** Cuando RunPod no tiene una
+  máquina disponible para la GPU elegida, el error dice eso y qué probar, con
+  código 409, en lugar de un 400 genérico.
+
+---
+
 ## 0.84.3 — 2026-11-16
 
 ### Correcciones

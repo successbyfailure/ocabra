@@ -47,3 +47,8 @@ class CloudNodeLaunch(BaseModel):
         default=None, ge=0, le=24 * 60, description="0 = never; None = provider default"
     )
     name: str | None = Field(default=None, max_length=40, pattern=r"^[A-Za-z0-9 _.-]*$")
+    models: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Our model ids to download and load on the node once it joins",
+    )

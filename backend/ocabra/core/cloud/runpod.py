@@ -147,7 +147,21 @@ class RunPodClient:
             # The node needs no inbound port: it dials us. No SSH either.
             "ports": [],
         }
-        resp = await self._request("POST", "/pods", json=body)
+        try:
+            resp = await self._request("POST", "/pods", json=body)
+        except CloudError as exc:
+            # RunPod answers 400 both for a bad request and for "no machine
+            # free right now" (its catalog stock is approximate). The latter
+            # is the common one and needs a different action from the user.
+            if "does not have the resources" in str(exc) or "no longer any instances" in str(exc):
+                cloud = "Community" if spec.cloud_type == "COMMUNITY" else "Secure"
+                raise CloudError(
+                    f"RunPod no tiene ahora mismo ninguna máquina libre con {spec.gpu_type_id} "
+                    f"en {cloud} Cloud (el stock del catálogo es aproximado). Prueba otra GPU "
+                    f"o la otra nube, o vuelve a intentarlo en unos minutos.",
+                    409,
+                ) from exc
+            raise
         if resp.status_code == 202:
             raise CloudError("RunPod no tiene capacidad ahora mismo para esa GPU", 409)
         return pod_info(resp.json())

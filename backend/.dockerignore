@@ -1,0 +1,9 @@
+# Build context of the main backend images (Dockerfile, Dockerfile.slim).
+# The local virtualenv was being copied into production images (~190 MB) by
+# `COPY . .`; nothing in them reads it.
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache

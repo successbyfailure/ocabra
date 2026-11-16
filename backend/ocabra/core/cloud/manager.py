@@ -137,6 +137,8 @@ class CloudNodeManager:
         self.last_error: str | None = None
         self._gpu_cache: tuple[float, list[dict[str, Any]]] | None = None
         self._lock = asyncio.Lock()
+        # Background model loads started by the preload driver.
+        self._preload_tasks: dict = {}
 
     @staticmethod
     def _default_client_factory(provider: str, api_key: str) -> CloudProviderClient:
@@ -295,6 +297,7 @@ class CloudNodeManager:
             "peer_name": peer.name if peer else None,
             "peer_online": bool(peer and peer.online),
             "requests_proxied": peer.requests_proxied if peer else 0,
+            "preload_models": row.preload_models or [],
             "error": row.error,
             "created_at": row.created_at,
             "started_at": row.started_at,
@@ -324,10 +327,19 @@ class CloudNodeManager:
         max_runtime_minutes: int | None = None,
         idle_shutdown_minutes: int | None = None,
         name: str | None = None,
+        models: list[str] | None = None,
         provider: str = "runpod",
     ) -> dict[str, Any]:
-        """Create a pod that joins us as a swarm peer. Returns the node."""
+        """Create a pod that joins us as a swarm peer. Returns the node.
+
+        *models* are our model ids to replicate there once it joins
+        (see core/cloud/preload.py); they are validated before renting anything.
+        """
+        from ocabra.core.cloud import preload
         from ocabra.db.cloud import CloudNode
+
+        models = list(dict.fromkeys(models or []))
+        await preload.validate_models(self.fm.session_factory, models)
 
         cfg = (await self.get_provider(provider))["settings"]
         hub_url = (cfg.get("hub_url") or getattr(self.fm.settings, "public_url", "") or "").rstrip(
@@ -405,6 +417,7 @@ class CloudNodeManager:
                 idle_shutdown_minutes=idle or None,
                 invite_id=uuid.UUID(invite["id"]),
                 started_at=_now(),
+                preload_models=[{"model_id": m, "status": "pending"} for m in models] or None,
             )
             session.add(row)
             await session.commit()
@@ -561,6 +574,20 @@ class CloudNodeManager:
                         peer = next(
                             (p for p in self.fm.get_all_peers() if p.peer_id == str(row.peer_id)),
                             None,
+                        )
+                    if (
+                        peer is not None
+                        and peer.online
+                        and row.preload_models
+                        and any(
+                            i.get("status") in ("pending", "downloading", "loading")
+                            for i in row.preload_models
+                        )
+                    ):
+                        from ocabra.core.cloud import preload
+
+                        row.preload_models = await preload.drive(
+                            self.fm, peer, row.preload_models, self._preload_tasks
                         )
                     if peer is not None and peer.last_proxied_at:
                         active = datetime.fromtimestamp(peer.last_proxied_at, UTC)
