@@ -154,3 +154,57 @@ async def test_realtime_ws_records_completed_session() -> None:
     assert recorded["request_kind"] == "realtime_session"
     assert recorded["status_code"] == 101
     assert recorded["model_id"] == "vllm/test-model"
+
+
+@pytest.mark.asyncio
+async def test_realtime_ws_refuses_a_model_outside_the_users_groups() -> None:
+    """SEG-07: Realtime never checked group grants, so any key could use any
+    LLM, STT or TTS. A denied model gets the same answer as an unknown one."""
+    user = _context(role="user", accessible_model_ids={"allowed:8b"})
+    profile = SimpleNamespace(profile_id="secret:8b", base_model_id="llamacpp_mks/secret:8b",
+                              enabled=True)
+    websocket = SimpleNamespace(
+        state=SimpleNamespace(),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                worker_pool=object(),
+                model_manager=object(),
+                profile_registry=SimpleNamespace(get=AsyncMock(return_value=profile)),
+            )
+        ),
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={},
+        accept=AsyncMock(),
+        send_json=AsyncMock(),
+        close=AsyncMock(),
+    )
+    session_cls = MagicMock()
+
+    with (
+        patch("ocabra.api.openai.realtime._authenticate_ws", new=AsyncMock(return_value=user)),
+        patch("ocabra.api.openai.realtime.RealtimeSession", session_cls),
+    ):
+        await realtime_ws(websocket, model="secret:8b", intent="", conversation_id="",
+                          num_speakers=0)
+
+    session_cls.assert_not_called()
+    error = websocket.send_json.await_args.args[0]
+    assert error["error"]["code"] == "model_not_found"
+    websocket.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_user_may_use_realtime_model_follows_the_rest_rule() -> None:
+    from ocabra.api.openai.realtime import user_may_use_realtime_model
+
+    profile = SimpleNamespace(profile_id="chat:8b", base_model_id="llamacpp_mks/chat:8b")
+    registry = SimpleNamespace(get=AsyncMock(return_value=profile))
+    granted_profile = _context(role="user", accessible_model_ids={"chat:8b"})
+    granted_base = _context(role="user", accessible_model_ids={"llamacpp_mks/chat:8b"})
+    outsider = _context(role="user", accessible_model_ids={"other:4b"})
+
+    for user, allowed in ((granted_profile, True), (granted_base, True), (outsider, False),
+                          (_context(), True), (None, True)):
+        assert await user_may_use_realtime_model(
+            user, "chat:8b", "llamacpp_mks/chat:8b", profile_registry=registry
+        ) is allowed

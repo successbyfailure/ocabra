@@ -156,7 +156,7 @@ async def chat_completions(
                 target, peer = "local", None
             else:
                 target, peer = await resolve_federated(
-                    model_id, model_manager, federation_manager, profile_registry
+                    model_id, model_manager, federation_manager, profile_registry, user=user
                 )
                 if execution_policy == "remote" and fed_profile is not None:
                     forced_peer = federation_manager.find_best_peer(fed_profile.base_model_id)

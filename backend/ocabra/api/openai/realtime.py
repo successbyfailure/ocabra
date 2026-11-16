@@ -126,6 +126,25 @@ async def resolve_realtime_model_id(
     return model
 
 
+async def user_may_use_realtime_model(
+    user: UserContext | None,
+    requested: str,
+    resolved: str | None,
+    *,
+    profile_registry,
+) -> bool:
+    """Group ACL for a model named in a Realtime session.
+
+    Same rule as the REST endpoints (``resolve_profile``): the caller needs a
+    grant for the requested profile or for its base model. ``user=None`` (a
+    session built directly, as in tests) is not restricted.
+    """
+    if user is None or user.can_access_model(requested, resolved):
+        return True
+    profile = await profile_registry.get(requested) if profile_registry is not None else None
+    return profile is not None and user.can_access_model(profile.profile_id, profile.base_model_id)
+
+
 async def resolve_realtime_llm_runtime_plan(
     base_model_id: str,
     *,
@@ -227,6 +246,13 @@ async def realtime_ws(
         model_manager=model_manager,
         router_resolver=router_resolver,
     )
+    if resolved_model_id is not None and not await user_may_use_realtime_model(
+        user, model, resolved_model_id, profile_registry=profile_registry
+    ):
+        # Same answer as an unknown model, so the name of a model outside the
+        # caller's groups is not confirmed.
+        logger.info("realtime_model_access_denied", model=model, user_id=user.user_id)
+        resolved_model_id = None
     if resolved_model_id is None:
         # A router with no routable target (or a profile without a base model) used to start a
         # session with model=None that waited for an LLM forever. Fail loudly instead.

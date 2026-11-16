@@ -182,3 +182,19 @@ def test_integrity_error_on_email_translates_to_email_taken():
 
     assert resp.status_code == 409
     assert resp.json()["detail"]["error"] == "email_taken"
+
+
+def test_create_rejects_a_weak_password_before_touching_the_db():
+    """SEG-01: admins could create accounts with empty or default passwords."""
+    app = _make_app()
+    session_factory = MagicMock()
+
+    with patch("ocabra.database.AsyncSessionLocal", session_factory):
+        resp = TestClient(app).post(
+            "/ocabra/users",
+            json={"username": "bob", "password": "ocabra", "role": "user"},
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "weak_password"
+    session_factory.assert_not_called()

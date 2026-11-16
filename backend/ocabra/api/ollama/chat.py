@@ -110,7 +110,7 @@ async def chat(
             # anywhere" branch and the caller received 404 model_not_found
             # from the federation layer, before resolve_profile ever ran.
             target, peer = await resolve_federated(
-                ollama_model, model_manager, federation_manager, profile_registry
+                ollama_model, model_manager, federation_manager, profile_registry, user=user
             )
             if target == "remote":
                 import structlog as _structlog

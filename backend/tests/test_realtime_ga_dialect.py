@@ -354,3 +354,45 @@ async def test_el_flujo_clasico_emite_la_transcripcion_del_usuario(monkeypatch):
     assert ev and ev[0]["transcript"] == "¿Cuál es la capital de Francia?"
     creado = next(e for e in _events(s) if e["type"] == "conversation.item.created")
     assert ev[0]["item_id"] == creado["item"]["id"]
+
+
+
+@pytest.mark.asyncio
+async def test_session_update_ignores_a_stt_or_tts_outside_the_users_groups(monkeypatch):
+    """SEG-07: ``session.update`` let a restricted key switch to any STT or TTS."""
+    from ocabra.api._deps_auth import UserContext
+
+    s = _session(monkeypatch)
+    s._user = UserContext(user_id="u", username="u", role="user", accessible_model_ids=set())
+    s.stt_model_id = "local/stt-the-session-started-with"
+
+    await s._handle_session_update(
+        {
+            "type": "session.update",
+            "session": {
+                "input_audio_transcription": {"model": "whisper/turbo"},
+                "tts_model": "piper-es-es-davefx-medium",
+            },
+        }
+    )
+
+    # Neither switch was applied: STT and TTS stay as they were.
+    assert s.stt_model_id == "local/stt-the-session-started-with"
+    assert s.tts_model_id == "piper/es_MX-claude-high"
+
+
+@pytest.mark.asyncio
+async def test_session_update_applies_a_granted_tts(monkeypatch):
+    from ocabra.api._deps_auth import UserContext
+
+    s = _session(monkeypatch)
+    s._user = UserContext(
+        user_id="u", username="u", role="user",
+        accessible_model_ids={"piper-es-es-davefx-medium"},
+    )
+
+    await s._handle_session_update(
+        {"type": "session.update", "session": {"tts_model": "piper-es-es-davefx-medium"}}
+    )
+
+    assert s.tts_model_id == "piper/es_ES-davefx-medium"

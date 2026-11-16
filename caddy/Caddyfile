@@ -19,6 +19,16 @@
 }
 
 :80 {
+    # Cabeceras de seguridad que no rompen nada: el navegador no adivina el
+    # tipo de un fichero (nosniff) y no se manda la URL completa a otros
+    # sitios. Ni X-Frame-Options ni CSP todavía: el panel podría estar
+    # embebido en un iframe (Home Assistant) y Swagger carga de un CDN.
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
     # API routes → backend
     handle /v1/* {
         import api
@@ -57,7 +67,11 @@
     handle /openapi.json {
         import api
     }
+    # Las métricas de Prometheus dicen qué modelos hay y cuánto se usan: solo
+    # desde la red local (la IP real del cliente, resuelta tras openresty).
     handle /metrics {
+        @public not client_ip private_ranges
+        respond @public 403
         import api
     }
 

@@ -4,9 +4,9 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 
-from fastapi import Depends
+from fastapi import Depends, HTTPException
 
-from ocabra.api._deps_auth import UserContext, get_current_user
+from ocabra.api._deps_auth import ROLE_HIERARCHY, UserContext, get_current_user
 
 
 async def get_ollama_user(
@@ -26,6 +26,24 @@ async def get_ollama_user(
     Raises:
         HTTPException 401: When authentication is required but missing or invalid.
     """
+    return user
+
+
+async def get_ollama_model_manager(
+    user: UserContext = Depends(get_ollama_user),
+) -> UserContext:
+    """Like :func:`get_ollama_user`, but require the ``model_manager`` role.
+
+    For the endpoints that change the model catalogue (``/api/pull``,
+    ``/api/delete``): they act on every user's models, not on the caller's.
+    The error keeps Ollama's ``{"error": "..."}`` shape.
+    """
+    if user.is_anonymous:
+        raise HTTPException(status_code=401, detail={"error": "authentication required"})
+    if ROLE_HIERARCHY.get(user.role, -1) < ROLE_HIERARCHY["model_manager"]:
+        raise HTTPException(
+            status_code=403, detail={"error": "role 'model_manager' or higher required"}
+        )
     return user
 
 

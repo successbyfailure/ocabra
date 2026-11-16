@@ -2,11 +2,14 @@ import asyncio
 import contextlib
 import json
 import time
+from urllib.parse import urlsplit
 
+import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ocabra.core.auth_manager import AuthError, decode_access_token
 from ocabra.redis_client import get_redis
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["websocket"])
 
@@ -36,6 +39,24 @@ async def _shared_models_activity(websocket: WebSocket) -> dict:
         return _activity_cache["data"]  # type: ignore[return-value]
 
 
+def _same_origin(websocket: WebSocket) -> bool:
+    """Reject a browser connecting from another site (cross-site WebSocket hijacking).
+
+    The dashboard opens the socket against its own host, so a browser's
+    ``Origin`` must name the same host as ``Host`` (Caddy forwards it as is).
+    No ``Origin`` means a non-browser client, which cannot ride a victim's
+    cookie.
+    """
+    origin = websocket.headers.get("origin")
+    if not origin:
+        return True
+    host = websocket.headers.get("host", "")
+    if urlsplit(origin).netloc.lower() == host.lower():
+        return True
+    logger.warning("ws_origin_rejected", origin=origin[:200], host=host[:200])
+    return False
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """Real-time event stream over WebSocket.
@@ -48,12 +69,19 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     until it sends ``{"unsubscribe": "models_activity"}``.
     """
     token = websocket.cookies.get("ocabra_session")
-    if not token:
+    if not token or not _same_origin(websocket):
         await websocket.close(code=1008)
         return
-    try:
-        decode_access_token(token)
-    except AuthError:
+    # Same checks as every HTTP request (signature, expiry, revocation list and
+    # an active user), not just the signature: a closed session or a disabled
+    # user used to keep receiving events until the token expired (up to 30 days
+    # with "remember me").
+    from ocabra.api._deps_auth import _resolve_jwt_cookie
+    from ocabra.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        user = await _resolve_jwt_cookie(token, session)
+    if user is None:
         await websocket.close(code=1008)
         return
 

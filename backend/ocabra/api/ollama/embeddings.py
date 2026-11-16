@@ -54,7 +54,9 @@ async def _run_embeddings(
         if _settings.federation_enabled:
             from ocabra.core.federation import resolve_federated
 
-            target, peer = await resolve_federated(ollama_model, model_manager, federation_manager)
+            target, peer = await resolve_federated(
+                ollama_model, model_manager, federation_manager, user=user
+            )
             if target == "remote":
                 import json as _json
 

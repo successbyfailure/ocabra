@@ -45,6 +45,56 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode(), hashed_bytes)
 
 
+async def hash_password_async(plain: str) -> str:
+    """:func:`hash_password` off the event loop (bcrypt cost 12 takes ~250 ms)."""
+    import asyncio
+
+    return await asyncio.to_thread(hash_password, plain)
+
+
+async def verify_password_async(plain: str, hashed: str) -> bool:
+    """:func:`verify_password` off the event loop.
+
+    On the loop, every login stalled every request in flight for ~250 ms, and
+    a stream of anonymous login attempts could stall the whole API.
+    """
+    import asyncio
+
+    return await asyncio.to_thread(verify_password, plain, hashed)
+
+
+_DUMMY_HASH: str | None = None
+
+
+async def burn_password_check(plain: str) -> None:
+    """Spend the time of a real bcrypt check against a throwaway hash.
+
+    Used when the account does not exist, so the response time does not tell
+    an attacker which usernames are real.
+    """
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = await hash_password_async(secrets.token_urlsafe(16))
+    await verify_password_async(plain, _DUMMY_HASH)
+
+
+# Passwords that ship as defaults somewhere in the project (config, compose,
+# setup scripts). An account still using one is as good as open.
+KNOWN_DEFAULT_PASSWORDS = frozenset({"ocabra", "change_me_in_production", "admin", "password"})
+PASSWORD_MIN_LENGTH = 8
+
+
+def password_problem(password: str, username: str | None = None) -> str | None:
+    """Why ``password`` is not acceptable as a new password, or ``None`` if it is."""
+    if len(password) < PASSWORD_MIN_LENGTH:
+        return f"Password must be at least {PASSWORD_MIN_LENGTH} characters long"
+    if password.lower() in KNOWN_DEFAULT_PASSWORDS:
+        return "Password is a known default; choose another one"
+    if username and password.strip().lower() == username.strip().lower():
+        return "Password must not be the username"
+    return None
+
+
 # ── JWT helpers ───────────────────────────────────────────────────────────────
 
 
@@ -148,6 +198,15 @@ async def seed_first_admin(session) -> None:
     count = result.scalar_one()
     if count > 0:
         return
+
+    if password_problem(settings.ocabra_admin_pass, settings.ocabra_admin_user):
+        # Seeding still happens (a fresh install must be reachable), but loudly:
+        # this is how the production admin ended up with the default password.
+        logger.warning(
+            "auth_first_admin_weak_password",
+            username=settings.ocabra_admin_user,
+            hint="set OCABRA_ADMIN_PASS before the first start, or change it right after logging in",
+        )
 
     admin = User(
         username=settings.ocabra_admin_user,

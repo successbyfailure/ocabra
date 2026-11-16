@@ -213,8 +213,13 @@ services:
         required: false
     volumes:
       - /docker/ai-models/ollama:/root/.ollama
+    # Solo desde el propio host. oCabra habla con Ollama por la red de compose
+    # (http://ollama:11434) y lo protege con claves, grupos y estadísticas;
+    # publicado en todas las interfaces, cualquiera de la red usaba, descargaba
+    # o borraba modelos sin autenticarse. OLLAMA_BIND=0.0.0.0 lo reabre a
+    # propósito.
     ports:
-      - "7869:11434"
+      - "${OLLAMA_BIND:-127.0.0.1}:7869:11434"
     restart: unless-stopped
 
   trellis2:

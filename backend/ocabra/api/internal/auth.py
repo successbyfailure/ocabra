@@ -85,9 +85,12 @@ def _delete_session_cookie(response: Response) -> None:
         "either the account's username or its email address; emails are "
         "matched case-insensitively."
     ),
-    responses={401: {"description": "Invalid credentials or inactive account"}},
+    responses={
+        401: {"description": "Invalid credentials or inactive account"},
+        429: {"description": "Too many failed attempts; see Retry-After"},
+    },
 )
-async def login(body: LoginRequest, response: Response) -> dict:
+async def login(body: LoginRequest, request: Request, response: Response) -> dict:
     """Authenticate a user (by username or email) and issue a session cookie.
 
     Args:
@@ -99,14 +102,36 @@ async def login(body: LoginRequest, response: Response) -> dict:
 
     Raises:
         HTTP 401: If credentials are invalid or the account is inactive.
+        HTTP 429: After too many failed attempts for this username or client
+            IP (see :mod:`ocabra.core.login_guard`), with ``Retry-After``.
     """
     from sqlalchemy import func, or_, select
 
-    from ocabra.core.auth_manager import create_access_token, verify_password
+    from ocabra.core import login_guard
+    from ocabra.core.auth_manager import (
+        burn_password_check,
+        create_access_token,
+        password_problem,
+        verify_password_async,
+    )
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
 
     identifier = (body.username or "").strip()
+    # Caddy sets X-Real-IP to the real client; the API port is not published,
+    # so the header cannot be forged from outside.
+    client_ip = request.headers.get("x-real-ip") or (
+        request.client.host if request.client else None
+    )
+
+    retry_after = await login_guard.blocked_for_seconds(identifier, client_ip)
+    if retry_after is not None:
+        logger.warning("auth_login_throttled", username=identifier[:80], ip=client_ip)
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts; try again later",
+            headers={"Retry-After": str(retry_after)},
+        )
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -120,10 +145,20 @@ async def login(body: LoginRequest, response: Response) -> dict:
         user: User | None = result.scalar_one_or_none()
 
     if user is None or not user.is_active:
+        # Same cost as a real check, so timing does not reveal valid usernames.
+        await burn_password_check(body.password)
+        await login_guard.record_failure(identifier, client_ip)
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    if not verify_password(body.password, user.hashed_password):
+    if not await verify_password_async(body.password, user.hashed_password):
+        await login_guard.record_failure(identifier, client_ip)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    await login_guard.clear_user(identifier)
+    if password_problem(body.password, user.username):
+        # The account works, but its password is the default, too short or
+        # its own username. Logged on every login until it is changed.
+        logger.warning("auth_login_weak_password", username=user.username, role=user.role)
 
     token = create_access_token(
         user_id=str(user.id),
@@ -249,12 +284,18 @@ async def change_password(
         ``{ "ok": true }``
 
     Raises:
-        HTTP 400: If *current_password* is incorrect.
+        HTTP 400: If *current_password* is incorrect, or *new_password* fails
+            the password policy (8+ characters, not a known default, not the
+            username).
         HTTP 401: If the caller is not authenticated.
     """
     from sqlalchemy import select
 
-    from ocabra.core.auth_manager import hash_password, verify_password
+    from ocabra.core.auth_manager import (
+        hash_password_async,
+        password_problem,
+        verify_password_async,
+    )
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
 
@@ -264,10 +305,14 @@ async def change_password(
         if db_user is None:
             raise HTTPException(status_code=404, detail="User not found")
 
-        if not verify_password(body.current_password, db_user.hashed_password):
+        if not await verify_password_async(body.current_password, db_user.hashed_password):
             raise HTTPException(status_code=400, detail="Current password is incorrect")
 
-        db_user.hashed_password = hash_password(body.new_password)
+        problem = password_problem(body.new_password, db_user.username)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+
+        db_user.hashed_password = await hash_password_async(body.new_password)
         db_user.updated_at = datetime.now(UTC)
         await session.commit()
 

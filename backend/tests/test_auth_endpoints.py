@@ -320,11 +320,138 @@ def test_change_password_success():
         client = TestClient(app)
         resp = client.put(
             "/ocabra/auth/password",
-            json={"current_password": "oldpass", "new_password": "newpass"},
+            json={"current_password": "oldpass", "new_password": "a-better-pass"},
         )
 
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+
+
+def test_change_password_rejects_a_weak_new_password():
+    """SEG-01: an empty, short, default or username-equal password was accepted."""
+    from ocabra.api._deps_auth import UserContext, get_current_user
+
+    app = _make_app()
+    user = _make_db_user(username="frank", password="oldpass")
+    app.dependency_overrides[get_current_user] = lambda: UserContext(
+        user_id=str(user.id), username="frank", role="user"
+    )
+    user_result = MagicMock()
+    user_result.scalar_one_or_none.return_value = user
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.execute.return_value = user_result
+
+    with patch("ocabra.database.AsyncSessionLocal", return_value=mock_session):
+        client = TestClient(app)
+        for weak in ("", "short", "ocabra", "Frank"):
+            resp = client.put(
+                "/ocabra/auth/password",
+                json={"current_password": "oldpass", "new_password": weak},
+            )
+            assert resp.status_code == 400, weak
+
+    mock_session.commit.assert_not_called()
+
+
+class _FakeRedis:
+    """The few commands :mod:`ocabra.core.login_guard` uses."""
+
+    def __init__(self):
+        self.values: dict[str, int] = {}
+
+    async def get(self, key):
+        return self.values.get(key)
+
+    async def incr(self, key):
+        self.values[key] = self.values.get(key, 0) + 1
+        return self.values[key]
+
+    async def expire(self, key, _seconds):
+        return True
+
+    async def ttl(self, _key):
+        return 600
+
+    async def delete(self, key):
+        self.values.pop(key, None)
+
+
+def _login_session(user):
+    scalar_result = MagicMock()
+    scalar_result.scalar_one_or_none.return_value = user
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = scalar_result
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    return mock_session
+
+
+def test_login_is_throttled_after_repeated_failures():
+    """SEG-14: the login had no limit, so passwords could be guessed at will.
+
+    Past the limit even the right password gets 429, so guessing stops paying.
+    """
+    from ocabra.core import login_guard
+
+    app = _make_app()
+    user = _make_db_user(username="carol", password="the-right-one")
+    fake = _FakeRedis()
+
+    with (
+        patch("ocabra.database.AsyncSessionLocal", return_value=_login_session(user)),
+        patch("ocabra.redis_client.get_redis", return_value=fake),
+    ):
+        client = TestClient(app)
+        for _ in range(login_guard.MAX_FAILURES_PER_USER):
+            resp = client.post(
+                "/ocabra/auth/login", json={"username": "carol", "password": "guess"}
+            )
+            assert resp.status_code == 401
+        resp = client.post(
+            "/ocabra/auth/login", json={"username": "carol", "password": "the-right-one"}
+        )
+
+    assert resp.status_code == 429
+    assert resp.headers["retry-after"] == "600"
+
+
+def test_a_successful_login_resets_the_failure_count():
+    app = _make_app()
+    user = _make_db_user(username="dave", password="the-right-one")
+    fake = _FakeRedis()
+
+    with (
+        patch("ocabra.database.AsyncSessionLocal", return_value=_login_session(user)),
+        patch("ocabra.redis_client.get_redis", return_value=fake),
+    ):
+        client = TestClient(app)
+        client.post("/ocabra/auth/login", json={"username": "dave", "password": "guess"})
+        resp = client.post(
+            "/ocabra/auth/login", json={"username": "dave", "password": "the-right-one"}
+        )
+
+    assert resp.status_code == 200
+    assert "auth:login_fail:user:dave" not in fake.values
+
+
+def test_login_for_an_unknown_user_still_spends_a_password_check():
+    """SEG-14: answering at once for unknown usernames told an attacker which exist."""
+    app = _make_app()
+
+    with (
+        patch("ocabra.database.AsyncSessionLocal", return_value=_login_session(None)),
+        patch(
+            "ocabra.core.auth_manager.burn_password_check", new=AsyncMock()
+        ) as burn,
+    ):
+        resp = TestClient(app).post(
+            "/ocabra/auth/login", json={"username": "nobody", "password": "x"}
+        )
+
+    assert resp.status_code == 401
+    burn.assert_awaited_once()
 
 
 def test_change_password_wrong_current_returns_400():

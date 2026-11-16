@@ -48,10 +48,27 @@ def _inline(texto: str) -> str:
     escapado = _INLINE_CODE.sub(lambda m: f"<code>{m.group(1)}</code>", escapado)
     escapado = _BOLD.sub(lambda m: f"<strong>{m.group(1)}</strong>", escapado)
     escapado = _LINK.sub(
-        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
-        escapado,
+        lambda m: f'<a href="{_safe_href(m.group(2))}">{m.group(1)}</a>', escapado
     )
     return escapado
+
+
+_SAFE_SCHEMES = ("http://", "https://", "mailto:")
+
+
+def _safe_href(url: str) -> str:
+    """URL de un enlace apta para un atributo ``href``.
+
+    El texto ya llega escapado sin comillas (``quote=False``), así que una
+    comilla en la URL cerraba el atributo; y ``javascript:`` se ejecutaba al
+    pulsar. Solo rutas relativas, anclas y http(s)/mailto; lo demás va a ``#``.
+    """
+    url = url.replace('"', "%22").replace("'", "%27")
+    if url.lower().startswith(_SAFE_SCHEMES) or url.startswith(("/", "#", ".")):
+        return url
+    if ":" not in url.split("/", 1)[0]:
+        return url  # relativa sin esquema, p. ej. ``changelog.md``
+    return "#"
 
 
 def _slug(texto: str) -> str:

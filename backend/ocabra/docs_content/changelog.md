@@ -16,6 +16,47 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.90.0 — 2026-11-16
+
+Versión de seguridad. Cierra accesos que no respetaban los grupos ni los roles.
+
+### Cambios de comportamiento
+
+- **Acción:** `POST /api/pull` y `DELETE /api/delete` (API de Ollama) exigen
+  ahora el rol `model_manager`. Antes bastaba cualquier clave, de modo que
+  cualquiera podía borrar modelos de todos o llenar el disco con descargas.
+  Con una clave de rol `user` responden `403` con `{"error": "..."}`.
+- **Acción:** `POST /ocabra/models/{id}/unload` exige `model_manager`.
+  Descargar un modelo corta las peticiones de todos sus usuarios.
+- `POST /ocabra/models/{id}/load` solo carga modelos concedidos al usuario a
+  través de sus grupos. Uno fuera de sus grupos responde `404`, igual que uno
+  que no existe.
+- `/v1/realtime` aplica los grupos como el resto de endpoints, tanto al
+  conectar como al cambiar de STT o de TTS con `session.update`. Un modelo no
+  concedido al conectar da el error `model_not_found`. En `session.update` se
+  ignora, igual que un modelo desconocido. Las voces de OpenAI (`echo`,
+  `alloy`…) siguen funcionando: su destino lo configura el servidor.
+- Con la federación activa, un modelo fuera de tus grupos que esté cargado en
+  otro nodo ya no se sirve: responde `404 model_not_found`. Antes la decisión
+  de enviarlo a otro nodo se tomaba antes de comprobar los grupos.
+- `POST /ocabra/auth/login` responde `429` con `Retry-After` tras 10 intentos
+  fallidos de un mismo usuario, o 30 desde una misma IP, en 15 minutos.
+- Las contraseñas nuevas, tanto la propia como las que pone un administrador,
+  deben tener al menos 8 caracteres y no pueden ser el nombre de usuario ni
+  una contraseña por defecto conocida (`ocabra`…). Si no, responden `400`.
+- El WebSocket `/ocabra/ws` rechaza una sesión cerrada o un usuario
+  desactivado. Antes seguía enviando eventos hasta que caducaba el token.
+- `GET /metrics` solo responde desde redes privadas (`403` desde fuera).
+
+### Correcciones
+
+- El puerto de Ollama (`7869`) se publica ahora solo en `127.0.0.1`. Estaba
+  abierto a toda la red sin autenticación, saltándose claves, grupos y
+  estadísticas. Si un cliente tuyo usaba Ollama directamente en ese puerto,
+  pásalo a la API de oCabra (`/api/*` con tu clave).
+
+---
+
 ## 0.89.1 — 2026-11-16
 
 ### Correcciones

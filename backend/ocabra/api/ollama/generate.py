@@ -79,7 +79,7 @@ async def generate(
             # profiles are normalized to their base_model_id before the
             # federation lookup (otherwise -> 404 model_not_found).
             target, peer = await resolve_federated(
-                ollama_model, model_manager, federation_manager, profile_registry
+                ollama_model, model_manager, federation_manager, profile_registry, user=user
             )
             if target == "remote":
                 import structlog as _structlog

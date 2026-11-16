@@ -196,3 +196,18 @@ async def test_seed_first_admin_is_idempotent():
 
     mock_session.add.assert_not_called()
     mock_session.commit.assert_not_awaited()
+
+
+
+def test_password_policy():
+    """SEG-01: production admins still had the default password or their username."""
+    from ocabra.core.auth_manager import password_problem
+
+    assert password_problem("") is not None
+    assert password_problem("1234567") is not None
+    assert password_problem("ocabra") is not None
+    assert password_problem("OCABRA") is not None
+    assert password_problem("change_me_in_production") is not None
+    assert password_problem("jordi-1980", username="jordi-1980") is not None
+    assert password_problem("Jordi-1980", username="jordi-1980") is not None
+    assert password_problem("a-real-passphrase", username="jordi") is None

@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { Activity, Cpu, Database, Layers, Zap } from "lucide-react"
+import { safeHttpUrl } from "@/lib/safeUrl"
 import { useServiceStore } from "@/stores/serviceStore"
 import type { ServiceState } from "@/types"
 
@@ -7,6 +8,7 @@ import type { ServiceState } from "@/types"
  * Antes vivía inline en Dashboard; extraída para reutilizarla en la nueva
  * página /services, donde se gestionan desde su propia entrada del menú. */
 export function ServiceCard({ service }: { service: ServiceState }) {
+  const uiHref = safeHttpUrl(service.uiUrl)
   const unloadService = useServiceStore((s) => s.unloadService)
   const startService = useServiceStore((s) => s.startService)
   const refreshService = useServiceStore((s) => s.refreshService)
@@ -82,9 +84,9 @@ export function ServiceCard({ service }: { service: ServiceState }) {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {service.uiUrl && service.serviceAlive && (
+          {uiHref && service.serviceAlive && (
             <a
-              href={service.uiUrl}
+              href={uiHref}
               target="_blank"
               rel="noopener noreferrer"
               className="rounded-md border border-border px-3 py-1 text-xs hover:bg-muted"

@@ -8,6 +8,7 @@ helpers used by all ``/v1/*`` endpoint modules.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import inspect
 import json
 import time
@@ -1528,7 +1529,7 @@ def is_batch_origin_request(request: Request) -> bool:
     if (
         not gw_token
         or not settings.gateway_service_token
-        or gw_token != settings.gateway_service_token
+        or not hmac.compare_digest(gw_token, settings.gateway_service_token)
     ):
         return False
     return request.headers.get("X-Internal-Request-Origin", "") == "batch"

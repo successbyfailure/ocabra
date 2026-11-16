@@ -28,6 +28,7 @@ import { GpuBadge } from "@/components/dashboard/GpuBadge"
 import { cardState, requestColorOrder, StatePill, type CardState } from "@/components/dashboard/ModelLiveCard"
 import { VISUAL, fmtAgo, fmtContext, fmtDuration, fmtTps } from "@/components/dashboard/format"
 import { getVllmConfig } from "@/lib/modelContext"
+import { useAuthStore } from "@/stores/authStore"
 import type {
   BackendType,
   GPUState,
@@ -210,6 +211,8 @@ export function ModelCard({ logical, deploymentId, states, live, gpus, nowMs, bu
   const accent = state.loadedIdle ? "#10b981" : state.visual === "idle" ? null : visual.color
 
   const loaded = status === "loaded"
+  // Unloading cuts every user of a shared model: the API requires model_manager.
+  const canUnload = useAuthStore((s) => s.hasRole("model_manager"))
   const loading = status === "loading" || model?.runtimePhase === "upsizing" || phase?.phase === "loading"
   const inFlight = act?.inFlight ?? 0
   const queued = act?.queuedCount ?? act?.admission?.queuedRequests ?? 0
@@ -448,6 +451,7 @@ export function ModelCard({ logical, deploymentId, states, live, gpus, nowMs, bu
       {/* Controles */}
       <footer className="mt-auto flex flex-wrap items-center gap-1.5 border-t border-border pt-3">
         {loaded ? (
+          canUnload && (
           <button
             type="button"
             disabled={busy}
@@ -457,6 +461,7 @@ export function ModelCard({ logical, deploymentId, states, live, gpus, nowMs, bu
             <Square size={12} />
             Descargar
           </button>
+          )
         ) : loading ? (
           model?.canCancelLoad ? (
             <button

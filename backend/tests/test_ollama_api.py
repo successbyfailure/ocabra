@@ -756,3 +756,56 @@ def test_chat_stream_falls_back_to_llama_timings_when_no_usage_chunk() -> None:
 
     assert lines[-1]["prompt_eval_count"] == 21  # prompt_n + cache_n
     assert lines[-1]["eval_count"] == 7
+
+
+def _app_as(role: str) -> FastAPI:
+    from ocabra.api._deps_auth import UserContext
+    from ocabra.api.ollama._shared import get_ollama_user
+
+    app = _make_app()
+    app.dependency_overrides[get_ollama_user] = lambda: UserContext(
+        user_id="u", username="u", role=role
+    )
+    return app
+
+
+def test_pull_and_delete_require_model_manager() -> None:
+    """SEG-05: any API key could delete any model or fill the disk with pulls."""
+    client = TestClient(_app_as("user"))
+
+    with (
+        patch("ocabra.api.ollama.pull.download_manager.enqueue", new=AsyncMock()) as enqueue,
+        patch("ocabra.api.ollama.delete.resolve_model", new=AsyncMock()) as resolve,
+    ):
+        pull = client.post("/api/pull", json={"name": "llama3.2:3b", "stream": False})
+        delete = client.request("DELETE", "/api/delete", json={"name": "llama3.2:3b"})
+
+    assert pull.status_code == 403
+    assert delete.status_code == 403
+    assert "error" in pull.json()["detail"]
+    enqueue.assert_not_awaited()
+    resolve.assert_not_awaited()
+
+
+def test_pull_is_allowed_for_model_manager() -> None:
+    client = TestClient(_app_as("model_manager"))
+    fake_job = MagicMock()
+    fake_job.job_id = "job-1"
+
+    with (
+        patch(
+            "ocabra.api.ollama.pull.download_manager.enqueue",
+            new=AsyncMock(return_value=fake_job),
+        ),
+        patch(
+            "ocabra.api.ollama.pull.download_manager.get_job",
+            new=AsyncMock(
+                return_value=MagicMock(
+                    status="completed", model_dump=lambda mode="json": {"status": "completed"}
+                )
+            ),
+        ),
+    ):
+        resp = client.post("/api/pull", json={"name": "llama3.2:3b", "stream": False})
+
+    assert resp.status_code == 200

@@ -10,7 +10,7 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.registry.ollama_registry import OllamaRegistry
 
 from ._mapper import resolve_model
-from ._shared import get_ollama_user
+from ._shared import get_ollama_model_manager
 
 router = APIRouter()
 _registry = OllamaRegistry()
@@ -24,10 +24,12 @@ class DeleteRequest(BaseModel):
 async def delete_model(
     body: DeleteRequest,
     request: Request,
-    user: UserContext = Depends(get_ollama_user),
+    user: UserContext = Depends(get_ollama_model_manager),
 ) -> dict:
     """
     Delete a model by Ollama name.
+
+    Requires ``model_manager``: it changes the catalogue every user shares.
 
     Parameters:
       - name: Ollama model name to remove.

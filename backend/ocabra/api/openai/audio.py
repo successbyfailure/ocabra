@@ -658,7 +658,11 @@ async def speech(
             from ocabra.core.federation import resolve_federated
 
             target, peer = await resolve_federated(
-                model_id, model_manager, federation_manager, profile_registry
+                model_id,
+                model_manager,
+                federation_manager,
+                profile_registry,
+                user=resolution_user,
             )
             if target == "remote":
                 request.state.federation_remote_node_id = peer.peer_id

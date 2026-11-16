@@ -965,20 +965,49 @@ class RealtimeSession:
                 return target
         return None
 
-    async def _known_model_or_none(self, raw: str) -> str | None:
+    async def _known_model_or_none(self, raw: str, *, check_access: bool = True) -> str | None:
         """Resolve a client model id and keep it only if oCabra knows it.
 
         GA clients send OpenAI's own names (``gpt-4o-transcribe``); switching
         the session's STT to a model that does not exist here broke every
         transcription after the update.
+
+        ``check_access=False`` only for targets the operator configured (the
+        OpenAI-voice map), not for a model the client named: REST grants those
+        through the public alias too (``_authorize_openai_tts_compat``).
         """
-        resolved = await self._resolve_model_id_or_keep(raw)
+        if check_access:
+            resolved = await self._allowed_model_or_none(raw)
+            if resolved is None:
+                return None
+        else:
+            resolved = await self._resolve_model_id_or_keep(raw)
         try:
             state = await self._model_manager.get_state(resolved)
         except Exception:  # noqa: BLE001
             state = None
         if state is None:
             logger.info("realtime_unknown_model_ignored", model=str(raw)[:80])
+            return None
+        return resolved
+
+    async def _allowed_model_or_none(self, raw: str) -> str | None:
+        """Resolve a model the client picked, or ``None`` if its groups don't grant it.
+
+        ``session.update`` lets the client switch STT and TTS; without this a
+        key restricted to one group could use any model through Realtime. A
+        denied model is ignored like an unknown one, without confirming it
+        exists.
+        """
+        from ocabra.api.openai.realtime import user_may_use_realtime_model
+
+        if not raw:
+            return raw  # clearing the model is not a grant question
+        resolved = await self._resolve_model_id_or_keep(raw)
+        if not await user_may_use_realtime_model(
+            self._user, raw, resolved, profile_registry=self._profile_registry
+        ):
+            logger.info("realtime_model_access_denied", model=str(raw)[:80])
             return None
         return resolved
 
@@ -1050,8 +1079,10 @@ class RealtimeSession:
         # TTS model (extension: not in official API, but useful for oCabra)
         tts_switched = False
         if "tts_model" in session_cfg:
-            self.tts_model_id = await self._resolve_model_id_or_keep(session_cfg["tts_model"])
-            tts_switched = True
+            allowed = await self._allowed_model_or_none(session_cfg["tts_model"])
+            if allowed is not None:
+                self.tts_model_id = allowed
+                tts_switched = True
         elif voice_changed and not self.transcription_only:
             # An OpenAI voice name ("alloy", "echo"…) picks the oCabra voice
             # pinned for it in the TTS compatibility map; the single-voice
@@ -1059,7 +1090,7 @@ class RealtimeSession:
             # voice sounded the same (2026-11-16).
             target = self._voice_tts_target(str(session_cfg["voice"]))
             if target:
-                resolved = await self._known_model_or_none(target)
+                resolved = await self._known_model_or_none(target, check_access=False)
                 if resolved and resolved != self.tts_model_id:
                     self.tts_model_id = resolved
                     tts_switched = True

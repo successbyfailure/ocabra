@@ -247,3 +247,18 @@ def test_raw_fuerza_el_markdown_desde_el_navegador(client):
 
 def test_el_pie_enlaza_a_la_fuente_cruda(client):
     assert 'href="/docs/models.md?raw=1"' in client.get("/docs/models").text
+
+
+def test_los_enlaces_no_ejecutan_javascript_ni_rompen_el_atributo():
+    """SEG-25: el href no escapaba comillas ni filtraba ``javascript:``."""
+    from ocabra.api.docs_pages import _inline
+
+    assert 'href="#"' in _inline("[x](javascript:alert(1))")
+    assert 'href="#"' in _inline("[x](JaVaScRiPt:alert(1))")
+    assert 'href="#"' in _inline("[x](data:text/html,hola)")
+    roto = _inline('[x](https://a.example/"onmouseover="alert(1))')
+    assert '"onmouseover' not in roto and "%22onmouseover" in roto
+    assert 'href="https://ocabra.example/docs"' in _inline("[x](https://ocabra.example/docs)")
+    assert 'href="/docs/changelog"' in _inline("[x](/docs/changelog)")
+    assert 'href="#acciones"' in _inline("[x](#acciones)")
+    assert 'href="changelog.md"' in _inline("[x](changelog.md)")

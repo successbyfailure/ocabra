@@ -20,6 +20,7 @@ import { ContextBar, requestHue } from "./ContextBar"
 import { METRIC } from "@/components/gpu/metrics"
 import { VISUAL, fmtContext, fmtDuration, fmtTps, loadedMeta, type VisualState } from "./format"
 import { GpuBadge } from "./GpuBadge"
+import { useAuthStore } from "@/stores/authStore"
 import { useGpuStore } from "@/stores/gpuStore"
 import { RequestProgress } from "./RequestProgress"
 
@@ -317,6 +318,8 @@ export function ModelLiveCard({
     if (Number.isFinite(since)) idleLeft = Math.max(0, Math.round(idleTimeoutSeconds - since))
   }
   const loaded = loadedMeta(model.loadedAt, nowMs)
+  // Unloading cuts every user of a shared model: the API requires model_manager.
+  const canUnload = useAuthStore((s) => s.hasRole("model_manager"))
   const order = requestColorOrder(act?.requests)
   const runningRequests = (act?.requests ?? []).filter((r) => r.stage !== "queued")
   const gpuIdx = model.currentGpu ?? []
@@ -402,7 +405,7 @@ export function ModelLiveCard({
             )}
           </div>
         </div>
-        {model.status === "loaded" && (
+        {model.status === "loaded" && canUnload && (
           <button
             type="button"
             onClick={() => onUnload(model.modelId)}

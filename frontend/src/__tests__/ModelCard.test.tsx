@@ -2,6 +2,7 @@
 import { fireEvent, render, screen } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 import { ModelCard, type ModelCardActions } from "@/components/models/ModelCard"
+import { useAuthStore } from "@/stores/authStore"
 import type { ModelActivityMap, ModelState, RuntimePreset } from "@/types"
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
@@ -192,5 +193,29 @@ describe("ModelCard", () => {
     const acts = renderCard(model({ status: "configured", runtimePhase: "configured", canCancelLoad: false, currentGpu: [] }))
     fireEvent.click(screen.getByRole("button", { name: /Cargar/ }))
     expect(acts.onLoad).toHaveBeenCalledWith("llama_cpp/chaos")
+  })
+
+  // The API requires model_manager to unload (a shared model cuts everyone's
+  // requests); a plain user would only get a 403, so the button is not offered.
+  it("loaded: Descargar only for model_manager and above", () => {
+    const loaded = model({ status: "loaded", runtimePhase: "loaded", canCancelLoad: false })
+    const asRole = (role: "user" | "model_manager") =>
+      useAuthStore.setState({
+        user: { id: "u", username: "u", email: null, role, createdAt: "2026-11-16T00:00:00Z" },
+      })
+
+    asRole("user")
+    const { unmount } = render(
+      <ModelCard deploymentId={loaded.modelId} states={{ [loaded.modelId]: loaded }} live={EMPTY}
+        gpus={[]} nowMs={NOW} actions={actions()} />,
+    )
+    expect(screen.queryByRole("button", { name: /Descargar/ })).toBeNull()
+    unmount()
+
+    asRole("model_manager")
+    const acts = renderCard(loaded)
+    fireEvent.click(screen.getByRole("button", { name: /Descargar/ }))
+    expect(acts.onUnload).toHaveBeenCalledWith("llama_cpp/chaos")
+    useAuthStore.setState({ user: null })
   })
 })

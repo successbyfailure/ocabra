@@ -98,14 +98,20 @@ async def create_user(
         ``{ id, username, email, role, is_active, created_at }``
 
     Raises:
+        HTTP 400: If the password fails the policy (8+ characters, not a known
+            default, not the username).
         HTTP 409: If username already exists.
     """
     from sqlalchemy import or_, select
     from sqlalchemy.exc import IntegrityError
 
-    from ocabra.core.auth_manager import hash_password
+    from ocabra.core.auth_manager import hash_password_async, password_problem
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import Group, User, UserGroup
+
+    problem = password_problem(body.password, body.username)
+    if problem:
+        raise HTTPException(status_code=400, detail={"error": "weak_password", "message": problem})
 
     async with AsyncSessionLocal() as session:
         # Pre-check both unique columns so the common case returns 409 with a
@@ -130,7 +136,7 @@ async def create_user(
 
         new_user = User(
             username=body.username,
-            hashed_password=hash_password(body.password),
+            hashed_password=await hash_password_async(body.password),
             role=body.role,
             email=body.email,
             is_active=True,
@@ -340,11 +346,12 @@ async def reset_user_password(
         ``{ message: "password reset" }``
 
     Raises:
+        HTTP 400: If the new password fails the password policy.
         HTTP 404: If the user does not exist.
     """
     from sqlalchemy import select
 
-    from ocabra.core.auth_manager import hash_password
+    from ocabra.core.auth_manager import hash_password_async, password_problem
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
 
@@ -359,7 +366,12 @@ async def reset_user_password(
         if user is None:
             raise HTTPException(status_code=404, detail="User not found")
 
-        user.hashed_password = hash_password(body.new_password)
+        problem = password_problem(body.new_password, user.username)
+        if problem:
+            raise HTTPException(
+                status_code=400, detail={"error": "weak_password", "message": problem}
+            )
+        user.hashed_password = await hash_password_async(body.new_password)
         user.updated_at = datetime.now(UTC)
         await session.commit()
 

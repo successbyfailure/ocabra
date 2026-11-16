@@ -31,6 +31,16 @@ router = APIRouter(tags=["models"])
 _ollama_registry = OllamaRegistry()
 
 
+async def _user_can_access_model(user: UserContext, model_id: str, profile_registry) -> bool:
+    """True if ``user`` may use ``model_id``: admin, or the model or one of its profiles granted."""
+    if user.can_access_model(model_id):
+        return True
+    if profile_registry is None:
+        return False
+    profiles = await profile_registry.list_by_model(model_id)
+    return any(user.can_access_model(p.profile_id) for p in profiles)
+
+
 def _canonical_runtime_id(model_id: str, canonical_ids: set[str]) -> str | None:
     """Match a runtime worker to a catalog id, preserving GGUF ``repo::file``."""
 
@@ -149,13 +159,7 @@ async def list_models(
     profile_registry = getattr(request.app.state, "profile_registry", None)
 
     async def _is_accessible(model_id: str) -> bool:
-        """True if the user can access the model (admin or any of its profiles in their set)."""
-        if user.can_access_model(model_id):
-            return True
-        if profile_registry is None:
-            return False
-        profiles = await profile_registry.list_by_model(model_id)
-        return any(user.can_access_model(p.profile_id) for p in profiles)
+        return await _user_can_access_model(user, model_id, profile_registry)
 
     local_model_ids: set[str] = set()
     payloads = []
@@ -1242,12 +1246,19 @@ async def add_model(
 async def load_model(
     model_id: str,
     request: Request,
-    _user: UserContext = Depends(require_role("user")),
+    user: UserContext = Depends(require_role("user")),
 ) -> dict:
-    """Load a model onto a GPU."""
+    """Load a model onto a GPU.
+
+    Any authenticated user may load a model they have been granted (the model
+    or one of its profiles, through their groups). A model outside their grants
+    answers 404, the same as one that does not exist, so its name is not leaked.
+    """
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
-    if not state:
+    if not state or not await _user_can_access_model(
+        user, model_id, getattr(request.app.state, "profile_registry", None)
+    ):
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
     from ocabra.core.model_manager import ModelStatus
     from ocabra.core.scheduler import InsufficientVRAMError
@@ -1545,9 +1556,13 @@ async def smoke_test_model(
 async def unload_model(
     model_id: str,
     request: Request,
-    _user: UserContext = Depends(require_role("user")),
+    _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
     """Unload a model from GPU.
+
+    Requires ``model_manager``: a model is shared by everyone who uses it, so
+    unloading it cuts their requests. With ``user`` any API key could keep the
+    production models off the GPUs by unloading them in a loop.
 
     A model with runtime presets runs as a derived worker (``model::hash``).
     Unloading the bare id used to stop that process through the base state,

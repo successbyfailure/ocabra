@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import uuid as _uuid
 from dataclasses import dataclass, field
 
@@ -337,7 +338,8 @@ async def get_current_user(request: Request) -> UserContext:
     Resolution order:
     1. ``X-Gateway-Token`` header (internal gateway service-to-service calls).
     2. Cookie ``ocabra_session`` (dashboard / browser).
-    3. ``Authorization: Bearer`` header — tries JWT first, then API key.
+    3. ``Authorization: Bearer`` header — an API key (JWTs only travel in the
+       cookie; a JWT here is rejected as an invalid key).
     4. Anonymous context if auth is not required by server settings.
 
     Raises:
@@ -349,7 +351,11 @@ async def get_current_user(request: Request) -> UserContext:
 
     # 0. Gateway service token (internal calls — no DB needed)
     gw_token = request.headers.get("X-Gateway-Token", "")
-    if gw_token and settings.gateway_service_token and gw_token == settings.gateway_service_token:
+    if (
+        gw_token
+        and settings.gateway_service_token
+        and hmac.compare_digest(gw_token, settings.gateway_service_token)
+    ):
         # Optional impersonation for the batch processor: act as the batch owner
         # so per-user access controls and stats attribution still apply.
         impersonate_id = request.headers.get("X-Internal-User-Id", "")

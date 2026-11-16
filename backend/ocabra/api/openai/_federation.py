@@ -145,6 +145,7 @@ async def try_proxy_json(
         profile_registry,
         required_capability=required_capability,
         resolved=resolved,
+        user=getattr(request.state, "auth_user", None),
     )
     if execution_policy == "remote" and profile is not None:
         forced_peer = federation_manager.find_best_peer(profile.base_model_id)
@@ -304,6 +305,7 @@ async def try_proxy_multipart(
         profile_registry,
         required_capability=required_capability,
         resolved=resolved,
+        user=getattr(request.state, "auth_user", None),
     )
     if target != "remote" or peer is None:
         return None

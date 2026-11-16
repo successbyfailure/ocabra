@@ -1043,11 +1043,25 @@ class FederationManager:
               JWT signed by this node's secret; the peer would reject it and
               never check the bearer token (the auth dep tries cookies first).
             - ``host`` / ``content-length``: rewritten by httpx for the new URL.
+            - ``x-api-key``, ``x-gateway-token``, ``x-internal-*``: this node's
+              own credentials and identity headers. A Batches request carries
+              the service token; forwarded as is, the peer received it. Same
+              list the tunnel strips on the way in (``_SERVER_STRIP``).
 
         Optionally strips ``content-type`` (used by ``proxy_multipart`` so
         httpx can rebuild the boundary with the new body).
         """
-        always_strip = {"authorization", "cookie", "set-cookie", "host", "content-length"}
+        always_strip = {
+            "authorization",
+            "cookie",
+            "set-cookie",
+            "host",
+            "content-length",
+            "x-api-key",
+            "x-gateway-token",
+            "x-internal-user-id",
+            "x-internal-key-name",
+        }
         if drop_content_type:
             always_strip.add("content-type")
         out: dict[str, str] = {}
@@ -1250,6 +1264,39 @@ async def _profile_capable(model_manager: Any, profile: Any, capability: str) ->
         return True
 
 
+def _model_not_found_detail(model_id: str) -> dict[str, Any]:
+    return {
+        "error": {
+            "message": f"The model '{model_id}' does not exist.",
+            "type": "invalid_request_error",
+            "param": "model",
+            "code": "model_not_found",
+        }
+    }
+
+
+async def _user_may_use_model(user: Any, model_id: str, profile_registry: Any) -> bool:
+    """Group ACL for ``model_id``, same rule as ``resolve_profile``.
+
+    The requested id itself, or the profile it names (or aliases) and that
+    profile's base model.
+    """
+    if user.can_access_model(model_id):
+        return True
+    if profile_registry is None:
+        return False
+    try:
+        profile = await profile_registry.get(model_id)
+        if profile is None:
+            alias_target = await profile_registry.resolve_alias(model_id)
+            profile = alias_target[0] if alias_target is not None else None
+    except Exception:  # noqa: BLE001 - unknown means not granted
+        return False
+    return profile is not None and user.can_access_model(
+        profile.profile_id, profile.base_model_id
+    )
+
+
 async def resolve_federated(
     model_id: str,
     model_manager: ModelManager,
@@ -1258,6 +1305,7 @@ async def resolve_federated(
     *,
     required_capability: str | None = None,
     resolved: dict[str, Any] | None = None,
+    user: Any = None,
 ) -> tuple[str, PeerState | None]:
     """Decide whether to handle a request locally or proxy to a remote peer.
 
@@ -1292,11 +1340,20 @@ async def resolve_federated(
             profile, the profile's ``base_model_id`` is used for the local /
             remote checks. Without this, callers passing a profile id would
             hit step 4 and 404 even when the underlying base model exists.
+        user: The caller's ``UserContext``. Checked first, with the same rule
+            as local resolution (``resolve_profile``): a model outside the
+            caller's groups is a 404 before any routing decision. Federation
+            used to run before the group check, so a model warm on a peer was
+            served to anyone. ``None`` skips the check (internal callers).
     """
     from fastapi import HTTPException
 
     from ocabra.core.model_manager import ModelStatus
     from ocabra.core.model_ref import _split_canonical_model_ref, build_model_ref
+
+    if user is not None and not await _user_may_use_model(user, model_id, profile_registry):
+        logger.info("federation_model_access_denied", model=model_id, user_id=user.user_id)
+        raise HTTPException(status_code=404, detail=_model_not_found_detail(model_id))
 
     # 0. Normalise profile id → canonical base model id when a registry is
     # provided. Endpoints that accept profile ids (chat, images, audio,
@@ -1450,14 +1507,7 @@ async def resolve_federated(
     # 4. Not found anywhere.
     raise HTTPException(
         status_code=404,
-        detail={
-            "error": {
-                "message": f"The model '{model_id}' does not exist.",
-                "type": "invalid_request_error",
-                "param": "model",
-                "code": "model_not_found",
-            }
-        },
+        detail=_model_not_found_detail(model_id),
     )
 
 

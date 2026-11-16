@@ -152,6 +152,26 @@ async def _require_gateway_user(request: Request) -> dict | None:
     return await _check_user_auth(request)
 
 
+_ROLE_LEVEL = {"user": 0, "model_manager": 1, "system_admin": 2}
+
+
+async def _require_gateway_manager(request: Request) -> JSONResponse | None:
+    """``None`` if the caller may manage services, else the error response.
+
+    The gateway calls the API with its service token (``model_manager``), so
+    it has to enforce the caller's role itself: unloading or disabling a
+    service cuts everyone using it, and the API reserves both to
+    ``model_manager``. Starting stays open to any user on purpose — visiting a
+    service starts it, that is the gateway's job.
+    """
+    user = await _check_user_auth(request)
+    if user is None:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    if _ROLE_LEVEL.get(str(user.get("role")), -1) < _ROLE_LEVEL["model_manager"]:
+        return JSONResponse({"detail": "Role 'model_manager' or higher required"}, status_code=403)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Internal gateway API  (/_gw/*)
 # ---------------------------------------------------------------------------
@@ -261,8 +281,8 @@ async def gw_start(service_id: str, request: Request) -> JSONResponse:
 
 @app.post("/_gw/services/{service_id}/unload")
 async def gw_unload(service_id: str, request: Request) -> JSONResponse:
-    if await _require_gateway_user(request) is None:
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    if (denied := await _require_gateway_manager(request)) is not None:
+        return denied
     try:
         r = await _ocabra("POST", f"/ocabra/services/{service_id}/unload")
         return JSONResponse(r.json(), status_code=r.status_code)
@@ -272,8 +292,8 @@ async def gw_unload(service_id: str, request: Request) -> JSONResponse:
 
 @app.patch("/_gw/services/{service_id}/enable")
 async def gw_enable(service_id: str, request: Request) -> JSONResponse:
-    if await _require_gateway_user(request) is None:
-        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    if (denied := await _require_gateway_manager(request)) is not None:
+        return denied
     body = await request.json()
     try:
         r = await _ocabra("PATCH", f"/ocabra/services/{service_id}", json={"enabled": body.get("enabled", True)})

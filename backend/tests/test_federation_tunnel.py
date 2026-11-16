@@ -573,6 +573,27 @@ async def test_proxy_headers_carry_hop_marker():
     assert headers[FEDERATION_HOP_HEADER] == "test-node-id"
 
 
+async def test_proxy_headers_never_forward_this_nodes_credentials():
+    """SEG-10: a Batches request carries the service token and the impersonated
+    user; the HTTP proxy forwarded them to the peer as is (the tunnel already
+    stripped them on the way in)."""
+    fm = FederationManager(_make_settings(), _make_session_factory())
+    peer = PeerState(peer_id="p", name="x", url="http://x", api_key="k", access_level="inference")
+    headers = fm._build_proxy_headers(
+        peer,
+        {
+            "X-Gateway-Token": "service-secret",
+            "X-Internal-User-Id": "11111111-1111-1111-1111-111111111111",
+            "X-Internal-Key-Name": "batch",
+            "X-Api-Key": "user-key",
+            "Accept": "application/json",
+        },
+    )
+    lowered = {k.lower() for k in headers}
+    assert not lowered & {"x-gateway-token", "x-internal-user-id", "x-internal-key-name", "x-api-key"}
+    assert headers["Accept"] == "application/json"
+
+
 # ── WebSocket endpoint (Starlette adapter + handshake) ───────────
 
 

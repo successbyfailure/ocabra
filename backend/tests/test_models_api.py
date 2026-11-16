@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, create_autospec
 
 import pytest
 
+from ocabra.api._deps_auth import UserContext
 from ocabra.api.internal import models as models_api
 from ocabra.backends.base import BackendCapabilities
 from ocabra.core.model_manager import ModelState, ModelStatus
@@ -1130,6 +1131,9 @@ def test_sin_cache_compartida_cada_plaza_recibe_su_parte():
     assert salida["context_per_request"] == 32768
 
 
+_ADMIN = UserContext(user_id="admin", username="admin", role="system_admin")
+
+
 def _load_request(states: dict):
     mm = MagicMock()
     mm.get_state = AsyncMock(side_effect=lambda model_id: states.get(model_id))
@@ -1169,7 +1173,7 @@ async def test_load_button_loads_the_default_preset_worker(monkeypatch):
         models_api, "_overlay_loaded_derived_state", AsyncMock(side_effect=lambda _mm, s: s)
     )
 
-    await models_api.load_model(base.model_id, request)
+    await models_api.load_model(base.model_id, request, _ADMIN)
 
     mm.load.assert_not_awaited()
     ensure.assert_awaited_once_with(
@@ -1202,7 +1206,7 @@ async def test_load_button_without_presets_loads_the_model_itself(monkeypatch):
         ),
     )
 
-    await models_api.load_model(base.model_id, request)
+    await models_api.load_model(base.model_id, request, _ADMIN)
 
     mm.load.assert_awaited_once_with(base.model_id)
 
@@ -1257,3 +1261,81 @@ async def test_a_never_loaded_llama_cpp_model_lists_its_template_capabilities(
 
     assert payload["capabilities"]["tools"] is True
     assert payload["capabilities"]["reasoning"] is True
+
+
+@pytest.mark.asyncio
+async def test_load_button_refuses_a_model_outside_the_users_groups(monkeypatch):
+    """SEG-06: any API key could load any model; now only the granted ones,
+    and a model outside the grants answers like one that does not exist."""
+    from fastapi import HTTPException
+
+    base = ModelState(
+        model_id="llamacpp_mks/secret:8b",
+        display_name="secret",
+        backend_type="llamacpp_mks",
+        status=ModelStatus.CONFIGURED,
+    )
+    request, mm = _load_request({base.model_id: base})
+    request.app.state.profile_registry.list_by_model = AsyncMock(
+        return_value=[SimpleNamespace(profile_id="secret:8b")]
+    )
+    outsider = UserContext(
+        user_id="u", username="u", role="user", accessible_model_ids={"other:4b"}
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await models_api.load_model(base.model_id, request, outsider)
+
+    assert exc.value.status_code == 404
+    mm.load.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_load_button_accepts_a_model_granted_through_one_of_its_profiles(monkeypatch):
+    base = ModelState(
+        model_id="llamacpp_mks/shared:8b",
+        display_name="shared",
+        backend_type="llamacpp_mks",
+        status=ModelStatus.CONFIGURED,
+    )
+    request, mm = _load_request({base.model_id: base})
+    request.app.state.profile_registry.list_by_model = AsyncMock(
+        return_value=[SimpleNamespace(profile_id="shared:8b")]
+    )
+    from ocabra.api.openai import realtime
+
+    monkeypatch.setattr(
+        realtime,
+        "resolve_realtime_llm_runtime_plan",
+        create_autospec(
+            realtime.resolve_realtime_llm_runtime_plan,
+            return_value=(base.model_id, None, None, None),
+        ),
+    )
+    member = UserContext(
+        user_id="u", username="u", role="user", accessible_model_ids={"shared:8b"}
+    )
+
+    await models_api.load_model(base.model_id, request, member)
+
+    mm.load.assert_awaited_once_with(base.model_id)
+
+
+def test_unload_requires_model_manager():
+    """SEG-06: unloading cuts every user of a shared model, so ``user`` is not enough."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from ocabra.api._deps_auth import get_current_user
+
+    app = FastAPI()
+    app.include_router(models_api.router, prefix="/ocabra")
+    app.state.model_manager = MagicMock()
+    app.dependency_overrides[get_current_user] = lambda: UserContext(
+        user_id="u", username="u", role="user"
+    )
+
+    resp = TestClient(app).post("/ocabra/models/llamacpp_mks/x:8b/unload")
+
+    assert resp.status_code == 403
+    app.state.model_manager.unload.assert_not_called()

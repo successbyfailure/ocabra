@@ -16,7 +16,7 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.api.internal.downloads import download_manager
 from ocabra.redis_client import subscribe
 
-from ._shared import get_ollama_user
+from ._shared import get_ollama_model_manager
 
 router = APIRouter()
 
@@ -29,10 +29,12 @@ class PullRequest(BaseModel):
 @router.post("/pull", summary="Pull a model")
 async def pull_model(
     body: PullRequest,
-    user: UserContext = Depends(get_ollama_user),
+    user: UserContext = Depends(get_ollama_model_manager),
 ):
     """
     Queue a model download and report pull progress in Ollama NDJSON format.
+
+    Requires ``model_manager``: it changes the catalogue every user shares.
 
     Parameters:
       - name: model reference in Ollama format.

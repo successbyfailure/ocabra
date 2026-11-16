@@ -127,6 +127,52 @@ class TestResolveFederated:
         assert peer is None
 
     @pytest.mark.asyncio
+    async def test_a_model_outside_the_users_groups_is_not_found_even_if_warm_on_a_peer(self):
+        """SEG-08: federation ran before the group check, so a model warm on a
+        peer was served to any key. Denied is a 404, like an unknown model."""
+        from fastapi import HTTPException
+
+        from ocabra.api._deps_auth import UserContext
+
+        mm = _FakeModelManager({})
+        peer = _make_peer(
+            models=[{"model_id": "remote-model", "status": "LOADED", "profiles": []}],
+        )
+        fm = _make_fm_with_peers(peer)
+        outsider = UserContext(user_id="u", username="u", role="user",
+                               accessible_model_ids={"other-model"})
+        member = UserContext(user_id="m", username="m", role="user",
+                             accessible_model_ids={"remote-model"})
+
+        with pytest.raises(HTTPException) as exc:
+            await resolve_federated("remote-model", mm, fm, user=outsider)
+        assert exc.value.status_code == 404
+        assert exc.value.detail["error"]["code"] == "model_not_found"
+
+        target, returned_peer = await resolve_federated("remote-model", mm, fm, user=member)
+        assert (target, returned_peer) == ("remote", peer)
+
+    @pytest.mark.asyncio
+    async def test_a_profile_grant_covers_its_base_model(self):
+        from types import SimpleNamespace
+
+        from ocabra.api._deps_auth import UserContext
+
+        mm = _FakeModelManager({"llamacpp_mks/chat:8b": _FakeModelState(
+            "llamacpp_mks/chat:8b", status="loaded")})
+        registry = MagicMock()
+        registry.get = AsyncMock(return_value=SimpleNamespace(
+            profile_id="chat:8b", base_model_id="llamacpp_mks/chat:8b",
+            profile_kind="execution", enabled=True))
+        registry.resolve_alias = AsyncMock(return_value=None)
+        member = UserContext(user_id="m", username="m", role="user",
+                             accessible_model_ids={"chat:8b"})
+
+        target, _ = await resolve_federated("chat:8b", mm, None, registry, user=member)
+
+        assert target == "local"
+
+    @pytest.mark.asyncio
     async def test_remote_only(self):
         mm = _FakeModelManager({})
         peer = _make_peer(

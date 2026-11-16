@@ -94,7 +94,13 @@ def test_websocket_forwards_global_download_progress() -> None:
     fake_pubsub = _FakePubSub(payload)
     fake_redis = SimpleNamespace(pubsub=lambda: fake_pubsub)
 
-    with patch("ocabra.api.internal.ws.get_redis", return_value=fake_redis):
+    with (
+        patch("ocabra.api.internal.ws.get_redis", return_value=fake_redis),
+        patch(
+            "ocabra.api._deps_auth._resolve_jwt_cookie",
+            new=AsyncMock(return_value=SimpleNamespace(user_id="test-user")),
+        ),
+    ):
         with TestClient(app, cookies={"ocabra_session": token}) as client:
             with client.websocket_connect("/ocabra/ws") as websocket:
                 message = websocket.receive_json()
