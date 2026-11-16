@@ -4588,6 +4588,39 @@ class ModelManager:
         finally:
             self._regrow_pending.discard(model_id)
 
+    async def release_vision_by_reload(self, model_id: str, request_body: dict | None) -> bool:
+        """Reload a worker without its on-demand vision projector.
+
+        llama-server cannot unload a projector once loaded, and loading it may
+        have shrunk the context (``make_room_for_vision``). When a request
+        without images then needs that context back and the GPU has no other
+        room, unloading the worker is the only way: the caller's normal load
+        brings it back at its full context, with no projector until the next
+        image. Only for an idle worker whose shrink was for the projector;
+        returns whether it was unloaded.
+        """
+        state = self._states.get(model_id)
+        if state is None or state.status != ModelStatus.LOADED:
+            return False
+        if not (state.live_context or {}).get("vision_mb"):
+            return False
+        backend = self._registered_backend(state.backend_type)
+        active = getattr(backend, "vision_is_active", None)
+        if not callable(active) or not active(state.backend_model_id):
+            return False
+        contains_image = getattr(backend, "_contains_image", None)
+        if request_body and callable(contains_image) and contains_image(request_body):
+            return False
+        if self.is_busy(model_id):
+            return False
+        logger.info(
+            "vision_released_by_reload",
+            model_id=model_id,
+            context=(state.live_context or {}).get("n_ctx"),
+        )
+        await self.unload(model_id, reason="vision_release")
+        return True
+
     async def grow_context_back(self, model_id: str) -> ModelState:
         """Give a shrunk worker its loaded context back, making room if needed.
 

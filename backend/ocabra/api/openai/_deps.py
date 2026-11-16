@@ -387,14 +387,23 @@ async def resolve_profile_runtime_plan(
                 live_effective_context=live_effective_context,
                 error=str(exc),
             )
-            raise _openai_error(
-                "The model is running with a reduced context and could not grow back "
-                f"to fit {plan.required_tokens} tokens right now; retry shortly.",
-                "server_error",
-                code="context_temporarily_reduced",
-                status_code=503,
-                headers={"Retry-After": "5"},
-            ) from exc
+            # The room went to an on-demand vision projector, which llama-server
+            # cannot unload. A text request that needs that room gets the
+            # worker reloaded without it (the load below brings it back at its
+            # full context) instead of a 503 that the client retries forever:
+            # 2026-11-16, ornith-1.5:35b answered 11 consecutive 503s after one
+            # image shrank it from 229k to 143k.
+            if await model_manager.release_vision_by_reload(plan.worker_key, request_body):
+                live_effective_context = None
+            else:
+                raise _openai_error(
+                    "The model is running with a reduced context and could not grow back "
+                    f"to fit {plan.required_tokens} tokens right now; retry shortly.",
+                    "server_error",
+                    code="context_temporarily_reduced",
+                    status_code=503,
+                    headers={"Retry-After": "5"},
+                ) from exc
         live_effective_context = None
     effective_context = plan.effective_context
     if live_effective_context is not None and effective_context is not None:

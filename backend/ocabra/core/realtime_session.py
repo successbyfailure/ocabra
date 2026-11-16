@@ -1365,8 +1365,11 @@ class RealtimeSession:
 
         In transcription-only mode we stop after the transcript: no LLM response.
         """
-        await self._commit_audio_only()
-        if not self.transcription_only:
+        added = await self._commit_audio_only()
+        # Nothing usable in the turn (silence, noise dropped as a Whisper
+        # hallucination): no user message, so no answer either. Answering it
+        # made the assistant reply to things nobody said.
+        if not self.transcription_only and added:
             await self._generate_response()
 
     async def _commit_transcription(self) -> None:
@@ -1452,7 +1455,7 @@ class RealtimeSession:
             speakers=result["speakers"],
         )
 
-    async def _commit_audio_only(self) -> None:
+    async def _commit_audio_only(self) -> bool:
         """Commit the audio buffer.
 
         Routing depends on the selected LLM's ``audio_input`` capability:
@@ -1463,11 +1466,11 @@ class RealtimeSession:
         """
         if self.transcription_only:
             await self._commit_transcription()
-            return
+            return False
 
         if not self.audio_buffer:
             await self._send_event("input_audio_buffer.committed", item_id=_new_item_id())
-            return
+            return False
 
         pcm_data = bytes(self.audio_buffer)
         self.audio_buffer.clear()
@@ -1514,7 +1517,7 @@ class RealtimeSession:
                     self._emit_parallel_user_transcript(pcm_data, item_id),
                     name="realtime-parallel-stt",
                 )
-            return
+            return True
 
         # STT path: transcribe audio
         transcript = await self._transcribe(pcm_data)
@@ -1545,6 +1548,8 @@ class RealtimeSession:
                 content_index=0,
                 transcript=transcript,
             )
+            return True
+        return False
 
     async def _cancel_current_response(self) -> None:
         """Cancel the in-progress response task, if any. Shared by the
@@ -1908,14 +1913,34 @@ class RealtimeSession:
             wav_bytes = _pcm16_to_wav(pcm_data, _INPUT_SAMPLE_RATE)
             url = f"http://127.0.0.1:{worker.port}/transcribe"
             async with httpx.AsyncClient(timeout=60.0) as client:
+                # verbose_json: the segments carry Whisper's own no_speech_prob,
+                # which the hallucination filter needs. Conversation turns used
+                # plain json and skipped the filter, so a noise burst that set
+                # off the VAD came back as invented text — often in another
+                # script when no language was set (2026-11-16, OpenClaw).
                 resp = await client.post(
                     url,
                     files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-                    data=self._stt_data({"response_format": "json", "temperature": "0.0"}),
+                    data=self._stt_data(
+                        {
+                            "response_format": "verbose_json",
+                            "temperature": "0.0",
+                            "timestamp_granularities": ["segment"],
+                        }
+                    ),
                 )
                 resp.raise_for_status()
                 result = resp.json()
-                text = result.get("text", "").strip()
+                if self._suppress_hallucinations and result.get("segments"):
+                    before = (result.get("text") or "").strip()
+                    self._filter_hallucinations(result)
+                    if before and not (result.get("text") or "").strip():
+                        logger.info(
+                            "realtime_hallucination_dropped",
+                            session_id=self._session_id,
+                            chars=len(before),
+                        )
+                text = (result.get("text") or "").strip()
                 output_tokens = len(text.split())
                 return text
         except asyncio.CancelledError:

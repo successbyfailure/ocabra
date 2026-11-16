@@ -660,6 +660,7 @@ async def test_request_that_fits_live_context_uses_it_without_regrowing() -> Non
 async def test_failed_regrow_is_a_retryable_503() -> None:
     mm = MagicMock()
     mm.grow_context_back = AsyncMock(side_effect=RuntimeError("no VRAM"))
+    mm.release_vision_by_reload = AsyncMock(return_value=False)
     with (
         patch("ocabra.api.openai._deps.plan_profile_runtime", AsyncMock(return_value=_plan())),
         pytest.raises(HTTPException) as caught,
@@ -668,6 +669,19 @@ async def test_failed_regrow_is_a_retryable_503() -> None:
 
     assert caught.value.status_code == 503
     assert caught.value.headers["Retry-After"] == "5"
+
+
+@pytest.mark.asyncio
+async def test_si_el_sitio_lo_tiene_el_proyector_se_recarga_en_vez_de_503() -> None:
+    mm = MagicMock()
+    mm.grow_context_back = AsyncMock(side_effect=RuntimeError("no VRAM"))
+    mm.release_vision_by_reload = AsyncMock(return_value=True)
+    with patch("ocabra.api.openai._deps.plan_profile_runtime", AsyncMock(return_value=_plan())):
+        plan = await resolve_profile_runtime_plan(
+            MagicMock(), mm, {}, request_state=SimpleNamespace()
+        )
+    mm.release_vision_by_reload.assert_awaited_once()
+    assert plan is not None
 
 
 # -- internal endpoint -----------------------------------------------------------

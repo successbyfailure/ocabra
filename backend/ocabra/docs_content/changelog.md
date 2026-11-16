@@ -16,6 +16,31 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.85.1 — 2026-11-16
+
+### Correcciones
+
+- **`/v1/realtime` ya no transcribe el ruido como texto inventado.** Un
+  ruido corto que activaba la detección de voz se mandaba a Whisper sin el
+  filtro de alucinaciones, y volvía como frases inventadas, a menudo en otro
+  alfabeto si no se fijaba el idioma. Además el asistente las contestaba.
+  Ahora se descartan los segmentos que el propio Whisper considera no-voz, y
+  un turno sin nada útil no genera respuesta.
+- **Una imagen ya no deja al modelo con el contexto recortado.** Al cargar el
+  proyector de visión, el contexto se reduce para hacerle sitio (en
+  `ornith-1.5:35b`, de 229k a 143k), y el proyector no se puede descargar. Las
+  peticiones de texto que necesitaban más contexto recibían
+  `503 context_temporarily_reduced` una y otra vez. Ahora, si el modelo está
+  libre, se recarga sin proyector con su contexto completo: la petición
+  espera esa recarga en vez de fallar.
+- **`nemotron-3.5-lightning:30b` ya no se recarga cada poco.** Arrancaba
+  dejando en la 3060 menos sitio del que ocupa whisper más el margen de
+  seguridad, y el vigilante de memoria lo sacaba cada minuto o dos. La
+  siguiente petición pagaba la recarga. Ahora arranca con un contexto algo
+  menor y crece cuando una petición lo pide.
+
+---
+
 ## 0.85.0 — 2026-11-16
 
 ### Novedades
