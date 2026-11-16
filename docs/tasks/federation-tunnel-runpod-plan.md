@@ -149,9 +149,10 @@ otro nodo** (lado B: URL, estado de la solicitud, estado del túnel) y **Nube**
 | 2 | Solicitudes de unión + invitaciones + identidad de servicio + anti-bucles | ✅ 0.82.0 |
 | 3 | Página de Federación propia (sale de Settings) | ✅ 0.82.0 |
 | 4 | Prueba real con `mapache` | ✅ 0.82.1 — solicitud → aceptar → túnel en <1 s; embedding enrutado por el túnel en 133 ms |
-| 5 | Imagen `ocabra-node` | ⬜ |
-| 6 | RunPod: cliente, `cloud_nodes`, salvaguardas, UI | ⬜ |
-| 7 | Prueba real con un pod (3090 Community ≈ $0.22/h) | ⬜ |
+| 5 | Imagen `ocabra-node` (GHCR pública, CUDA 12.8) | ✅ 0.83.1 → 0.86.0 |
+| 6 | RunPod: cliente, `cloud_nodes`, salvaguardas, UI | ✅ 0.83.0 (+ precarga 0.85.0, gpu_broken 0.84.3) |
+| 7 | Prueba real con un pod | ✅ gemma4:26b en 4090 Secure: 188 tok/s (3090 local 155), visión y tools OK |
+| 8 | Panel remoto (ver y gestionar otro nodo desde este interfaz) | ✅ 0.86.0, probado en vivo contra un nodo local |
 
 ## Verificación (0.82.0)
 
@@ -181,3 +182,26 @@ otro nodo** (lado B: URL, estado de la solicitud, estado del túnel) y **Nube**
 ## Pendiente de confirmar
 
 - Registro para `ocabra-node`: **GHCR** (decidido 2026-11-15).
+
+## Ronda 1, cierre (2026-11-16)
+
+- **Trampa de RunPod:** el stock "Community" de 4090 era una sola máquina con
+  la GPU rota ("GPU Recovery Action: Reboot", `cuInit` 999): NVML la ve, CUDA
+  no. Tres pods cayeron ahí y corrieron en CPU. Ahora el nodo publica `cuda` en
+  el heartbeat y el watchdog lo termina (`gpu_broken`).
+- **Caché de imágenes en el host:** republicar `latest` no basta; los ajustes
+  de la nube apuntan a un tag único `sha-<commit>`.
+- **Reserva de VRAM:** la de nuestra 3090 (23600 MB) no cabe en una 4090
+  (24564 MB totales); la precarga recorta reserva y contexto.
+- **Panel remoto:** el interfaz entra en modo remoto (sessionStorage + recarga)
+  y todo va por `/ocabra/federation/peers/{id}/proxy/…`; en el nodo, "full" es
+  ahora lista negra (todo salvo usuarios/grupos/claves/federación/nube/host y
+  escrituras de config). Requiere que el nodo remoto tenga ≥ 0.86.0 (Mapache
+  sigue en 0.82.1 hasta que se publique y actualice).
+
+Deuda que queda:
+- El panel remoto no tiene eventos en vivo (sondea cada 5 s); el WebSocket es
+  local.
+- La precarga solo replica modelos de llama.cpp con fuente Ollama o GGUF de HF.
+- Los commits 432ead0…1c9bab9 están sin push (esperan el OK del usuario para
+  publicar también los de ocabra-07 que van debajo).
