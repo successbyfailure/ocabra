@@ -201,6 +201,43 @@ describe("ModelEditor", () => {
     expect(modelEditorApi.patch.mock.calls[0][1].extraConfig.llama_cpp.split_policy).toBe("always")
   })
 
+  it("keeps a GPU selectable with MoE offload when the node defaults gpu_layers to zero", async () => {
+    useGpuStore.setState({
+      gpus: [
+        { index: 0, name: "NVIDIA GeForce GTX 1660", totalVramMb: 6144, freeVramMb: 677, usedVramMb: 5467, utilizationPct: 0, temperatureC: 40, powerDrawW: 20, powerLimitW: 120, lockedVramMb: 0, processes: [] },
+      ],
+      lastUpdated: null,
+    })
+    modelEditorApi.schema.mockResolvedValue({
+      ...schema,
+      fields: [...schema.fields, f("llama_cpp.gpu_layers", "gpus", { label: "Capas en GPU", default: 0 })],
+    })
+    modelEditorApi.get.mockResolvedValue(
+      model({
+        preferred_gpu: 0,
+        extra_config: { llama_cpp: { ctx_size: 65536, n_cpu_moe: 8, split_mode: "none" } },
+      }),
+    )
+    modelEditorApi.capacity.mockResolvedValue({
+      applicable: true,
+      weights_mb: 16283,
+      overhead_mb: 400,
+      kv_dtype: "q8",
+      arch: { layers: 30, n_kv_heads: 8, native_context: 262144, kv_mb_per_1k_tokens: 22.5 },
+      capacity: [],
+      vram_curve: [],
+    })
+
+    renderEditor("capacity")
+    const gpu = await screen.findByLabelText("Usar GPU 0")
+    await waitFor(() => expect((gpu as HTMLInputElement).checked).toBe(false))
+    fireEvent.click(gpu.closest("button") as HTMLButtonElement)
+    await waitFor(() => expect((screen.getByLabelText("Usar GPU 0") as HTMLInputElement).checked).toBe(true))
+    fireEvent.click(screen.getByRole("button", { name: "Guardar" }))
+    await waitFor(() => expect(modelEditorApi.patch).toHaveBeenCalled())
+    expect(modelEditorApi.patch.mock.calls[0][1]).toMatchObject({ extraConfig: { llama_cpp: { gpu_layers: 999 } } })
+  })
+
   it("an LLM without presets offers to create one to measure its real context", async () => {
     api.profiles.listByModel.mockResolvedValue([
       { profileId: "m", profileKind: "execution", baseModelId: "llamacpp_mks/m", displayName: "m", description: null, category: "llm",

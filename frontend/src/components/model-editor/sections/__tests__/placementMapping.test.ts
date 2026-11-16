@@ -57,8 +57,22 @@ describe("base placement", () => {
     const p = readBasePlacement({}, null, GPUS, 48, 999)
     const next = { ...p, cpu: true, cpuMode: "moe" as const, nCpuMoe: 12 }
     const { sec } = applyBase({ gpu_layers: 40 }, null, next, { cpu: true, cpuMode: "moe", nCpuMoe: 12 })
-    expect(sec).toEqual({ n_cpu_moe: 12 })
+    expect(sec).toEqual({ gpu_layers: 999, n_cpu_moe: 12 })
     expect(readBasePlacement(sec, null, GPUS, 48, 999)).toMatchObject({ cpu: true, cpuMode: "moe", nCpuMoe: 12 })
+  })
+
+  it("can reselect a GPU for MoE when an older node defaults gpu_layers to zero", () => {
+    const p = readBasePlacement({ n_cpu_moe: 8 }, 0, [0], 30, 0)
+    expect(p).toMatchObject({ marked: [], cpu: true, cpuMode: "moe", gpuLayers: 0 })
+    const { sec, preferred } = applyBase(
+      { n_cpu_moe: 8 },
+      0,
+      { ...p, marked: [0] },
+      { marked: [0], star: null, ratios: null },
+    )
+    expect(sec).toMatchObject({ gpu_layers: 999, n_cpu_moe: 8 })
+    expect(preferred).toBe(0)
+    expect(readBasePlacement(sec, preferred, [0], 30, 0).marked).toEqual([0])
   })
 })
 
@@ -101,6 +115,17 @@ describe("preset placement", () => {
     expect(back.marked).toEqual([])
     const again = writePresetPlacement(cpuOnly, { ...back, marked: [1] }, GPUS)
     expect(again).toMatchObject({ placementPolicy: "forced", preferredGpus: [1], placement: null })
+  })
+
+  it("MoE presets explicitly keep the selected GPU enabled", () => {
+    const p = readPresetPlacement(form({}), [0], 30)
+    const out = writePresetPlacement(form({}), { ...p, marked: [0], cpu: true, cpuMode: "moe", nCpuMoe: 8 }, [0])
+    expect(out).toMatchObject({
+      placementPolicy: "forced",
+      preferredGpus: [0],
+      placement: { gpuLayers: 999, nCpuMoe: 8 },
+    })
+    expect(readPresetPlacement(out, [0], 30)).toMatchObject({ marked: [0], cpu: true, cpuMode: "moe", nCpuMoe: 8 })
   })
 })
 

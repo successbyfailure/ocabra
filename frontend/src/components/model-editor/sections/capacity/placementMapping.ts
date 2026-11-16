@@ -90,7 +90,11 @@ export function writeBasePlacement(
       setKey("gpu_layers", undefined)
       setKey("n_cpu_moe", undefined)
     } else if (next.cpuMode === "moe") {
-      setKey("gpu_layers", undefined)
+      // MoE offload still needs the dense weights and non-expert tensors on
+      // GPU.  Keep this explicit: older nodes may advertise gpu_layers=0 as
+      // their default, in which case clearing the key turns the model into
+      // CPU-only and the GPU checkbox cannot stay selected.
+      setKey("gpu_layers", next.marked.length ? 999 : 0)
       setKey("n_cpu_moe", next.nCpuMoe ?? undefined)
     } else {
       setKey("gpu_layers", next.gpuLayers ?? undefined)
@@ -156,7 +160,13 @@ export function writePresetPlacement(form: RuntimePresetCreate, next: Placement,
     }
   }
   const cpuOnly = next.marked.length === 0
-  const gpuLayers = cpuOnly ? 0 : next.cpu && next.cpuMode === "layers" && next.gpuLayers ? next.gpuLayers : null
+  const gpuLayers = cpuOnly
+    ? 0
+    : next.cpu && next.cpuMode === "moe"
+      ? 999
+      : next.cpu && next.cpuMode === "layers" && next.gpuLayers
+        ? next.gpuLayers
+        : null
   const nCpuMoe = !cpuOnly && next.cpu && next.cpuMode === "moe" ? next.nCpuMoe : null
   const placement: PresetPlacement = { splitPolicy, splitMode, tensorSplit, gpuLayers, nCpuMoe }
   const empty = Object.values(placement).every((v) => v == null)
