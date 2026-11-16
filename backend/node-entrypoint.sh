@@ -23,5 +23,13 @@ su postgres -c "psql -qtAc \"SELECT 1 FROM pg_database WHERE datname='ocabra'\""
 
 redis-server --bind 127.0.0.1 --port 6379 --save "" --appendonly no --daemonize yes >/dev/null
 
+# The driver's libcuda must have been mounted by the NVIDIA runtime; without it
+# every model would load "fine" and run on the CPU.
+if ldconfig -p | grep -q 'libcuda\.so\.1'; then
+    echo "[ocabra-node] CUDA driver library present"
+else
+    echo "[ocabra-node] WARNING: libcuda.so.1 not found: the GPU is not usable for compute here" \
+         "(NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-unset}). Models will run on the CPU." >&2
+fi
 echo "[ocabra-node] postgres and redis up; starting oCabra (joining ${FEDERATION_JOIN_URL:-<no hub>})"
 exec /app/docker-entrypoint.sh "$@"

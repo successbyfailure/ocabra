@@ -110,6 +110,15 @@ RUN chmod +x /app/docker-entrypoint.sh /app/node-entrypoint.sh \
     && missing="$(ldd /data/backends/llamacpp_mks/bin/llama-server | grep 'not found' | grep -v libcuda.so.1 || true)" \
     && if [ -n "$missing" ]; then echo "unresolved libraries:"; echo "$missing"; exit 1; fi
 
+# Without these the NVIDIA runtime of hosts that read them from the image
+# (RunPod does) mounts only the "utility" libraries: NVML works, so the GPU
+# shows up with its name and memory, but libcuda isn't there and llama.cpp
+# silently runs on the CPU (~6 tok/s instead of ~150 on a 4090). NVIDIA's own
+# images set the same pair; python:slim does not. `docker run --gpus` adds
+# compute by itself, which is why a local test doesn't catch this.
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
 ENV DATABASE_URL=postgresql+asyncpg://ocabra:ocabra@127.0.0.1:5432/ocabra \
     REDIS_URL=redis://127.0.0.1:6379/0 \
     DEFAULT_GPU_INDEX=0 \
