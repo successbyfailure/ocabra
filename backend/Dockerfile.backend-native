@@ -52,14 +52,15 @@ RUN SRC_DIR="${BACKEND_DIR}/src" BIN_DIR="${BACKEND_DIR}/bin" \
     GGML_CPU_FLAGS="-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON" \
     bash "/build/scripts/${SCRIPT}"
 # Self-contained bin/: the build tree's SONAME links, the CUDA libraries the
-# binaries load, and an rpath that looks next to them. The source tree (and
+# binaries load (plus libgomp, OpenMP, absent from slim images), and an rpath
+# that looks next to them. The source tree (and
 # its build products) is not needed at run time.
 RUN set -eu; bin="${BACKEND_DIR}/bin"; \
     if [ -d "${BACKEND_DIR}/src/build/bin" ]; then \
         find "${BACKEND_DIR}/src/build/bin" -maxdepth 1 -name '*.so*' -exec cp -a {} "$bin/" \; ; fi; \
     for f in "$bin"/*; do \
         file -L "$f" | grep -q ELF || continue; \
-        ldd "$f" | awk '/=> \/usr\/local\/cuda/ {print $3}' ; \
+        ldd "$f" | awk '/=> \/usr\/local\/cuda/ || /libgomp/ {print $3}' ; \
     done | sort -u | while read -r lib; do \
         cp -L "$lib" "$bin/"; \
     done; \
@@ -88,7 +89,7 @@ meta = {
     "schema_version": 1,
     "backend_type": backend,
     "version": f"{os.environ['GIT_REF']}@{commit[:10]}" if os.environ["GIT_REF"] != commit else commit[:10],
-    "installed_at": datetime.datetime.now(datetime.UTC).isoformat(),
+    "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "install_source": "source",
     "python_bin": None,
     "extra_bins": bins,
