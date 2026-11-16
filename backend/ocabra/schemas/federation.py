@@ -137,6 +137,10 @@ class HeartbeatResponse(BaseModel):
     gpus: list[HeartbeatGpu]
     models: list[HeartbeatModel]
     load: HeartbeatLoad
+    cuda: dict[str, Any] | None = Field(
+        default=None,
+        description="Whether CUDA compute works here: {ok, devices, error} (ok=None: no driver)",
+    )
 
 
 class PeerTestResult(BaseModel):

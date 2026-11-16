@@ -452,3 +452,58 @@ async def test_self_destruct_only_armed_on_a_runpod_pod(monkeypatch):
     assert NodeSelfDestruct.from_env(fm) is not None
     fm.settings.ocabra_cloud_self_destruct_minutes = 0
     assert NodeSelfDestruct.from_env(fm) is None
+
+
+@requires_db
+async def test_node_with_broken_cuda_is_terminated(hub):
+    fm, fake = hub
+    node = await fm.cloud.launch(gpu_type_id="3090")
+    fake.pods[node["provider_pod_id"]].status = "running"
+    spec = fake.created[0]
+    await fm.join_service.create_request(
+        {
+            "node_id": "pod-node",
+            "node_name": spec.name,
+            "invite_code": spec.env["FEDERATION_JOIN_INVITE"],
+        },
+        source_ip="1.2.3.4",
+    )
+    await fm.cloud.reconcile()
+    linked = await _node(fm, node["id"])
+    peer = next(p for p in fm.get_all_peers() if p.peer_id == linked["peer_id"])
+    peer.online = True
+    peer.cuda = {"ok": False, "devices": 0, "error": "cuInit failed with CUDA error 999"}
+    await fm.cloud.reconcile()
+    after = await _node(fm, node["id"])
+    assert after["terminate_reason"] == "gpu_broken" and "999" in after["error"]
+
+
+def test_cuda_probe_outcomes(monkeypatch):
+    import ctypes
+
+    from ocabra.core import cuda_probe
+
+    class Lib:
+        def __init__(self, init_rc, count):
+            self.init_rc, self.count = init_rc, count
+
+        def cuInit(self, flags):
+            return self.init_rc
+
+        def cuDeviceGetCount(self, ref):
+            ref._obj.value = self.count
+            return 0
+
+    def run(factory):
+        monkeypatch.setattr(cuda_probe, "_RESULT", None)
+        monkeypatch.setattr(ctypes, "CDLL", factory)
+        return cuda_probe.probe_cuda()
+
+    assert run(lambda name: Lib(0, 1)) == {"ok": True, "devices": 1, "error": None}
+    broken = run(lambda name: Lib(999, 0))
+    assert broken["ok"] is False and "999" in broken["error"]
+
+    def missing(name):
+        raise OSError("not found")
+
+    assert run(missing)["ok"] is None

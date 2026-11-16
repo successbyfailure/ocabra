@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.84.3 — 2026-11-16
+
+### Correcciones
+
+- **Un nodo en la nube con la GPU averiada se termina solo.** RunPod puede
+  dar una máquina cuya GPU se ve (nombre y memoria) pero no sirve para
+  calcular; los modelos cargaban "bien" y respondían a velocidad de CPU
+  mientras se pagaba la GPU. Cada nodo comprueba ahora que CUDA funciona de
+  verdad, lo publica en su heartbeat (`GET /ocabra/federation/heartbeat`,
+  campo nuevo `cuda`) y el servidor que lo lanzó lo termina con el motivo
+  `gpu_broken`.
+
+---
+
 ## 0.84.2 — 2026-11-16
 
 ### Correcciones

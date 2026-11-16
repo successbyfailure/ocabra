@@ -51,6 +51,7 @@ const REASONS: Record<string, string> = {
   error: "error en RunPod",
   gone: "ya no existía",
   provider: "lo terminó RunPod",
+  gpu_broken: "GPU averiada en el pod",
 }
 
 const STATUS: Record<CloudNode["status"], { cls: string; label: string }> = {

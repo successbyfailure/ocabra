@@ -574,6 +574,15 @@ class CloudNodeManager:
                         minutes=row.max_runtime_minutes
                     ):
                         to_kill.append((str(row.id), "ttl"))
+                    elif peer is not None and (peer.cuda or {}).get("ok") is False:
+                        # The GPU is visible but CUDA doesn't work (e.g. a host
+                        # whose GPU needs a reboot): models would silently run
+                        # on the CPU while we pay for the GPU.
+                        row.error = (
+                            "La GPU del pod no funciona para cómputo "
+                            f"({(peer.cuda or {}).get('error')}); se termina para no pagar en vano"
+                        )
+                        to_kill.append((str(row.id), "gpu_broken"))
                     elif row.peer_id is None and now - started >= JOIN_TIMEOUT:
                         row.error = "No llegó a unirse a la federación (¿imagen o red?)"
                         to_kill.append((str(row.id), "join_timeout"))

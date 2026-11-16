@@ -196,7 +196,14 @@ async def heartbeat(
         except Exception:
             active_requests = 0
 
+    import asyncio as _asyncio
+
+    from ocabra.core.cuda_probe import probe_cuda
+
+    cuda = await _asyncio.to_thread(probe_cuda)
+
     return HeartbeatResponse(
+        cuda=cuda,
         node_id=fm.node_id,
         node_name=fm.node_name,
         version=settings.app_version,

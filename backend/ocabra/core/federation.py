@@ -97,6 +97,8 @@ class PeerState:
     dialer: Any = None  # TunnelDialer | None (tunnel_out only)
     # Real traffic we sent it (heartbeats excluded): used to shut idle cloud
     # nodes down and shown in the UI.
+    # What the peer reports about its own CUDA (see core/cuda_probe.py).
+    cuda: dict[str, Any] | None = None
     requests_proxied: int = 0
     last_proxied_at: float | None = None
 
@@ -648,6 +650,7 @@ class FederationManager:
             peer.gpus = data.get("gpus", [])
             peer.models = data.get("models", [])
             peer.load = data.get("load", {})
+            peer.cuda = data.get("cuda") if isinstance(data.get("cuda"), dict) else None
             logger.info(
                 "federation_peer_heartbeat_ok",
                 peer=peer.name,
