@@ -90,19 +90,41 @@ Inventario de esquinas, de lo más obvio a lo menos:
 
 ## 3. Federación «Mi servidor, mis reglas»
 
-Opciones pedidas por el usuario, más las que salen al pensarlo:
+**Estado de 1 y 2:** hechos (0.92.0 discos, 0.93.0–0.93.1 privacidad y
+retención). Esto es lo siguiente.
 
-| Opción | Qué hace |
+### Idea
+
+En «Soy parte del enjambre» un peer puede todo (salvo la gestión de accesos).
+En «Mi servidor, mis reglas» **cada nodo pone condiciones a lo que los demás le
+piden**. Las reglas viven en el nodo que sirve, se aplican a las peticiones que
+le llegan de un peer (las identificamos ya: cabecera de salto + usuario de
+servicio `federation:<peer>`) y se publican en el heartbeat, para que el que
+pide sepa a qué atenerse y no mande lo que se le va a rechazar.
+
+### Opciones y en qué se apoyan
+
+| Opción (pedida) | Cómo se haría | Pieza existente |
+|---|---|---|
+| **Yo primero** | Las peticiones de peers entran como clase «batch»: ceden slots a las locales y se pueden expropiar | Prioridad batch/interactivo y su expropiación (`batch_priority`) |
+| **Cargar modelos o solo lo caliente** | Petición de un peer a un modelo no cargado → 503 `model_not_warm`; el peer cae a otro nodo o a local | `ensure_loaded` + el respaldo local del peer (ya registrado) |
+| **Peticiones por hora** | Contador por peer; al pasarse, 429 con `Retry-After` | — (nuevo, en Redis) |
+| **Vatios al mes** | Suma de `energy_wh` de lo servido a ese peer este mes; al pasarse, 429 | `request_stats.energy_wh` + `federation_inbound_from` (0.89) |
+| **Descargar modelos** | Política de rutas del túnel: sin `/ocabra/downloads` | `path_allowed` |
+| **Administrar opciones** | Panel remoto solo lectura (no GET fuera de inferencia → 403) | `path_allowed` (lista de solo lectura) |
+
+| Opción (añadida) | Por qué |
 |---|---|
-| **Yo primero** | Las peticiones locales tienen prioridad sobre las remotas (cola y slots). |
-| **Cargar modelos o solo lo caliente** | Si un peer puede provocar cargas aquí o solo usar lo ya cargado. |
-| **Límite de peticiones por hora** | Por peer. |
-| **Límite de vatios al mes** | Energía consumida sirviendo peticiones de peers (ya medimos energía por petición). |
-| **Permitir descargar modelos** | Que el peer pueda pedir descargas aquí. |
-| **Permitir administrar opciones** | Panel remoto con escritura o solo lectura. |
-| *Añadidas:* modelos ofrecidos | Lista blanca de modelos que los peers ven. |
-| *Añadidas:* franjas horarias | Solo de noche, etc. |
-| *Añadidas:* expulsiones | Si una carga pedida por un peer puede expulsar un modelo local en uso (nunca, solo ociosos, sí). |
-| *Añadidas:* privacidad exigida | Aceptar del peer solo si viene como 0 data, o servir siempre en 0 data. |
+| **Modelos ofrecidos** (lista blanca) | Compartir solo algunos; el heartbeat ya los filtra por quién pregunta |
+| **Expulsar por un peer** (nunca / solo ociosos / sí) | Que una carga pedida por otro no eche un modelo tuyo en uso |
+| **Franja horaria** | Ofrecer la GPU de noche, por ejemplo |
+| **Privacidad exigida** | Servir a ese peer solo en 0 data, o exigir que el peer sea 0 data para mandarle tráfico |
 
-Se diseñará con detalle después de 1 y 2.
+### Decisiones abiertas
+
+1. ¿Reglas **por peer** (cada vecino las suyas) o **globales** con excepciones?
+   Propuesta: unas por defecto del nodo y ajustes por peer.
+2. ¿El modo enjambre sigue siendo «sin reglas», o es «mis reglas» con todo
+   permitido? Propuesta: lo segundo; un solo mecanismo.
+3. ¿Qué pasa con las peticiones que no se sirven por una regla: 429/503 y el
+   peer decide (lo actual), o el hub reintenta en otro nodo?
