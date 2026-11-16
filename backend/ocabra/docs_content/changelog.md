@@ -16,6 +16,40 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.91.2 — 2026-11-16
+
+### Correcciones
+
+- El editor de capacidad mantiene ahora seleccionada la GPU al enviar los
+  expertos MoE a la RAM. Guarda explícitamente todas las capas normales en
+  GPU, también al administrar nodos antiguos cuyo valor por defecto era
+  `gpu_layers=0`; antes la GPU se desmarcaba y no se podía volver a activar.
+
+## 0.91.1 — 2026-11-16
+
+### Correcciones
+
+- La gráfica de potencia reconoce ahora el TDP de 105 W de los nodos con
+  Ryzen 7 3800X y 3800XT. En estos AMD el kernel normalmente no publica RAPL,
+  por lo que antes el máximo quedaba desconocido y la escala era incorrecta.
+
+---
+
+## 0.91.0 — 2026-11-16
+
+### Despliegue
+
+- oCabra puede instalarse desde Ubuntu en Windows 11/WSL2 mediante Docker
+  Desktop. El instalador comprueba CUDA dentro de un contenedor, usa rutas
+  escribibles dentro de WSL y desactiva allí los controles de potencia que el
+  puente NVML de Windows no soporta.
+- Las rutas host de modelos y ACE-Step se configuran ahora con
+  `AI_MODELS_ROOT` y `ACESTEP_ROOT`; ya no es necesario editar el Compose.
+- El arranque básico incluye el monitor de hardware y deja ComfyUI, A1111,
+  TRELLIS.2, ACE-Step y Unsloth bajo la opción `setup.sh --with-services`.
+
+---
+
 ## 0.90.1 — 2026-11-16
 
 ### Correcciones
