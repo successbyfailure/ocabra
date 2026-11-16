@@ -150,17 +150,24 @@ class RegistryClient:
     async def manifest(self, tag: str | None = None) -> tuple[dict[str, Any], str]:
         """``(manifest, digest)`` of *tag*; a multi-arch index resolves to linux/amd64."""
         ref = tag or self.ref.tag
-        resp = await self._request("GET", f"{self._base}/manifests/{ref}", headers={"Accept": ACCEPT})
+        resp = await self._request(
+            "GET", f"{self._base}/manifests/{ref}", headers={"Accept": ACCEPT}
+        )
         if resp.status_code == 404:
             raise OciError(f"{self.ref.with_tag(ref)} is not published")
         if resp.status_code >= 400:
-            raise OciError(f"Manifest of {self.ref.with_tag(ref)}: {resp.status_code} {resp.text[:200]}")
+            raise OciError(
+                f"Manifest of {self.ref.with_tag(ref)}: {resp.status_code} {resp.text[:200]}"
+            )
         body = resp.json()
         digest = resp.headers.get("docker-content-digest") or _sha256(resp.content)
         if body.get("mediaType") in (OCI_INDEX, DOCKER_LIST) or "manifests" in body:
             for entry in body.get("manifests") or []:
                 plat = entry.get("platform") or {}
-                if plat.get("os", "linux") == "linux" and plat.get("architecture", "amd64") == "amd64":
+                if (
+                    plat.get("os", "linux") == "linux"
+                    and plat.get("architecture", "amd64") == "amd64"
+                ):
                     return await self.manifest(entry["digest"])
             raise OciError(f"{self.ref.with_tag(ref)} has no linux/amd64 image")
         return body, digest
@@ -168,7 +175,9 @@ class RegistryClient:
     async def digest(self, tag: str | None = None) -> str | None:
         """Digest *tag* points to, or ``None`` when it isn't published."""
         ref = tag or self.ref.tag
-        resp = await self._request("HEAD", f"{self._base}/manifests/{ref}", headers={"Accept": ACCEPT})
+        resp = await self._request(
+            "HEAD", f"{self._base}/manifests/{ref}", headers={"Accept": ACCEPT}
+        )
         if resp.status_code == 404:
             return None
         if resp.status_code >= 400:
@@ -213,7 +222,11 @@ class RegistryClient:
         return resp.status_code == 200
 
     async def upload_blob(
-        self, path: Path | None, digest: str, *, data: bytes | None = None,
+        self,
+        path: Path | None,
+        digest: str,
+        *,
+        data: bytes | None = None,
         on_bytes: Callable[[int], None] | None = None,
     ) -> None:
         """Upload a blob (chunked, so multi-GB layers work) unless it is there already."""
@@ -540,14 +553,20 @@ async def publish_backend(
     meta = info["metadata"]
     if meta.get("backend_type") not in (None, backend_type):
         raise OciError(f"{tree} holds backend {meta.get('backend_type')!r}, not {backend_type!r}")
-    work = work_dir or tree.parent / f".oci-publish-{backend_type}"
+    # Own folder per run: two publishes of the same backend (a retried job)
+    # must not delete each other's layers.
+    work = (
+        work_dir or tree.parent / f".oci-publish-{backend_type}-{os.getpid()}-{os.urandom(3).hex()}"
+    )
     shutil.rmtree(work, ignore_errors=True)
     try:
         log(f"packing {tree} …")
         layers = await asyncio.to_thread(pack_tree, tree, work)
         total = sum(layer.size for layer in layers)
         log(f"{len(layers)} layers, {total / 1e9:.2f} GB compressed")
-        version_hash = hashlib.sha256("".join(lyr.diff_id for lyr in layers).encode()).hexdigest()[:10]
+        version_hash = hashlib.sha256("".join(lyr.diff_id for lyr in layers).encode()).hexdigest()[
+            :10
+        ]
         stamp = datetime.now(UTC)
         labels = {
             f"{LABEL_PREFIX}type": backend_type,
@@ -586,18 +605,29 @@ async def publish_backend(
             manifest = {
                 "schemaVersion": 2,
                 "mediaType": OCI_MANIFEST,
-                "config": {"mediaType": OCI_CONFIG, "digest": config_digest, "size": len(config_bytes)},
+                "config": {
+                    "mediaType": OCI_CONFIG,
+                    "digest": config_digest,
+                    "size": len(config_bytes),
+                },
                 "layers": [
                     {"mediaType": OCI_LAYER_GZIP, "digest": lyr.digest, "size": lyr.size}
                     for lyr in layers
                 ],
-                "annotations": {k: v for k, v in labels.items() if k.startswith("org.opencontainers")},
+                "annotations": {
+                    k: v for k, v in labels.items() if k.startswith("org.opencontainers")
+                },
             }
             immutable = f"{backend_type}-{stamp:%Y%m%d}-{version_hash}"
             digest = await reg.put_manifest(immutable, manifest)
             await reg.put_manifest(backend_type, manifest)
         log(f"published {ref.with_tag(immutable)} = {ref} ({digest})")
-        return {"ref": str(ref), "immutable": str(ref.with_tag(immutable)), "digest": digest, "labels": labels}
+        return {
+            "ref": str(ref),
+            "immutable": str(ref.with_tag(immutable)),
+            "digest": digest,
+            "labels": labels,
+        }
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -710,12 +740,22 @@ def _main(argv: list[str] | None = None) -> int:
     pub = sub.add_parser("publish", help="pack a backend folder and push it")
     pub.add_argument("--dir", required=True, type=Path, help="the backend folder")
     pub.add_argument("--type", required=True, help="backend type, e.g. diffusers")
-    pub.add_argument("--repository", default=os.environ.get("BACKEND_OCI_REPOSITORY", "ghcr.io/successbyfailure/ocabra-backends"))
+    pub.add_argument(
+        "--repository",
+        default=os.environ.get(
+            "BACKEND_OCI_REPOSITORY", "ghcr.io/successbyfailure/ocabra-backends"
+        ),
+    )
     pub.add_argument("--username", default=os.environ.get("GHCR_USER"))
     pub.add_argument("--gpu-archs", default=None, help="CUDA archs native code was built for")
     show = sub.add_parser("inspect", help="show what is published for a backend")
     show.add_argument("--type", required=True)
-    show.add_argument("--repository", default=os.environ.get("BACKEND_OCI_REPOSITORY", "ghcr.io/successbyfailure/ocabra-backends"))
+    show.add_argument(
+        "--repository",
+        default=os.environ.get(
+            "BACKEND_OCI_REPOSITORY", "ghcr.io/successbyfailure/ocabra-backends"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.cmd == "publish":
         token = os.environ.get("GHCR_TOKEN")
@@ -723,8 +763,12 @@ def _main(argv: list[str] | None = None) -> int:
             parser.error("set GHCR_TOKEN (e.g. GHCR_TOKEN=$(gh auth token))")
         out = asyncio.run(
             publish_backend(
-                args.dir, args.type, args.repository,
-                password=token, username=args.username, gpu_archs=args.gpu_archs,
+                args.dir,
+                args.type,
+                args.repository,
+                password=token,
+                username=args.username,
+                gpu_archs=args.gpu_archs,
             )
         )
         print(json.dumps({k: v for k, v in out.items() if k != "labels"}, indent=2))

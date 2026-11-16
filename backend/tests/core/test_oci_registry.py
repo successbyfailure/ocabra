@@ -36,11 +36,15 @@ class FakeRegistry:
     def handler(self, request: httpx.Request) -> httpx.Response:
         url = request.url
         if url.path == "/token":
-            return httpx.Response(200, json={"token": "push" if request.headers.get("authorization") else "pull"})
+            return httpx.Response(
+                200, json={"token": "push" if request.headers.get("authorization") else "pull"}
+            )
         if request.headers.get("authorization") not in ("Bearer pull", "Bearer push"):
             return httpx.Response(
                 401,
-                headers={"www-authenticate": 'Bearer realm="https://ghcr.test/token",service="ghcr.test"'},
+                headers={
+                    "www-authenticate": 'Bearer realm="https://ghcr.test/token",service="ghcr.test"'
+                },
             )
         writing = request.method in ("POST", "PATCH", "PUT")
         if writing and request.headers["authorization"] != "Bearer push":
@@ -186,9 +190,11 @@ def test_unpack_refuses_paths_escaping_the_destination(tmp_path):
 async def test_publish_then_inspect_then_pull(registry, tmp_path):
     tree = _backend_tree(tmp_path / "src", tmp_path / "target")
     out = await oci.publish_backend(tree, "mock", REPO, password="tok", log=lambda _m: None)
-    assert out["ref"] == f"{REPO}:mock" and re.search(r":mock-\d{8}-[0-9a-f]{10}$", out["immutable"])
+    assert out["ref"] == f"{REPO}:mock" and re.search(
+        r":mock-\d{8}-[0-9a-f]{10}$", out["immutable"]
+    )
     assert registry.patches >= 2  # one streamed PATCH per blob (config + layers)
-    assert not (tmp_path / ".oci-publish-mock").exists()  # work dir cleaned
+    assert not list(tmp_path.glob(".oci-publish-*"))  # work dir cleaned
 
     found = await oci.inspect_backend(REPO, "mock")
     assert found is not None and found.digest == out["digest"]
