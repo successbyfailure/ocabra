@@ -72,3 +72,38 @@ async def test_a_loaded_model_counts_its_own_copy_as_free(monkeypatch):
 @pytest.mark.asyncio
 async def test_without_gpu_manager_there_is_no_capacity():
     assert await _preview_capacity(SimpleNamespace(), None, SimpleNamespace()) == []
+
+
+def test_max_context_follows_the_budget_not_the_free_memory():
+    from ocabra.api.internal.models import _max_context_within_budget
+
+    # Mapache: gemma4 at 12k (4 slots, pool), formula said 20k/80k.
+    estimate = {
+        "requested_context_length": 12288,
+        "estimated_max_context_length": 20000,
+        "estimated_max_total_context": 80000,
+    }
+    used = [
+        {
+            "index": 0,
+            "mb": 4417,
+            "breakdown": {"weights": 2474, "kv": 276, "fixed": 1266, "overhead": 400},
+        }
+    ]
+    out = _max_context_within_budget(estimate, used, {0: {"budgetMb": 4361}}, 4)
+    # 4361 − 4141 = 220 MB of KV at 276 MB / 12288 tokens.
+    assert out["estimated_max_total_context"] == int(220 * 12288 / 276)
+    assert out["estimated_max_context_length"] == out["estimated_max_total_context"] // 4
+
+
+def test_max_context_never_raises_the_formula():
+    from ocabra.api.internal.models import _max_context_within_budget
+
+    estimate = {
+        "requested_context_length": 8192,
+        "estimated_max_context_length": 9000,
+        "estimated_max_total_context": 9000,
+    }
+    used = [{"index": 1, "mb": 12000, "breakdown": {"weights": 11000, "kv": 1000}}]
+    out = _max_context_within_budget(estimate, used, {1: {"budgetMb": 23000}}, 1)
+    assert out["estimated_max_total_context"] == 9000

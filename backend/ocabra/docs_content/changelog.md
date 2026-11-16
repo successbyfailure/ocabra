@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.95.5 — 2026-11-16
+
+### Corregido
+
+- `POST /ocabra/models/{id}/preview`: `estimate.estimated_max_context_length` y
+  `estimated_max_total_context` se calculaban contra la memoria libre de la
+  tarjeta (con el escritorio y el margen del planificador dentro) y salían
+  hasta 4 veces más altos de lo que cabe: en una GTX 1660, 80k de contexto
+  para un modelo que no cargaba con 12k. Ahora salen del mismo hueco que
+  `capacity[].budgetMb` y nunca superan la cifra anterior.
+
+---
+
 ## 0.95.4 — 2026-11-16
 
 ### Cambios

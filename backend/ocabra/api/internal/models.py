@@ -2008,6 +2008,9 @@ async def preview_model_config(
                 "fits_current_gpu": all(g["mb"] <= room[g["index"]]["availableMb"] for g in used),
                 "fits_after_eviction": all(g["mb"] <= room[g["index"]]["budgetMb"] for g in used),
             }
+            section = materialized.get(state.backend_type)
+            slots = (section or {}).get("parallel_slots") if isinstance(section, dict) else None
+            estimate = _max_context_within_budget(estimate, used, room, slots)
 
     return {
         "errors": errors,
@@ -2017,6 +2020,48 @@ async def preview_model_config(
         "gpus": gpus,
         "capacity": capacity,
         "launch": launch,
+    }
+
+
+def _max_context_within_budget(
+    estimate: dict, used: list[dict], room: dict[int, dict], slots: Any
+) -> dict:
+    """Largest context that fits the scheduler's budget, from the preview's split.
+
+    The editor paints the context bar green up to ``estimated_max_*``; the
+    formulas worked that out against the card's free memory (a desktop and the
+    scheduler buffer included), so on Mapache's 1660 it said 80k while the
+    memory bars, already on the budget, said 20k did not fit. Here the KV share
+    of each GPU is extrapolated linearly from the requested context (the
+    sliding-window part does not grow, so this errs low) and the GPU that runs
+    out first sets the limit. Only lowers the formula's figures.
+    """
+    ctx = int(estimate.get("requested_context_length") or 0)
+    if ctx <= 0:
+        return estimate
+    limit: int | None = None
+    for g in used:
+        kv = int((g.get("breakdown") or {}).get("kv") or 0)
+        if kv <= 0:
+            continue
+        static = int(g["mb"]) - kv
+        spare = int(room[g["index"]]["budgetMb"]) - static
+        tokens = max(0, int(spare * ctx / kv))
+        limit = tokens if limit is None else min(limit, tokens)
+    if limit is None:
+        return estimate
+    try:
+        n_slots = max(1, int(slots or 1))
+    except (TypeError, ValueError):
+        n_slots = 1
+    total = limit
+    per_request = total // n_slots
+    old_total = estimate.get("estimated_max_total_context")
+    old_per = estimate.get("estimated_max_context_length")
+    return {
+        **estimate,
+        "estimated_max_total_context": min(total, int(old_total)) if old_total else total,
+        "estimated_max_context_length": min(per_request, int(old_per)) if old_per else per_request,
     }
 
 
