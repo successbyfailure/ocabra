@@ -458,6 +458,9 @@ export interface DownloadJob {
     extraConfig?: BackendExtraConfig;
     /** Public name of the model (`gemma4:e4b`, `qwen3-8b-q4_k_m`). */
     modelKey?: string;
+    /** llama.cpp only: devices the model may use. After the download the
+     *  server plans its presets from llama.cpp's memory projection. */
+    placement?: { gpus: number[]; cpu: boolean };
     /** Deployment that serves the public name. */
     defaultBackend?: BackendType;
     /** Every deployment to create from the same file (default included). */

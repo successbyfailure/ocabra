@@ -24,6 +24,7 @@ from ocabra.db.model_config import (
     replace_model_schedules,
 )
 from ocabra.registry.ollama_registry import OllamaRegistry
+from ocabra.schemas.auto_setup import AutoSetupRequest
 from ocabra.schemas.live_context import LiveContextRequest
 from ocabra.stats import live_activity, live_feed
 
@@ -1967,6 +1968,22 @@ async def preview_model_config(
     except Exception:  # noqa: BLE001
         gpus = []
 
+    # llama.cpp models: llama.cpp's own projection (llama-fit-params) replaces
+    # the formula split when the tool is installed — exact per GPU and in RAM.
+    if is_llama_cpp_family(state.backend_type) and not errors:
+        try:
+            fit_backend = await request.app.state.worker_pool.get_backend(state.backend_type)
+            project = getattr(fit_backend, "project_memory", None)
+            projection = (
+                await project(state.backend_model_id, gpu_indices, materialized)
+                if callable(project)
+                else None
+            )
+        except Exception:  # noqa: BLE001 - the formula preview still stands
+            projection = None
+        if projection:
+            gpus, estimate = _apply_fit_projection(projection, estimate, totals)
+
     launch = None
     try:
         backend = await request.app.state.worker_pool.get_backend(state.backend_type)
@@ -1984,6 +2001,110 @@ async def preview_model_config(
         "gpus": gpus,
         "launch": launch,
     }
+
+
+@router.post(
+    "/models/{model_id:path}/auto-setup",
+    summary="Plan (and optionally write) runtime presets for the chosen devices",
+    responses={
+        400: {"description": "Not a llama.cpp model, or no default profile"},
+        404: {"description": "Model not found"},
+    },
+)
+async def auto_setup_model(
+    model_id: str,
+    body: AutoSetupRequest,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Plan presets from llama.cpp's own memory projection.
+
+    Body: ``gpus`` (indices the model may use), ``cpu`` (whether part of it may
+    stay in RAM) and ``apply``. Response: ``rungs`` (key, label, GPUs, context,
+    placement, projected VRAM per GPU and RAM), ``needsCpu`` (it only fits with
+    the CPU), ``warnings`` and ``applied`` (preset keys written, empty unless
+    ``apply``). Applying replaces the model's default-profile presets.
+    """
+    from ocabra.core.auto_setup import apply_setup, plan_setup
+
+    mm = request.app.state.model_manager
+    state = await mm.get_state(model_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    if not is_llama_cpp_family(state.backend_type):
+        raise HTTPException(status_code=400, detail="Automatic setup is for llama.cpp models")
+    backend = await request.app.state.worker_pool.get_backend(state.backend_type)
+    if not callable(getattr(backend, "project_memory", None)):
+        raise HTTPException(status_code=400, detail="This backend cannot project memory")
+    plan = await plan_setup(mm, backend, state, gpus=list(body.gpus), allow_cpu=body.cpu)
+    applied: list[str] = []
+    if body.apply and plan.rungs:
+        registry = request.app.state.profile_registry
+        profiles = await registry.list_by_model(model_id)
+        default = next((p for p in profiles if getattr(p, "is_default", False)), None)
+        if default is None:
+            raise HTTPException(status_code=400, detail="The model has no default profile")
+        applied = await apply_setup(registry, default, plan)
+    out = plan.as_dict()
+    return {
+        "rungs": out["rungs"],
+        "needsCpu": out["needs_cpu"],
+        "warnings": out["warnings"],
+        "budgets": out["budgets"],
+        "applied": applied,
+    }
+
+
+_FIT_PART_KEYS = {"model": "weights", "context": "kv", "compute": "overhead"}
+
+
+def _apply_fit_projection(
+    projection: dict, estimate: dict, totals: dict[int, int]
+) -> tuple[list[dict], dict]:
+    """Preview ``gpus`` and ``estimate`` rebuilt from a llama.cpp projection.
+
+    Part names are mapped to the ones the editor's chart already labels
+    (model weights, KV, CUDA buffers); the formula's figures stay in
+    ``estimate['formula']`` for comparison.
+    """
+    gpus = []
+    for gpu, parts in sorted((projection.get("vram_breakdown_by_gpu") or {}).items()):
+        mapped: dict[str, int] = {}
+        for key, mb in parts.items():
+            name = _FIT_PART_KEYS.get(key, key)
+            mapped[name] = mapped.get(name, 0) + int(mb)
+        gpus.append({"index": int(gpu), "mb": sum(mapped.values()), "breakdown": mapped})
+    total = int(projection.get("estimated_vram_mb") or 0)
+    host = int(projection.get("host_mb") or 0)
+    fits = (
+        all(g["mb"] <= totals[g["index"]] for g in gpus if g["index"] in totals)
+        if totals
+        else None
+    )
+    notes = [
+        "Proyección de llama.cpp (llama-fit-params): la misma cuenta que hace al "
+        f"arrancar. GPU: {total} MB · RAM: {host} MB."
+    ]
+    if host:
+        notes.append(
+            "La RAM es lo que queda fuera de la GPU (expertos o capas en CPU, "
+            "embeddings). El RSS del proceso puede verse mayor: con mmap cuenta "
+            "también las páginas del fichero ya subidas a la GPU."
+        )
+    updated = {
+        **estimate,
+        "formula": {
+            "model_loading_memory_mb": estimate.get("model_loading_memory_mb"),
+            "breakdown_mb": estimate.get("breakdown_mb"),
+        },
+        "model_loading_memory_mb": total,
+        "host_ram_mb": host,
+        "cpu_mb": host,
+        "fits_current_gpu": fits,
+        "source": "llama_fit",
+        "notes": notes + [n for n in (estimate.get("notes") or []) if "Desglose en MB" not in n],
+    }
+    return gpus, updated
 
 
 @router.post(

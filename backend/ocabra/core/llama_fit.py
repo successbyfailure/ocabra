@@ -1,0 +1,247 @@
+"""Memory projection of a llama.cpp load, by llama.cpp itself.
+
+``llama-fit-params --fit-print`` (built next to ``llama-server`` by
+``install_llama_cpp.sh``) reads the GGUF and the context parameters and prints
+what the load would allocate on each device and in host RAM — model weights,
+context (KV + recurrent state) and compute buffers — without loading the
+model. It is the same accounting llama.cpp runs when it starts.
+
+Measured 2026-11-16 on gemma4:26b with its experts in RAM (Mapache's
+configuration, 10k context, 4 slots, q8 KV) against a real load on the 3060:
+
+    projection  GPU 2459 + 755 + 541 = 3755 MiB   host 14557 + 26 MiB
+    real        GPU 3752 MiB (nvidia-smi)          host 14557 MiB mapped
+    oCabra's formulas: GPU 4371 MiB, host 13809 MiB
+
+The formulas carried hand-calibrated constants (gemma4's included a vision
+projector that is now loaded on demand) and missed the sliding-window cache
+growing with slots and the token embeddings left in RAM. This module is the
+estimator for llama.cpp-family models whenever the tool is installed; callers
+fall back to the formulas when it returns ``None``.
+
+What it does not see: a speculative draft model (MTP/EAGLE) and a vision
+projector loaded at start. Callers add those on top.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+FIT_PARAMS_BIN = "llama-fit-params"
+_TIMEOUT_S = 60.0
+_CACHE_MAX = 256
+
+
+@dataclass(frozen=True)
+class FitProjection:
+    """MiB per physical GPU index and in host RAM, split by kind."""
+
+    gpus: dict[int, dict[str, int]] = field(default_factory=dict)
+    host: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def vram_by_gpu(self) -> dict[int, int]:
+        return {g: sum(parts.values()) for g, parts in self.gpus.items()}
+
+    @property
+    def vram_total_mb(self) -> int:
+        return sum(self.vram_by_gpu.values())
+
+    @property
+    def host_mb(self) -> int:
+        return sum(self.host.values())
+
+
+_cache: dict[tuple, FitProjection | None] = {}
+_locks: dict[tuple, asyncio.Lock] = {}
+
+
+def fit_params_binary(server_bin: str | os.PathLike[str] | None) -> Path | None:
+    """``llama-fit-params`` next to ``llama-server``, or ``None`` if absent."""
+    if not server_bin:
+        return None
+    candidate = Path(server_bin).with_name(FIT_PARAMS_BIN)
+    return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
+
+def _fmt(value: float) -> str:
+    text = f"{float(value):.4f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def build_args(
+    model_file: str,
+    *,
+    ctx_size: int,
+    parallel: int,
+    gpu_layers: int | None,
+    n_cpu_moe: int | None = None,
+    override_tensor: str | None = None,
+    cache_type_k: str | None = None,
+    cache_type_v: str | None = None,
+    flash_attn: bool | None = None,
+    batch_size: int | None = None,
+    ubatch_size: int | None = None,
+    split_mode: str | None = None,
+    tensor_split: list[float] | None = None,
+    main_gpu: int | None = None,
+) -> list[str]:
+    """CLI arguments for ``llama-fit-params --fit-print`` mirroring a launch.
+
+    ``--kv-unified`` is not accepted by the tool; without it llama.cpp sizes
+    the sliding-window cache per sequence, so the projection can be slightly
+    above a unified-pool load (conservative).
+    """
+    args = ["-m", str(model_file), "--fit-print", "on", "-c", str(int(ctx_size))]
+    args += ["-np", str(max(1, int(parallel)))]
+    if gpu_layers is not None:
+        args += ["-ngl", str(int(gpu_layers))]
+    if n_cpu_moe:
+        args += ["--n-cpu-moe", str(int(n_cpu_moe))]
+    if override_tensor:
+        args += ["-ot", str(override_tensor)]
+    if cache_type_k:
+        args += ["-ctk", str(cache_type_k)]
+    if cache_type_v:
+        args += ["-ctv", str(cache_type_v)]
+    if flash_attn is not None:
+        args += ["-fa", "on" if flash_attn else "off"]
+    if batch_size:
+        args += ["-b", str(int(batch_size))]
+    if ubatch_size:
+        args += ["-ub", str(int(ubatch_size))]
+    if split_mode:
+        args += ["-sm", str(split_mode)]
+    if tensor_split:
+        args += ["-ts", ",".join(_fmt(r) for r in tensor_split)]
+    if main_gpu is not None:
+        args += ["-mg", str(int(main_gpu))]
+    return args
+
+
+def parse_output(stdout: str, gpu_indices: list[int]) -> FitProjection | None:
+    """Parse ``<device> <model> <context> <compute>`` lines (MiB).
+
+    ``CUDA<k>`` is the k-th *visible* device, mapped back to ``gpu_indices``;
+    ``Host`` is RAM. Returns ``None`` when nothing usable was printed.
+    """
+    gpus: dict[int, dict[str, int]] = {}
+    host: dict[str, int] = {}
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        name, *numbers = parts
+        try:
+            model, context, compute = (int(float(n)) for n in numbers)
+        except ValueError:
+            continue
+        values = {"model": model, "context": context, "compute": compute}
+        if name.lower() in {"host", "cpu"}:
+            host = values
+        elif name.upper().startswith("CUDA"):
+            try:
+                ordinal = int(name[4:])
+            except ValueError:
+                continue
+            if 0 <= ordinal < len(gpu_indices):
+                gpus[int(gpu_indices[ordinal])] = values
+    if not gpus and not host:
+        return None
+    return FitProjection(gpus=gpus, host=host)
+
+
+async def project(
+    server_bin: str | os.PathLike[str] | None,
+    model_file: str,
+    gpu_indices: list[int],
+    args: list[str],
+) -> FitProjection | None:
+    """Run the projection (cached per file, devices and arguments).
+
+    ``gpu_indices`` are the physical GPUs the load would see
+    (``CUDA_VISIBLE_DEVICES``); an empty list projects a CPU-only load.
+    Never raises: any failure returns ``None`` and the caller falls back.
+    """
+    binary = fit_params_binary(server_bin)
+    if binary is None:
+        return None
+    try:
+        mtime = Path(model_file).stat().st_mtime_ns  # noqa: ASYNC240 — solo metadatos
+    except OSError:
+        return None
+    key = (str(binary), str(model_file), mtime, tuple(gpu_indices), tuple(args))
+    if key in _cache:
+        return _cache[key]
+    lock = _locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        if key in _cache:
+            return _cache[key]
+        env = dict(os.environ)
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_indices) or "-1"
+        lib_dir = str(binary.parent)
+        env["LD_LIBRARY_PATH"] = lib_dir + (
+            f":{env['LD_LIBRARY_PATH']}" if env.get("LD_LIBRARY_PATH") else ""
+        )
+        result: FitProjection | None = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(binary),
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT_S)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.warning("llama_fit_timeout", model_file=model_file)
+                stdout, stderr = b"", b""
+            if proc.returncode == 0:
+                result = parse_output(stdout.decode(errors="replace"), list(gpu_indices))
+            else:
+                logger.info(
+                    "llama_fit_failed",
+                    model_file=model_file,
+                    returncode=proc.returncode,
+                    stderr=stderr.decode(errors="replace")[-300:],
+                )
+        except Exception as exc:  # noqa: BLE001 - an estimate must never break a load
+            logger.info("llama_fit_error", model_file=model_file, error=str(exc))
+        if len(_cache) >= _CACHE_MAX:
+            _cache.pop(next(iter(_cache)))
+        _cache[key] = result
+        _locks.pop(key, None)
+        return result
+
+
+def args_from_options(model_file: str, options: dict[str, Any]) -> list[str]:
+    """``build_args`` from the backend's resolved launch options."""
+    return build_args(
+        model_file,
+        ctx_size=int(options.get("ctx_size") or 4096),
+        parallel=int(options.get("parallel_slots") or 1),
+        gpu_layers=options.get("gpu_layers"),
+        n_cpu_moe=options.get("n_cpu_moe"),
+        override_tensor=options.get("override_tensor"),
+        cache_type_k=options.get("cache_type_k"),
+        cache_type_v=options.get("cache_type_v"),
+        flash_attn=bool(options.get("flash_attn"))
+        if options.get("flash_attn") is not None
+        else None,
+        batch_size=options.get("batch_size"),
+        ubatch_size=options.get("ubatch_size"),
+        split_mode=options.get("split_mode"),
+        tensor_split=options.get("tensor_split"),
+        main_gpu=options.get("main_gpu"),
+    )

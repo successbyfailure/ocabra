@@ -11,6 +11,26 @@ import type { EvictionSchedule, LoadPolicy } from "@/types"
 
 const enc = encodeURIComponent
 
+export interface AutoSetupRung {
+  key: string
+  label: string
+  gpus: number[]
+  context: number
+  /** Opciones de llama.cpp del peldaño: `n_cpu_moe` (capas con los expertos
+   *  en RAM), `gpu_layers` (capas en GPU; 0 = todo en CPU) y el reparto. */
+  placement: Record<string, unknown>
+  vram_by_gpu: Record<string, number>
+  host_mb: number
+}
+
+export interface AutoSetupResult {
+  rungs: AutoSetupRung[]
+  needsCpu: boolean
+  warnings: string[]
+  budgets: { index: number; name: string; total_mb: number; budget_mb: number }[]
+  applied: string[]
+}
+
 /** Llamadas que usa el editor de modelos. Trabajan con la configuración tal y
  *  como se guarda (snake_case), sin la vista camelCase del resto del cliente. */
 export const modelEditorApi = {
@@ -73,6 +93,11 @@ export const modelEditorApi = {
       tokens_per_second: number | null
       error: string | null
     }>("POST", `/ocabra/models/${enc(modelId)}/smoke-test`, { cold }),
+
+  /** Planifica los peldaños desde la proyección de memoria de llama.cpp; con
+   *  `apply` reemplaza los presets del perfil por defecto. */
+  autoSetup: (modelId: string, body: { gpus: number[]; cpu: boolean; apply: boolean }) =>
+    request<AutoSetupResult>("POST", `/ocabra/models/${enc(modelId)}/auto-setup`, body),
 
   setMaintenance: (modelId: string, enabled: boolean) =>
     request<unknown>("POST", `/ocabra/models/${enc(modelId)}/maintenance`, { enabled }),

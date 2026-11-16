@@ -105,6 +105,16 @@ cmake -S . -B build \
     -DLLAMA_CURL=OFF \
     "${NCCL_FLAGS[@]}"
 cmake --build build --target llama-server -j"${BUILD_JOBS}"
+# llama-fit-params projects what a configuration takes on each device and in
+# RAM (``--fit-print``) without loading the model: oCabra uses it as the memory
+# estimator for llama.cpp models. Best effort — builds without tools/fit-params
+# (older trees) keep working and fall back to oCabra's own formulas.
+FIT_PARAMS_BUILT=0
+if cmake --build build --target llama-fit-params -j"${BUILD_JOBS}"; then
+    FIT_PARAMS_BUILT=1
+else
+    echo "[install_llama_cpp] WARN: llama-fit-params not built; memory estimates use oCabra's formulas"
+fi
 
 mkdir -p "${BIN_DIR}"
 
@@ -121,6 +131,10 @@ install_atomic() {
 
 install_atomic build/bin/llama-server "${BIN_DIR}/llama-server"
 chmod +x "${BIN_DIR}/llama-server"
+if [ "${FIT_PARAMS_BUILT}" = "1" ] && [ -f build/bin/llama-fit-params ]; then
+    install_atomic build/bin/llama-fit-params "${BIN_DIR}/llama-fit-params"
+    chmod +x "${BIN_DIR}/llama-fit-params"
+fi
 
 # Copy libggml/libllama shared libs next to the binary so it loads them
 # without LD_LIBRARY_PATH gymnastics at runtime.

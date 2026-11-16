@@ -2122,6 +2122,14 @@ class ModelManager:
                     )
                     if est > 0:
                         vram_needed = est
+                    # llama.cpp's own projection beats the formula when the
+                    # tool is installed (2026-11-16: gemma4:26b with experts in
+                    # RAM was refused on Mapache's 1660 for 22 MB by a formula
+                    # estimate 619 MB above the real load). A validated
+                    # measurement below still wins.
+                    projected = await self._project_llama_cpp_vram(state, backend)
+                    if projected:
+                        vram_needed = projected
                     runtime_meta = (
                         state.extra_config.get("_runtime")
                         if isinstance(state.extra_config, dict)
@@ -4691,6 +4699,41 @@ class ModelManager:
             logger.info("live_context_regrow_idle_failed", model_id=model_id, error=str(exc))
         finally:
             self._regrow_pending.discard(model_id)
+
+    async def _project_llama_cpp_vram(self, state: ModelState, backend: Any) -> int:
+        """Total VRAM llama.cpp projects for ``state``'s next load, or 0.
+
+        GPUs: the preset's (``_runtime.gpu_indices``), else the preferred GPU,
+        else every GPU. 0 when the backend cannot project (tool not installed,
+        weights missing), so the caller keeps the formula estimate.
+        """
+        project = getattr(backend, "project_memory", None)
+        if not callable(project):
+            return 0
+        extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+        runtime = extra.get("_runtime") if isinstance(extra.get("_runtime"), dict) else {}
+        gpus = [int(g) for g in runtime.get("gpu_indices") or []]
+        if not gpus and state.preferred_gpu is not None:
+            gpus = [int(state.preferred_gpu)]
+        if not gpus and self._gpu_manager is not None:
+            try:
+                gpus = [int(g.index) for g in await self._gpu_manager.get_all_states()]
+            except Exception:  # noqa: BLE001
+                gpus = []
+        try:
+            result = await project(state.backend_model_id, gpus, extra)
+        except Exception as exc:  # noqa: BLE001 - an estimate never blocks a load
+            logger.info("llama_fit_projection_failed", model_id=state.model_id, error=str(exc))
+            return 0
+        if not result:
+            return 0
+        logger.info(
+            "llama_fit_projection",
+            model_id=state.model_id,
+            vram_by_gpu=result.get("vram_by_gpu"),
+            host_mb=result.get("host_mb"),
+        )
+        return int(result.get("estimated_vram_mb") or 0)
 
     async def release_vision_by_reload(self, model_id: str, request_body: dict | None) -> bool:
         """Reload a worker without its on-demand vision projector.

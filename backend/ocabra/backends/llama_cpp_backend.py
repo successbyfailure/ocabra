@@ -302,6 +302,99 @@ class LlamaCppBackend(BackendInterface):
         except Exception:
             return Path(f"<no encontrado: {ref}>")
 
+    async def project_memory(
+        self,
+        model_id: str,
+        gpu_indices: list[int],
+        extra_config: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """What a load with ``extra_config`` on ``gpu_indices`` would take, per
+        GPU and in RAM, projected by llama.cpp itself (``llama-fit-params``).
+
+        Mirrors ``_build_launch`` (same options, starting context, visible
+        devices and split) so the projection matches the real launch. Adds
+        what the tool does not see: a speculative draft and a vision
+        projector loaded at start. Returns ``None`` when the tool or the
+        weights are missing; callers then use the formula estimate.
+        """
+        from ocabra.core import llama_fit
+
+        try:
+            model_file = self._resolve_model_file(model_id, extra_config)
+        except Exception:  # noqa: BLE001 - no weights, no projection
+            return None
+        options = self._build_options(extra_config)
+        section = extra_config.get("llama_cpp") if isinstance(extra_config, dict) else None
+        launch = (
+            self._to_int_or_none(section.get("launch_ctx_size"))
+            if isinstance(section, dict)
+            else None
+        )
+        if launch and options.get("ctx_size") and launch < int(options["ctx_size"]):
+            options["ctx_size"] = launch
+        visible = _compose_visible_devices(
+            list(gpu_indices), options.get("disabled_gpus"), self._gpu_manager
+        )
+        if len(visible) > 1 and options.get("split_mode") == "none":
+            options["split_mode"] = "layer"
+        if (
+            options.get("tensor_split") is None
+            and options.get("split_strategy") == "evenly"
+            and len(visible) > 1
+        ):
+            options["tensor_split"] = await self._compute_evenly_tensor_split(visible)
+        if not visible:
+            options["gpu_layers"] = 0
+        try:
+            server_bin = self._get_binary_path(options.get("runtime"))
+        except Exception:  # noqa: BLE001
+            return None
+        projection = await llama_fit.project(
+            server_bin,
+            str(model_file),
+            visible,
+            llama_fit.args_from_options(str(model_file), options),
+        )
+        if projection is None:
+            return None
+
+        breakdown = {g: dict(parts) for g, parts in projection.gpus.items()}
+        main = visible[0] if visible else None
+        extras: dict[str, int] = {}
+        speculative = options.get("speculative")
+        if isinstance(speculative, dict) and speculative.get("spec_type") and main is not None:
+            slots = int(options.get("parallel_slots") or 1)
+            extras["draft"] = int(vp.mtp_draft_overhead_mb(slots))
+            draft_id = speculative.get("draft_model_id")
+            draft_path = self._resolve_draft_model_path(str(draft_id)) if draft_id else None
+            if draft_path is not None and not speculative.get("draft_cpu_moe"):
+                try:
+                    extras["draft"] += int(Path(draft_path).stat().st_size / 1048576)  # noqa: ASYNC240 — stat, microsegundos
+                except OSError:
+                    pass
+        if str(options.get("vision_mode")) == "enabled" and main is not None:
+            mmproj_id = options.get("mmproj_model_id")
+            try:
+                mmproj = self._resolve_mmproj_path(str(mmproj_id)) if mmproj_id else None
+                if mmproj is not None:
+                    extras["vision"] = (
+                        int(Path(mmproj).stat().st_size / 1048576 * 1.1) + 256  # noqa: ASYNC240
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+        if main is not None and extras:
+            breakdown.setdefault(main, {}).update(extras)
+        return {
+            "source": "llama_fit",
+            "vram_by_gpu": {g: sum(p.values()) for g, p in breakdown.items()},
+            "vram_breakdown_by_gpu": breakdown,
+            "estimated_vram_mb": sum(sum(p.values()) for p in breakdown.values()),
+            "host_mb": projection.host_mb,
+            "host_breakdown": dict(projection.host),
+            "context_tokens": int(options.get("ctx_size") or 0),
+            "gpu_indices": list(visible),
+        }
+
     async def _build_launch(
         self,
         model_id: str,

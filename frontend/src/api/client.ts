@@ -2897,6 +2897,7 @@ export const api = {
               model_key: registerConfig.modelKey,
               default_backend: registerConfig.defaultBackend,
               backends: registerConfig.backends,
+              placement: registerConfig.placement,
             }
           : null,
       }).then(toDownloadJob),

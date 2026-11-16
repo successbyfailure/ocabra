@@ -6,7 +6,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
@@ -478,6 +478,7 @@ class DownloadManager:
             profile_registry = getattr(self._app.state, "profile_registry", None)
             if profile_registry is not None:
                 await profile_registry.on_model_added(model_id)
+                await self._auto_setup(model_id, register_config, profile_registry)
                 # Extra deployments of the same file (e.g. the Ollama copy of a
                 # pull served by llama.cpp, or upstream llama.cpp next to the fork).
                 from ocabra.core import model_deployments as md
@@ -509,6 +510,44 @@ class DownloadManager:
                 model_ref=job.model_ref,
                 exc_info=True,
             )
+
+    async def _auto_setup(self, model_id: str, register_config: dict, registry: Any) -> None:
+        """Presets for the devices chosen at download (``register_config.placement``:
+        ``{"gpus": [...], "cpu": bool}``), planned from llama.cpp's projection.
+
+        Best effort: without a placement, for non-llama.cpp models or on any
+        failure the model keeps the default ``normal`` preset.
+        """
+        placement = _rc_get(register_config, "placement")
+        if not isinstance(placement, dict):
+            return
+        try:
+            from ocabra.core.auto_setup import apply_setup, plan_setup
+
+            mm = self._app.state.model_manager
+            state = await mm.get_state(model_id)
+            if state is None or not is_llama_cpp_family(state.backend_type):
+                return
+            backend = await self._app.state.worker_pool.get_backend(state.backend_type)
+            if not callable(getattr(backend, "project_memory", None)):
+                return
+            plan = await plan_setup(
+                mm,
+                backend,
+                state,
+                gpus=[int(g) for g in placement.get("gpus") or []],
+                allow_cpu=bool(placement.get("cpu")),
+            )
+            profiles = await registry.list_by_model(model_id)
+            default = next((p for p in profiles if getattr(p, "is_default", False)), None)
+            if default is not None and plan.rungs:
+                await apply_setup(registry, default, plan)
+            if plan.warnings:
+                logger.warning(
+                    "download_auto_setup_warnings", model_id=model_id, warnings=plan.warnings
+                )
+        except Exception:  # noqa: BLE001 — the model is registered and usable anyway
+            logger.warning("download_auto_setup_failed", model_id=model_id, exc_info=True)
 
     async def _resolve_job_backend(self, job: DownloadJob) -> str:
         """Backend a finished download is registered under.

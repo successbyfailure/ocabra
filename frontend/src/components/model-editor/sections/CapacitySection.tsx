@@ -16,6 +16,7 @@ import { SchemaFields } from "../SchemaField"
 import { PolicyPanel } from "./presets/PresetParts"
 import { BaseLlamaWorkbench, PresetWorkbench } from "./capacity/adapters"
 import { MemoryBars } from "./capacity/Workbench"
+import { AUTO_SETUP_BACKENDS, AutoSetupCard } from "./capacity/AutoSetup"
 import { api } from "@/api/client"
 import { toast } from "sonner"
 import type { SectionProps } from "./types"
@@ -134,6 +135,19 @@ export function CapacitySection(props: SectionProps & { ladder: { rungs: LadderR
     <div className="space-y-4" data-testid="capacity-section">
       <Hint>{FAMILY_TEXT[family]}</Hint>
       <RungSelector {...props} family={family} selected={selected} onSelect={select} canPreset={canPreset && !readOnly} hasPresets={hasPresets} />
+      {AUTO_SETUP_BACKENDS.includes(backend) && schema.isLlm && !readOnly && editor.model && (
+        <AutoSetupCard
+          modelId={editor.model.model_id}
+          gpus={gpus}
+          readOnly={readOnly}
+          onApplied={async () => {
+            await ladder.reload()
+            await editor.refreshLive()
+            // Vuelve al peldaño por defecto (el anterior puede ya no existir).
+            select("")
+          }}
+        />
+      )}
 
       {selected === "base" ? (
         <BaseCanvas

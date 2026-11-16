@@ -5,11 +5,13 @@ import { ChevronDown, ChevronRight, Search, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { HFModelCard } from "@/components/explore/HFModelCard"
+import { DevicePlacementPicker, assessPlacement } from "@/components/explore/DevicePlacementPicker"
 import { OllamaModelCard } from "@/components/explore/OllamaModelCard"
 import { SearchFilters } from "@/components/explore/SearchFilters"
 import { BackendIcons, backendLabel, compatibleToItems } from "@/components/models/BackendIcons"
 import { getProbeOverrideHint, getProbeStatusLabel } from "@/lib/vllmProbe"
 import { useDownloadStore } from "@/stores/downloadStore"
+import { useGpuStore } from "@/stores/gpuStore"
 import type {
   BackendType,
   CompatibleBackend,
@@ -221,6 +223,11 @@ export function Explore() {
   const [variantLoading, setVariantLoading] = useState(false)
   const [targetDir, setTargetDir] = useState("/models")
   const [loadPolicy, setLoadPolicy] = useState<LoadPolicy>("on_demand")
+  // Devices for a llama.cpp deployment (null = every GPU). The server plans
+  // the presets from llama.cpp's projection once the file is downloaded.
+  const gpus = useGpuStore((state) => state.gpus)
+  const [placeGpus, setPlaceGpus] = useState<number[] | null>(null)
+  const [placeCpu, setPlaceCpu] = useState(false)
   const [modelKey, setModelKey] = useState("")
   const [deployBackends, setDeployBackends] = useState<BackendType[]>([])
   const [defaultBackend, setDefaultBackend] = useState<BackendType | "">("")
@@ -251,6 +258,22 @@ export function Explore() {
   }, [installTarget, selectedOllamaVariant, selectedFileVariant])
   const currentIsGguf = installTarget?.source === "ollama" || isGgufVariant(selectedFileVariant)
   const variantBackend = selectedFileVariant?.backendType ?? null
+  const placementBackend =
+    defaultBackend || variantBackend || (installTarget?.source === "ollama" ? "llamacpp_mks" : "")
+  const placementApplies =
+    (placementBackend === "llamacpp_mks" || placementBackend === "llama_cpp") && gpus.length > 0
+  const selectedPlaceGpus = placeGpus ?? gpus.map((g) => g.index)
+  const placementAssessment = assessPlacement(
+    selectedOllamaVariant?.sizeGb ?? selectedFileVariant?.sizeGb ?? null,
+    gpus,
+    selectedPlaceGpus,
+    placeCpu,
+  )
+
+  useEffect(() => {
+    setPlaceGpus(null)
+    setPlaceCpu(false)
+  }, [installTarget])
 
   // Re-propose name and deployments whenever the file to download changes.
   useEffect(() => {
@@ -522,6 +545,7 @@ export function Explore() {
             ...(chosenBackend ? { backendType: chosenBackend } : {}),
           }),
       ...deploymentConfig,
+      ...(placementApplies ? { placement: { gpus: selectedPlaceGpus, cpu: placeCpu } } : {}),
     }
     try {
       const job = await api.downloads.enqueue(
@@ -987,6 +1011,18 @@ export function Explore() {
                     </label>
                   )
                 })()}
+              {placementApplies && (
+                <DevicePlacementPicker
+                  gpus={gpus}
+                  selected={selectedPlaceGpus}
+                  cpu={placeCpu}
+                  onChange={({ selected, cpu }) => {
+                    setPlaceGpus(selected)
+                    setPlaceCpu(cpu)
+                  }}
+                  assessment={placementAssessment}
+                />
+              )}
               <label className="block text-sm text-muted-foreground">
                 load_policy
                 <select
@@ -1008,7 +1044,11 @@ export function Explore() {
               <button
                 type="button"
                 onClick={() => void install()}
-                disabled={selectedHFVariant?.installable === false || !canInstallBitnet}
+                disabled={
+                  selectedHFVariant?.installable === false ||
+                  !canInstallBitnet ||
+                  (placementApplies && !placementAssessment.canInstall)
+                }
                 className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground"
               >
                 Iniciar descarga

@@ -6,6 +6,7 @@ import { cn } from "@/lib/cn"
 import type { GPUState } from "@/types"
 import { fmtMb } from "../../PreviewPanel"
 import type { MemoryShare } from "./Workbench"
+import { gpuOccupancy } from "./occupancy"
 import { Hint, Segmented } from "../../ui"
 
 /** Dónde corre un peldaño: qué GPUs puede usar, cuál prueba primero, si se
@@ -123,8 +124,7 @@ export function DevicePlacement({
           const color = gpuColor(g.index)
           const on = value.marked.includes(g.index)
           const isStar = value.star === g.index
-          const own = liveVramByGpu[String(g.index)] ?? 0
-          const others = Math.max(0, g.usedVramMb - own)
+          const occ = gpuOccupancy(g, liveVramByGpu[String(g.index)] ?? 0)
           return (
             <div
               key={g.index}
@@ -159,7 +159,9 @@ export function DevicePlacement({
                 )}
               </div>
               <p className="mt-1 text-[10.5px] text-muted-foreground">
-                {fmtMb(g.totalVramMb)} · otros {fmtMb(others)}
+                {fmtMb(g.totalVramMb)}
+                {occ.others > 0 ? ` · otros modelos ${fmtMb(occ.others)}` : ""}
+                {occ.system > 0 ? ` · sistema ${fmtMb(occ.system)}` : ""}
                 {mine.get(g.index) ? ` · este ${fmtMb(mine.get(g.index))}` : ""}
               </p>
             </div>

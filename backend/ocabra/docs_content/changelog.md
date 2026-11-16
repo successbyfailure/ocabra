@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.94.0 — 2026-11-16
+
+### Correcciones
+
+- **Los modelos llama.cpp ya no se rechazan por una estimación de memoria
+  inflada.** oCabra calculaba la memoria con fórmulas propias y constantes
+  calibradas a mano. Con parte del modelo en RAM se pasaba en GPU y se quedaba
+  corto en RAM: `gemma4:26b` con sus expertos en CPU se estimaba en 4.371 MB de
+  GPU y ocupa 3.752, así que en una tarjeta de 6 GB se negaba a cargar por
+  22 MB. Ahora, si el nodo tiene la herramienta de llama.cpp instalada, la
+  estimación es la de llama.cpp (la misma cuenta que hace al arrancar).
+
+### Novedades
+
+- **Peldaños automáticos según los dispositivos.** Al descargar un modelo
+  llama.cpp se elige dónde correrá (qué GPU y si puede usar la CPU), y tras la
+  descarga oCabra crea los peldaños con la proyección de memoria de llama.cpp:
+  uno en la GPU grande con todo el contexto que cabe, otro en varias GPU con
+  más contexto, o con los expertos MoE justos en RAM cuando no cabe en GPU.
+  También se puede recalcular desde el editor del modelo.
+
+---
+
 ## 0.93.0 — 2026-11-16
 
 ### Novedades
