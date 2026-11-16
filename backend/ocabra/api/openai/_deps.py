@@ -184,6 +184,43 @@ async def _wait_for_unloading_transition(
     )
 
 
+async def _wait_for_eviction_claim(
+    model_manager: ModelManager,
+    model_id: str,
+    state: ModelState,
+) -> ModelState:
+    """Wait while an eviction has claimed the model (still LOADED, about to go).
+
+    Without this a request admitted between "the drain saw it idle" and the
+    unload went to a worker killed a second later (502 mid-stream). Afterwards
+    the model is UNLOADING or UNLOADED, which the normal path handles: wait,
+    then load it again.
+    """
+    check = getattr(model_manager, "is_eviction_claimed", None)
+
+    def claimed() -> bool:
+        # ``is True``: a mocked manager answers with a truthy mock.
+        return callable(check) and check(model_id) is True
+
+    if not claimed():
+        return state
+    deadline = asyncio.get_running_loop().time() + _ensure_load_timeout_s()
+    while asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.1)
+        if not claimed():
+            break
+    if claimed():
+        raise _openai_error(
+            f"Model '{model_id}' is being unloaded; retry shortly.",
+            "server_error",
+            code="model_transition_timeout",
+            status_code=503,
+            headers={"Retry-After": "2"},
+        )
+    current = await model_manager.get_state(model_id)
+    return current if current is not None else state
+
+
 def get_model_manager(request: Request) -> ModelManager:
     return request.app.state.model_manager
 
@@ -1267,6 +1304,7 @@ async def _do_ensure_loaded(
             status_code=404,
         )
 
+    state = await _wait_for_eviction_claim(model_manager, model_id, state)
     state = await _wait_for_unloading_transition(model_manager, model_id, state)
 
     async def _touch(resolved_id: str, request_at: datetime) -> None:
@@ -1431,6 +1469,7 @@ async def ensure_loaded(
             status_code=404,
         )
 
+    state = await _wait_for_eviction_claim(model_manager, resolved_model_id, state)
     state = await _wait_for_unloading_transition(
         model_manager,
         resolved_model_id,

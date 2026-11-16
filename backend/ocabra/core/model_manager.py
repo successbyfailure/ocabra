@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import math
 import os
 import time
@@ -390,6 +391,11 @@ class ModelManager:
         # In-flight request tracking
         self._in_flight: dict[str, int] = {}
         self._in_flight_lock = Lock()
+        # Models an eviction has claimed (see ``claim_for_eviction``): taken
+        # under ``_in_flight_lock`` only when nothing is in flight, so requests
+        # admitted afterwards wait for the unload instead of reaching a worker
+        # that is about to be killed.
+        self._eviction_claims: set[str] = set()
         self._active_requests: dict[str, ActiveRequest] = {}  # request_id -> ActiveRequest
         # model_id -> blocking service_id, for requests parked in
         # _wait_for_service_gpu_and_retry_load (see _deps.py). Surfaced via
@@ -1000,6 +1006,31 @@ class ModelManager:
         with self._in_flight_lock:
             return self._in_flight.get(model_id, 0) > 0
 
+    def claim_for_eviction(self, model_id: str) -> bool:
+        """Claim an idle model for eviction, atomically with admission.
+
+        Between "the drain saw it idle" and ``unload()`` marking it UNLOADING
+        there are awaits (a shrink attempt, a VRAM snapshot): a request
+        admitted in that window used to go to the worker and die with it a
+        second later — 502 "incomplete chunked read" on nemotron and gemma4,
+        2026-11-16. Fails (``False``) if a request is in flight; once claimed,
+        ``ensure_loaded`` makes new requests wait as it does for UNLOADING.
+        Always pair with :meth:`release_eviction_claim`.
+        """
+        with self._in_flight_lock:
+            if self._in_flight.get(model_id, 0) > 0:
+                return False
+            self._eviction_claims.add(model_id)
+            return True
+
+    def release_eviction_claim(self, model_id: str) -> None:
+        with self._in_flight_lock:
+            self._eviction_claims.discard(model_id)
+
+    def is_eviction_claimed(self, model_id: str) -> bool:
+        with self._in_flight_lock:
+            return model_id in self._eviction_claims
+
     def any_busy_worker_except(
         self,
         target_id: str,
@@ -1282,20 +1313,26 @@ class ModelManager:
             state = self._states.get(model_id)
             if not state:
                 continue
-            shrunk = await self._try_shrink_for_space(model_id, gpu_index, needed_mb - freed)
-            if shrunk:
-                freed += shrunk
+            # Idle when listed, but a request may have arrived since.
+            if not self.claim_for_eviction(model_id):
                 continue
-            vram_per_gpu = state.vram_used_mb // max(1, len(state.current_gpu or [1]))
-            logger.info(
-                "vram_eviction",
-                model_id=model_id,
-                gpu_index=gpu_index,
-                vram_mb=vram_per_gpu,
-                reason="vram_pressure",
-            )
-            await self.unload(model_id, reason="vram_pressure")
-            freed += vram_per_gpu
+            try:
+                shrunk = await self._try_shrink_for_space(model_id, gpu_index, needed_mb - freed)
+                if shrunk:
+                    freed += shrunk
+                    continue
+                vram_per_gpu = state.vram_used_mb // max(1, len(state.current_gpu or [1]))
+                logger.info(
+                    "vram_eviction",
+                    model_id=model_id,
+                    gpu_index=gpu_index,
+                    vram_mb=vram_per_gpu,
+                    reason="vram_pressure",
+                )
+                await self.unload(model_id, reason="vram_pressure")
+                freed += vram_per_gpu
+            finally:
+                self.release_eviction_claim(model_id)
         return freed
 
     async def _evict_last_resort_for_space(
@@ -1368,28 +1405,46 @@ class ModelManager:
             state = self._states.get(candidate_id)
             if not state:
                 continue
-            shrunk = await self._try_shrink_for_space(candidate_id, gpu_index, needed_mb - freed)
-            if shrunk:
-                freed += shrunk
+            if not self.claim_for_eviction(candidate_id):
+                logger.info(
+                    "vram_eviction_last_resort_raced",
+                    requested_model_id=requesting_model_id,
+                    evicting_model_id=candidate_id,
+                    gpu_index=gpu_index,
+                )
                 continue
-            vram_per_gpu = state.vram_used_mb // max(1, len(state.current_gpu or [1]))
-            logger.info(
-                "vram_eviction_last_resort",
-                model_id=candidate_id,
-                gpu_index=gpu_index,
-                vram_mb=vram_per_gpu,
-                reason="vram_pressure",
-            )
-            snapshot = await self._get_vram_free_snapshot([gpu_index])
-            baseline_free_mb = snapshot[0] if snapshot is not None else None
-            await self.unload(candidate_id, reason="vram_pressure")
-            await self._wait_for_vram_released(
-                vram_per_gpu,
-                baseline_free_mb=baseline_free_mb,
-                gpu_indices=[gpu_index],
-            )
-            freed += vram_per_gpu
+            try:
+                freed += await self._last_resort_evict_claimed(
+                    candidate_id, state, gpu_index, needed_mb - freed
+                )
+            finally:
+                self.release_eviction_claim(candidate_id)
         return freed
+
+    async def _last_resort_evict_claimed(
+        self, candidate_id: str, state: ModelState, gpu_index: int, needed_mb: int
+    ) -> int:
+        """Shrink or unload a claimed candidate; returns MB freed on *gpu_index*."""
+        shrunk = await self._try_shrink_for_space(candidate_id, gpu_index, needed_mb)
+        if shrunk:
+            return shrunk
+        vram_per_gpu = state.vram_used_mb // max(1, len(state.current_gpu or [1]))
+        logger.info(
+            "vram_eviction_last_resort",
+            model_id=candidate_id,
+            gpu_index=gpu_index,
+            vram_mb=vram_per_gpu,
+            reason="vram_pressure",
+        )
+        snapshot = await self._get_vram_free_snapshot([gpu_index])
+        baseline_free_mb = snapshot[0] if snapshot is not None else None
+        await self.unload(candidate_id, reason="vram_pressure")
+        await self._wait_for_vram_released(
+            vram_per_gpu,
+            baseline_free_mb=baseline_free_mb,
+            gpu_indices=[gpu_index],
+        )
+        return vram_per_gpu
 
     async def _vram_watchdog(self) -> None:
         """Background loop: proactively evict when VRAM exceeds threshold.
@@ -2963,7 +3018,25 @@ class ModelManager:
                 # edge configuration by a few MiB. Unvalidated loads retain
                 # the normal safety reserve.
                 gpu_state = await self._gpu_manager.get_state(gpu_index)
-                return int(gpu_state.free_vram_mb)
+                free = int(gpu_state.free_vram_mb)
+                # The poll can trail a load that just finished (we hold the
+                # load gate, so nothing is allocating now): trust the lower of
+                # the polled and the live reading.
+                live_reader = getattr(self._gpu_manager, "live_free_vram_mb", None)
+                live = live_reader(gpu_index) if callable(live_reader) else None
+                if inspect.iscoroutine(live):  # an async double: no live reading
+                    live.close()
+                    live = None
+                if isinstance(live, int) and live < free:
+                    logger.info(
+                        "admission_stale_vram_reading",
+                        model_id=model_id,
+                        gpu_index=gpu_index,
+                        polled_free_mb=free,
+                        live_free_mb=live,
+                    )
+                    free = live
+                return free
 
             async def admission_free_vram_after_eviction(gpu_index: int, required_mb: int) -> int:
                 """Wait out partial hw-monitor samples while a process exits."""
@@ -3536,6 +3609,15 @@ class ModelManager:
                                 )
                                 continue  # skip — still busy, try next candidate
 
+                    # The drain saw it idle; claim it so a request arriving
+                    # now waits for the unload instead of dying with it.
+                    if not self.claim_for_eviction(candidate_id):
+                        logger.info(
+                            "pressure_eviction_raced",
+                            requested_model_id=model_id,
+                            evicting_model_id=candidate_id,
+                        )
+                        continue
                     logger.info(
                         "pressure_eviction_attempt",
                         requested_model_id=model_id,
@@ -3552,7 +3634,10 @@ class ModelManager:
                             if suppress_reload_seconds > 0
                             else None
                         )
-                    await self.unload(candidate_id, reason="pressure")
+                    try:
+                        await self.unload(candidate_id, reason="pressure")
+                    finally:
+                        self.release_eviction_claim(candidate_id)
                     await self._wait_for_vram_released(evicted_vram_mb)
                     if gpu_pool is not None:
                         await self._wait_for_free_vram(gpu_pool, vram_needed)
@@ -4137,9 +4222,14 @@ class ModelManager:
                 shrink_capacity_mb=capacity,
             )
             for c in chosen:
-                released = self._physical_mb_on_gpu(c, gpu_index)
-                snapshot = await self._get_vram_free_snapshot([gpu_index])
-                await self.unload(c, reason="vram_pressure")
+                if not self.claim_for_eviction(c):
+                    continue  # got a request meanwhile: not cheap any more
+                try:
+                    released = self._physical_mb_on_gpu(c, gpu_index)
+                    snapshot = await self._get_vram_free_snapshot([gpu_index])
+                    await self.unload(c, reason="vram_pressure")
+                finally:
+                    self.release_eviction_claim(c)
                 await self._wait_for_vram_released(
                     released,
                     baseline_free_mb=snapshot[0] if snapshot is not None else None,
@@ -4324,16 +4414,22 @@ class ModelManager:
             if self.is_busy(candidate):
                 logger.info("whisper_eviction_skip_busy", whisper=model_id, candidate=candidate)
                 continue
-            released = self._physical_mb_on_gpu(candidate, gpu)
-            snapshot = await self._get_vram_free_snapshot([gpu])
-            logger.info(
-                "whisper_eviction",
-                whisper=model_id,
-                evicting=candidate,
-                gpu_index=gpu,
-                needed_mb=needed,
-            )
-            await self.unload(candidate, reason="pressure")
+            if not self.claim_for_eviction(candidate):
+                logger.info("whisper_eviction_skip_busy", whisper=model_id, candidate=candidate)
+                continue
+            try:
+                released = self._physical_mb_on_gpu(candidate, gpu)
+                snapshot = await self._get_vram_free_snapshot([gpu])
+                logger.info(
+                    "whisper_eviction",
+                    whisper=model_id,
+                    evicting=candidate,
+                    gpu_index=gpu,
+                    needed_mb=needed,
+                )
+                await self.unload(candidate, reason="pressure")
+            finally:
+                self.release_eviction_claim(candidate)
             await self._wait_for_vram_released(
                 released,
                 baseline_free_mb=snapshot[0] if snapshot is not None else None,

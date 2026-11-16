@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.90.1 — 2026-11-16
+
+### Correcciones
+
+- **Peticiones cortadas a mitad (502 "incomplete chunked read") cuando el
+  servidor expulsaba un modelo para cargar otro.** Una petición que llegaba
+  justo cuando el modelo se iba a descargar se mandaba al proceso que se
+  estaba cerrando y moría a los ~1 s. Ahora espera a que termine la descarga
+  y el modelo se vuelve a cargar para ella (tarda lo que tarde la carga, pero
+  no falla).
+- **503 "Failed to load model" por memoria de GPU agotada al recargar un
+  modelo justo después de cargar otro.** La admisión de algunos modelos de
+  varias GPUs leía una cifra de VRAM libre ligeramente atrasada y daba por
+  libre memoria que otro modelo acababa de ocupar; ahora la lee en el momento.
+
+---
+
 ## 0.90.0 — 2026-11-16
 
 Versión de seguridad. Cierra accesos que no respetaban los grupos ni los roles.

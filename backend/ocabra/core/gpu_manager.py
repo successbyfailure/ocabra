@@ -214,6 +214,22 @@ class GPUManager:
         except pynvml.NVMLError:
             return None
 
+    def live_free_vram_mb(self, gpu_index: int) -> int | None:
+        """Free VRAM read from NVML right now, not from the last poll.
+
+        The polled figure (hw-monitor) can trail a model that finished
+        allocating a moment ago; an admission trusting it gave that memory
+        away twice — nemotron got 6 GB on a card the embedding model had just
+        filled, and died with CUDA OOM (2026-11-16). ``None`` without NVML.
+        """
+        if not self._nvml_available:
+            return None
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+            return int(pynvml.nvmlDeviceGetMemoryInfo(handle).free) // (1024 * 1024)
+        except pynvml.NVMLError:
+            return None
+
     def get_process_vram_mb(self, gpu_index: int) -> dict[int, int]:
         """VRAM per PID on one GPU, read now rather than from the last poll.
 
