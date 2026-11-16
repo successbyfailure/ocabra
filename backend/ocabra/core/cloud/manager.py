@@ -446,6 +446,7 @@ class CloudNodeManager:
         models: list[str] | None = None,
         provider: str = "runpod",
         volume_id: str | None = None,
+        privacy_mode: str = "optimal",
     ) -> dict[str, Any]:
         """Create a pod that joins us as a swarm peer. Returns the node.
 
@@ -495,7 +496,14 @@ class CloudNodeManager:
             # The pod kills itself if it can't keep its tunnel (see node watchdog).
             "OCABRA_CLOUD_SELF_DESTRUCT_MINUTES": "20",
         }
-        if cfg.get("pass_hf_token"):
+        zero_data = privacy_mode == "zero_data"
+        if zero_data:
+            # Nothing about requests is kept on the pod; Secure Cloud (vetted
+            # data centers, not someone's spare machine) and no secrets it
+            # doesn't strictly need.
+            env["PRIVACY_MODE"] = "zero_data"
+            cloud_type = "SECURE"
+        elif cfg.get("pass_hf_token"):
             hf = getattr(self.fm.settings, "hf_token", "") or ""
             if hf:
                 env["HF_TOKEN"] = hf

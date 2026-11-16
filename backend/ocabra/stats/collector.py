@@ -21,6 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from ocabra.config import settings
+from ocabra.core import privacy
 from ocabra.core.background_tasks import spawn
 from ocabra.core.model_manager_helpers import compute_worker_key
 from ocabra.core.request_telemetry import RequestRuntimeTelemetry, current_inflight_request_id
@@ -1683,9 +1684,15 @@ async def _record_stat(
                     "gpuIndex": gpu_index,
                     "requestKind": request_kind,
                     "statusCode": status_code,
-                    "error": (error_message or None) and str(error_message)[:300],
-                    "username": getattr(auth_user, "username", None) if auth_user else None,
-                    "apiKeyName": api_key_name,
+                    # Zero data: who asked and what went wrong (error text can
+                    # quote the input) stay out of the feed too.
+                    "error": None
+                    if privacy.zero_data()
+                    else (error_message or None) and str(error_message)[:300],
+                    "username": None
+                    if privacy.zero_data()
+                    else (getattr(auth_user, "username", None) if auth_user else None),
+                    "apiKeyName": None if privacy.zero_data() else api_key_name,
                     "durationMs": int(duration_ms),
                     "inputTokens": input_tokens,
                     "cachedTokens": cached_tokens,
@@ -1710,6 +1717,10 @@ async def _record_stat(
             )
         except Exception:  # noqa: BLE001 — el feed nunca rompe el registro
             pass
+
+        if privacy.zero_data():
+            # Nothing about this request is stored (core/privacy.py).
+            return
 
         async with AsyncSessionLocal() as session:
             stat = RequestStat(
@@ -1806,10 +1817,10 @@ async def record_realtime_request(
         request_kind=request_kind,
         status_code=status_code,
         duration_ms=int(duration_ms),
-        username=getattr(auth_user, "username", None),
-        api_key_name=getattr(auth_user, "api_key_name", None),
-        client_addr=_client_addr(websocket),  # type: ignore[arg-type]
-        error=error_message,
+        username=None if privacy.zero_data() else getattr(auth_user, "username", None),
+        api_key_name=None if privacy.zero_data() else getattr(auth_user, "api_key_name", None),
+        client_addr=None if privacy.zero_data() else _client_addr(websocket),  # type: ignore[arg-type]
+        error=None if privacy.zero_data() else error_message,
     )
 
 

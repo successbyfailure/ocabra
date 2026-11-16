@@ -1,4 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from ocabra.core.privacy import require_storage_allowed
 
 from .audio import router as audio_router
 from .batches import router as batches_router
@@ -20,5 +22,6 @@ router.include_router(pooling_router)
 router.include_router(images_router)
 router.include_router(audio_router)
 router.include_router(realtime_router)
-router.include_router(files_router)
-router.include_router(batches_router)
+# Zero-data nodes store nothing about requests: no files, no batches.
+router.include_router(files_router, dependencies=[Depends(require_storage_allowed)])
+router.include_router(batches_router, dependencies=[Depends(require_storage_allowed)])

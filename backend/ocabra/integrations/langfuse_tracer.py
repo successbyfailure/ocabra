@@ -25,6 +25,10 @@ _client = None  # Langfuse singleton
 
 def _get_client():  # noqa: ANN202
     global _client  # noqa: PLW0603
+    from ocabra.core import privacy
+
+    if privacy.zero_data():
+        return None  # no traces leave a zero-data node, whatever the config says
     if _client is not None:
         return _client
     if not settings.langfuse_enabled:

@@ -96,11 +96,18 @@ def _default_response_format(requested_model: str, explicit: Any) -> str:
     omitted, which means dall-e-2); gpt-image-* only ever returns
     ``b64_json``. oCabra's own names keep ``b64_json``.
     """
+    from ocabra.core import privacy
+
     if explicit:
-        return str(explicit)
-    if not requested_model or requested_model.startswith("dall-e"):
-        return "url"
-    return "b64_json"
+        fmt = str(explicit)
+    elif not requested_model or requested_model.startswith("dall-e"):
+        fmt = "url"
+    else:
+        fmt = "b64_json"
+    # A URL means writing the image to disk; zero-data nodes answer inline.
+    if fmt == "url" and privacy.zero_data():
+        return "b64_json"
+    return fmt
 
 
 def _apply_quality(merged_body: dict[str, Any], client_body: dict[str, Any]) -> None:

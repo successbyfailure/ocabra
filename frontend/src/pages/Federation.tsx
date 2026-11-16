@@ -629,6 +629,14 @@ function PeerCard({ peer, onChanged }: { peer: FederationPeer; onChanged: () => 
         <Network size={16} className="text-muted-foreground" />
         <span className="font-semibold">{peer.name}</span>
         <StatusPill peer={peer} />
+        {peer.privacy_mode === "zero_data" && (
+          <span
+            className="rounded-full border border-emerald-500/40 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300"
+            title="Este nodo no guarda nada de las peticiones que sirve ni de quién las hace"
+          >
+            0 data
+          </span>
+        )}
         <Pill tone="muted">
           {conn.icon} {conn.text}
         </Pill>

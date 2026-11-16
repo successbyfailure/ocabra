@@ -700,3 +700,14 @@ def test_volume_cost_counts_towards_the_month():
     assert mgr.volumes_month_cost(datetime(2026, 11, 16, 0, 0, tzinfo=UTC)) == pytest.approx(
         5.0, rel=0.01
     )
+
+
+@requires_db
+async def test_zero_data_pod_is_secure_and_gets_no_hf_token(hub):  # noqa: F811
+    fm, fake = hub
+    await fm.cloud.update_provider("runpod", settings={"pass_hf_token": True})
+    await fm.cloud.launch(gpu_type_id="3090", cloud_type="COMMUNITY", privacy_mode="zero_data")
+    spec = fake.created[-1]
+    assert spec.env["PRIVACY_MODE"] == "zero_data"
+    assert spec.cloud_type == "SECURE"
+    assert "HF_TOKEN" not in spec.env

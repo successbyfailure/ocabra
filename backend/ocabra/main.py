@@ -635,6 +635,15 @@ async def lifespan(app: FastAPI):
         _image_outputs_cleanup_loop(image_outputs_cleanup_stop),
         name="image-outputs-cleanup-loop",
     )
+    # Batch/upload files: deleted once their retention passes (core/files_retention.py).
+    from ocabra.core.files_retention import retention_loop as _files_retention_loop
+    from ocabra.database import AsyncSessionLocal as _files_session_factory
+
+    files_retention_stop = asyncio.Event()
+    files_retention_task = asyncio.create_task(
+        _files_retention_loop(files_retention_stop, _files_session_factory),
+        name="files-retention-loop",
+    )
 
     # Profile Registry
     from ocabra.core.profile_registry import ProfileRegistry
@@ -864,6 +873,11 @@ async def lifespan(app: FastAPI):
     image_outputs_cleanup_task.cancel()
     with suppress(asyncio.CancelledError):
         await image_outputs_cleanup_task
+
+    files_retention_stop.set()
+    files_retention_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await files_retention_task
 
     if not gpu_power_reapply_task.done():
         gpu_power_reapply_task.cancel()
@@ -1406,6 +1420,11 @@ app.add_middleware(StatsMiddleware)
 from ocabra.core.federation import FederationHopMiddleware  # noqa: E402
 
 app.add_middleware(FederationHopMiddleware)
+
+from ocabra.core.privacy import PrivacyHeaderMiddleware  # noqa: E402
+
+# X-Ocabra-Privacy on every response: which privacy mode served it.
+app.add_middleware(PrivacyHeaderMiddleware)
 
 # ── ROUTERS ──────────────────────────────────────────────────
 # Each stream adds its router here. Do not remove this comment.

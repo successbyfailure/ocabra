@@ -146,6 +146,7 @@ class PeerState:
     # nodes down and shown in the UI.
     # What the peer reports about its own CUDA (see core/cuda_probe.py).
     cuda: dict[str, Any] | None = None
+    privacy_mode: str | None = None  # from its heartbeat: optimal | zero_data
     requests_proxied: int = 0
     last_proxied_at: float | None = None
 
@@ -698,6 +699,9 @@ class FederationManager:
             peer.models = data.get("models", [])
             peer.load = data.get("load", {})
             peer.cuda = data.get("cuda") if isinstance(data.get("cuda"), dict) else None
+            peer.privacy_mode = (
+                str(data["privacy_mode"]) if isinstance(data.get("privacy_mode"), str) else None
+            )
             logger.info(
                 "federation_peer_heartbeat_ok",
                 peer=peer.name,

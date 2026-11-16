@@ -706,14 +706,17 @@ class ModelManager:
             except RuntimeError:
                 owning_task = None
             now = time.time()
+            from ocabra.core import privacy
+
+            zero = privacy.zero_data()  # who asked is not kept (user_id stays for fairness)
             self._active_requests[request_id] = ActiveRequest(
                 request_id=request_id,
                 model_id=model_id,
                 started_at=now,
                 source=source,
                 user_id=user_id,
-                username=username,
-                api_key_name=api_key_name,
+                username=None if zero else username,
+                api_key_name=None if zero else api_key_name,
                 profile_id=profile_id,
                 task=owning_task,
                 input_tokens_estimate=input_tokens_estimate,

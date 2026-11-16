@@ -674,6 +674,10 @@ export interface ServerConfig {
   federationEnabled: boolean;
   federationNodeName: string;
   federationAcceptJoinRequests: boolean;
+  /** optimal: metadata + temporary files that get cleaned up; zero_data: nothing kept. */
+  privacyMode: "optimal" | "zero_data";
+  /** Batch/upload files are deleted this long after their batch ends (0 = keep). */
+  openaiFilesRetentionHours: number;
   batchPriorityEnabled: boolean;
   batchPreemptMode: "never" | "instant" | "conditional";
   batchPreemptMinElapsedS: number;
@@ -1778,6 +1782,8 @@ export interface FederationPeer {
   local_access_level: "inference" | "full" | null;
   join_state: "pending" | "denied" | "expired" | null;
   join_verification_code: string | null;
+  /** The peer's privacy mode (heartbeat); null from nodes older than 0.92.1. */
+  privacy_mode?: "optimal" | "zero_data" | null;
   dial_state: string | null;
   last_error: string | null;
   tunnel_connected: boolean;
@@ -1931,6 +1937,7 @@ export interface CloudNodeLaunch {
   models?: string[];
   /** Network volume to mount as the node's model/backend cache. */
   volume_id?: string;
+  privacy_mode?: "optimal" | "zero_data";
 }
 
 export interface CloudVolume {

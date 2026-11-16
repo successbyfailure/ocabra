@@ -12,6 +12,7 @@ import {
 import { toast } from "sonner"
 import { SkeletonList } from "@/components/common/Skeleton"
 import { api } from "@/api/client"
+import { PrivacySettings } from "@/components/settings/PrivacySettings"
 import { ApiAccessSettings } from "@/components/settings/ApiAccessSettings"
 import { BackendRuntimeSettings } from "@/components/settings/BackendRuntimeSettings"
 import { OllamaServerSettings } from "@/components/settings/OllamaServerSettings"
@@ -81,6 +82,8 @@ const EMPTY_CONFIG: ServerConfig = {
   federationEnabled: false,
   federationNodeName: "",
   federationAcceptJoinRequests: false,
+  privacyMode: "optimal",
+  openaiFilesRetentionHours: 168,
   batchPriorityEnabled: true,
   batchPreemptMode: "conditional",
   batchPreemptMinElapsedS: 300,
@@ -221,6 +224,7 @@ export function Settings() {
             <div className="grid gap-4">
               <GeneralSettings config={config} onSave={savePatch} />
               <ApiAccessSettings config={config} onSave={savePatch} />
+              <PrivacySettings config={config} onSave={savePatch} />
             </div>
           </Tabs.Content>
 

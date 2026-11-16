@@ -16,6 +16,34 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.93.0 — 2026-11-16
+
+### Novedades
+
+- **Dos modos de privacidad por nodo** (`privacyMode` en
+  `PATCH /ocabra/config`): `optimal` (el de siempre) y `zero_data`. En
+  `zero_data` el nodo no guarda nada de las peticiones ni de quién las hace:
+  sin filas en las estadísticas, sin nombres en el feed en vivo, sin contenido
+  en los logs y sin trazas externas. Pensado para nodos en máquinas ajenas;
+  no protege frente al dueño de la máquina.
+- Cada respuesta lleva `X-Ocabra-Privacy: optimal` o `zero-data`, y el
+  heartbeat de federación publica `privacy_mode` (los peers lo enseñan).
+- `POST /ocabra/cloud/nodes` acepta `privacy_mode: "zero_data"`: el pod va a
+  Secure Cloud y no recibe el token de Hugging Face.
+
+### Cambios
+
+- **En un nodo `zero_data`, `/v1/batches` y `/v1/files` responden 403
+  (`zero_data_mode`)** y las imágenes se devuelven siempre en `b64_json`
+  aunque se pida `url`: las dos cosas exigen guardar datos.
+- **Acción:** los ficheros de batches (entrada, salida y errores) y las
+  subidas a `/v1/files` **se borran** una semana después de terminar su batch
+  (o de subirse, si ningún batch los usa); antes no se borraban nunca.
+  Configurable con `openaiFilesRetentionHours` (`0` = no borrar). Si recoges
+  resultados de batches más tarde de una semana, súbelo o descárgalos antes.
+
+---
+
 ## 0.92.0 — 2026-11-16
 
 ### Novedades

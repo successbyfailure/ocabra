@@ -172,6 +172,22 @@ class ServerConfigPatch(BaseModel):
         alias="federationAcceptJoinRequests",
         description="Accept join requests from unknown nodes (still need manual approval)",
     )
+    privacy_mode: str | None = Field(
+        default=None,
+        alias="privacyMode",
+        pattern=r"^(optimal|zero_data)$",
+        description=(
+            "optimal: per-request metadata and temporary files that get cleaned up; "
+            "zero_data: nothing about requests or who made them is kept (see core/privacy.py)"
+        ),
+    )
+    openai_files_retention_hours: int | None = Field(
+        default=None,
+        alias="openaiFilesRetentionHours",
+        ge=0,
+        le=24 * 365,
+        description="Delete batch/uploaded files this long after their batch ends (0 = keep)",
+    )
 
     # ── Batch-vs-interactive priority (2026-10-30) ──────────────────────
     batch_priority_enabled: bool | None = Field(default=None, alias="batchPriorityEnabled")
@@ -342,6 +358,8 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "federationEnabled": settings.federation_enabled,
         "federationNodeName": settings.federation_node_name,
         "federationAcceptJoinRequests": settings.federation_accept_join_requests,
+        "privacyMode": settings.privacy_mode,
+        "openaiFilesRetentionHours": settings.openai_files_retention_hours,
         "batchPriorityEnabled": settings.batch_priority_enabled,
         "batchPreemptMode": settings.batch_preempt_mode,
         "batchPreemptMinElapsedS": settings.batch_preempt_min_elapsed_s,
@@ -665,6 +683,14 @@ async def patch_config(
     if "federation_accept_join_requests" in payload:
         settings.federation_accept_join_requests = bool(payload["federation_accept_join_requests"])
         await _persist("federation_accept_join_requests", settings.federation_accept_join_requests)
+
+    if payload.get("privacy_mode"):
+        settings.privacy_mode = str(payload["privacy_mode"])
+        await _persist("privacy_mode", settings.privacy_mode)
+
+    if payload.get("openai_files_retention_hours") is not None:
+        settings.openai_files_retention_hours = int(payload["openai_files_retention_hours"])
+        await _persist("openai_files_retention_hours", settings.openai_files_retention_hours)
 
     if "federation_enabled" in payload:
         new_val = bool(payload["federation_enabled"])

@@ -82,6 +82,7 @@ def _peer_out(p: PeerState, cls: type[PeerOut] = PeerOut, **extra) -> PeerOut:
         local_access_level=p.local_access_level,
         join_state=p.join_state,
         join_verification_code=p.join_verification_code,
+        privacy_mode=p.privacy_mode,
         dial_state=dialer.state if dialer is not None else None,
         last_error=dialer.last_error if dialer is not None else None,
         requests_proxied=p.requests_proxied,
@@ -203,8 +204,11 @@ async def heartbeat(
 
     cuda = await _asyncio.to_thread(probe_cuda)
 
+    from ocabra.core import privacy
+
     return HeartbeatResponse(
         cuda=cuda,
+        privacy_mode=privacy.mode(),
         node_id=fm.node_id,
         node_name=fm.node_name,
         version=settings.app_version,

@@ -24,6 +24,7 @@ from ocabra.api.openai._deps import (
     resolve_profile,
 )
 from ocabra.core.federation import note_federation_fallback
+from ocabra.core.privacy import preview as privacy_preview
 from ocabra.core.request_telemetry import mark_prefill_since
 
 from ._mapper import resolve_model
@@ -102,7 +103,7 @@ async def _run_embeddings(
                         peer=peer.name,
                         model_id=ollama_model,
                         status=resp.status_code,
-                        body_preview=resp.text[:200],
+                        body_preview=privacy_preview(resp.text),
                     )
                     request.state.federation_remote_node_id = None
                     note_federation_fallback(peer, resp.status_code)

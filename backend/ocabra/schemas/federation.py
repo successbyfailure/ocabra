@@ -75,6 +75,9 @@ class PeerOut(BaseModel):
         default=None, description="Outgoing join request: pending | denied | expired"
     )
     join_verification_code: str | None = None
+    privacy_mode: str | None = Field(
+        default=None, description="The peer's privacy mode from its heartbeat: optimal | zero_data"
+    )
     dial_state: str | None = Field(
         default=None,
         description="tunnel_out: connecting | connected | backoff | rejected | stopped",
@@ -140,6 +143,10 @@ class HeartbeatResponse(BaseModel):
     cuda: dict[str, Any] | None = Field(
         default=None,
         description="Whether CUDA compute works here: {ok, devices, error} (ok=None: no driver)",
+    )
+    privacy_mode: str | None = Field(
+        default=None,
+        description="optimal | zero_data (see core/privacy.py); None from nodes older than 0.92.1",
     )
 
 

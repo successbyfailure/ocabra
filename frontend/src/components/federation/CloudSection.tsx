@@ -420,11 +420,13 @@ function LaunchDialog({
   const [volumes, setVolumes] = useState<CloudVolume[]>([])
   const [dataCenters, setDataCenters] = useState<CloudDataCenter[]>([])
   const [volumeId, setVolumeId] = useState("")
+  const [zeroData, setZeroData] = useState(false)
 
   useEffect(() => {
     if (!open) return
     setPicked([])
     setVolumeId("")
+    setZeroData(false)
     api.federation.cloud.volumes().then(setVolumes).catch(() => setVolumes([]))
     api.federation.cloud.dataCenters().then(setDataCenters).catch(() => setDataCenters([]))
     setCloudType(info.settings.cloud_type)
@@ -448,8 +450,8 @@ function LaunchDialog({
   // A volume forces Secure Cloud (the only one with network volumes).
   const priceOf = useCallback(
     (g: CloudGpuType) =>
-      !volumeId && cloudType === "COMMUNITY" ? g.price_community : g.price_secure,
-    [cloudType, volumeId],
+      !volumeId && !zeroData && cloudType === "COMMUNITY" ? g.price_community : g.price_secure,
+    [cloudType, volumeId, zeroData],
   )
   const volume = volumes.find((v) => v.id === volumeId)
   // A volume pins the pod to its data center: offer only what is in stock there.
@@ -458,7 +460,8 @@ function LaunchDialog({
     const dc = dataCenters.find((d) => d.id === volume.data_center)
     return new Set((dc?.gpus ?? []).map((g) => g.id))
   }, [volume, dataCenters])
-  const effectiveCloud = volume ? "SECURE" : cloudType
+  // A volume or zero data forces Secure Cloud.
+  const effectiveCloud = volume || zeroData ? "SECURE" : cloudType
   const offered = useMemo(
     () =>
       (gpus ?? []).filter(
@@ -511,13 +514,29 @@ function LaunchDialog({
             </label>
           )}
 
+          <label className="mt-4 flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5 accent-primary"
+              checked={zeroData}
+              onChange={(e) => setZeroData(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">Modo 0 data</span>
+              <span className="block text-xs text-muted-foreground">
+                El nodo no guarda nada de las peticiones ni de quién las hace, ni recibe tu token de Hugging
+                Face. Va a Secure Cloud. No protege frente al dueño de la máquina.
+              </span>
+            </span>
+          </label>
+
           <div className="mt-4 flex gap-2">
             {(["COMMUNITY", "SECURE"] as const).map((t) => (
               <button
                 key={t}
                 type="button"
                 className={`${btnCls} ${effectiveCloud === t ? "border-primary bg-primary/10" : ""}`}
-                disabled={Boolean(volume) && t === "COMMUNITY"}
+                disabled={(Boolean(volume) || zeroData) && t === "COMMUNITY"}
                 onClick={() => setCloudType(t)}
               >
                 {t === "COMMUNITY" ? "Community" : "Secure"}
@@ -621,6 +640,7 @@ function LaunchDialog({
                     gpu_count: count,
                     cloud_type: effectiveCloud,
                     volume_id: volumeId || undefined,
+                    privacy_mode: zeroData ? "zero_data" : "optimal",
                     max_runtime_minutes: ttl,
                     idle_shutdown_minutes: idle,
                     name: name.trim() || undefined,

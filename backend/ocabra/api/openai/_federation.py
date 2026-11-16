@@ -31,6 +31,7 @@ from fastapi import Request
 from fastapi.responses import Response
 
 from ocabra.core.federation import note_federation_fallback
+from ocabra.core.privacy import preview as privacy_preview
 
 # Sentinel — when an endpoint wants the helper to return a plain dict instead
 # of a Response (e.g. so it can post-process with json.loads), it can opt out
@@ -264,7 +265,7 @@ async def try_proxy_json(
         peer=peer.name,
         model_id=model_id,
         status=resp.status_code,
-        body_preview=resp.text[:200],
+        body_preview=privacy_preview(resp.text),
     )
     request.state.federation_remote_node_id = None
     note_federation_fallback(peer, resp.status_code)
@@ -345,7 +346,7 @@ async def try_proxy_multipart(
         peer=peer.name,
         model_id=model_id,
         status=resp.status_code,
-        body_preview=resp.text[:200],
+        body_preview=privacy_preview(resp.text),
     )
     request.state.federation_remote_node_id = None
     note_federation_fallback(peer, resp.status_code)

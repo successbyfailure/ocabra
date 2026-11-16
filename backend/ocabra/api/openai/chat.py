@@ -36,6 +36,7 @@ from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.federation import note_federation_fallback
 from ocabra.core.output_limits import apply_declared_output_limit
+from ocabra.core.privacy import preview as privacy_preview
 from ocabra.core.router_resolver import NoRoutableTargetError
 from ocabra.core.worker_pool import (
     InferenceTimeoutError,
@@ -215,7 +216,7 @@ async def chat_completions(
                         peer=peer.name,
                         model_id=model_id,
                         status=resp.status_code,
-                        body_preview=resp.text[:200],
+                        body_preview=privacy_preview(resp.text),
                     )
                     request.state.federation_remote_node_id = None
                     note_federation_fallback(peer, resp.status_code)

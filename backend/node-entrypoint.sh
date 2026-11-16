@@ -6,6 +6,10 @@
 # with a pod that stays broken.
 set -euo pipefail
 
+# No core dumps: a crashing worker must not leave its memory (prompts,
+# outputs) on the disk of a machine we don't control.
+ulimit -c 0 || true
+
 # Data dirs the API expects (models, HF cache, Ollama store) exist from the
 # start, not only after the first download.
 mkdir -p /data/models /data/hf_cache /data/ollama_models
