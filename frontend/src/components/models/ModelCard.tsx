@@ -182,6 +182,13 @@ export function ModelCard({ logical, deploymentId, states, live, gpus, nowMs, bu
   const featured = logical ? featuredDeployment(logical, states) : undefined
   const modelId = featured?.modelId ?? deploymentId ?? (logical ? `${logical.defaultBackend}/${logical.modelKey}` : "")
   const model = states[modelId]
+  // Where it is loaded across the federation, over *all* its deployments: the
+  // card shows one (e.g. the Ollama one) while a peer may run another.
+  const fedSources = logical ? logical.deployments.map((d) => states[d.modelId]) : [model]
+  const loadedOn = Array.from(
+    new Set(fedSources.flatMap((st) => st?.federation?.loadedOn ?? []).filter((n) => n !== "aquí")),
+  )
+  const remoteOnly = Boolean(model?.federation?.remote)
   const defaultDeployment = logical
     ? (logical.deployments.find((dep) => dep.isDefault) ?? logical.deployments[0])
     : undefined
@@ -298,19 +305,19 @@ export function ModelCard({ logical, deploymentId, states, live, gpus, nowMs, bu
               Mantenimiento
             </span>
           )}
-          {model?.federation && (model.federation.loadedOn?.length || model.federation.remote) ? (
+          {loadedOn.length > 0 || remoteOnly ? (
             <span
               className="inline-flex items-center gap-1 rounded-md bg-sky-500/15 px-1.5 py-0.5 text-sky-700 dark:text-sky-200"
               title={
-                model.federation.remote
+                remoteOnly
                   ? "Modelo de otro nodo de la federación: las peticiones van allí"
-                  : "Nodos de la federación donde está cargado ahora mismo"
+                  : "Otros nodos de la federación donde está cargado ahora mismo"
               }
             >
               <Globe size={11} />
-              {model.federation.loadedOn?.length
-                ? `cargado en ${model.federation.loadedOn.join(", ")}`
-                : model.federation.nodeName || model.federation.nodeId}
+              {loadedOn.length
+                ? `cargado en ${loadedOn.join(", ")}`
+                : model?.federation?.nodeName || model?.federation?.nodeId}
             </span>
           ) : null}
           {disk && (

@@ -212,7 +212,11 @@ export function useWebSocket() {
             const canonicalId = event.data.canonicalModelId ?? event.data.modelId
             void api.models
               .get(canonicalId)
-              .then((model) => updateModel(canonicalId, model))
+              // GET of one model carries no federation info (only the list
+              // does): keep what the store has instead of wiping it.
+              .then(({ federation, ...model }) =>
+                updateModel(canonicalId, federation ? { ...model, federation } : model),
+              )
               .catch(() => updateModel(canonicalId, { status: event.data.status }))
           } else if (event.type === "download_progress") {
             updateJob(event.data.jobId, {
