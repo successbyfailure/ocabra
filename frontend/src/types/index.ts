@@ -45,6 +45,18 @@ export interface GPUState {
   powerLimitW: number;
   lockedVramMb: number;
   processes: GPUProcessInfo[];
+  /** Solo en el editor de modelos: el hueco de esta GPU para el modelo que se
+   *  edita, contado por el servidor como lo cuenta el planificador. */
+  editorCapacity?: GpuCapacity;
+}
+
+export interface GpuCapacity {
+  /** Lo que tendría ahora mismo (su propia copia liberada si está cargado). */
+  availableMb: number;
+  /** Lo que tendría desalojando todos los demás modelos de oCabra. */
+  budgetMb: number;
+  /** Tarjeta menos budget: driver, escritorio, margen del planificador. */
+  systemMb: number;
 }
 
 export type ModelStatus =

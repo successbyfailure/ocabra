@@ -6,7 +6,7 @@ import { cn } from "@/lib/cn"
 import type { GPUState } from "@/types"
 import { fmtMb } from "../../PreviewPanel"
 import type { MemoryShare } from "./Workbench"
-import { gpuOccupancy } from "./occupancy"
+import { HATCH_IMPOSSIBLE, gpuOccupancy } from "./occupancy"
 import { Hint, Segmented } from "../../ui"
 
 /** Dónde corre un peldaño: qué GPUs puede usar, cuál prueba primero, si se
@@ -95,7 +95,22 @@ export function DevicePlacement({
       : barGpus.map((i) => gpus.find((g) => g.index === i)?.totalVramMb ?? 1)
   const gpuTotal = gpuRatios.reduce((a, b) => a + b, 0) || 1
   const segments = [
-    ...barGpus.map((i, k) => ({ key: `gpu${i}`, label: `#${i}`, color: gpuColor(i), share: (gpuRatios[k] / gpuTotal) * (1 - cpuShare) })),
+    ...barGpus.map((i, k) => {
+      // Parte del tramo de esta GPU que no cabe ni desalojando a los demás:
+      // lo que su huella prevista pasa del hueco que le deja el sistema.
+      const g = gpus.find((x) => x.index === i)
+      const mb = mine.get(i) ?? 0
+      const reach = g ? g.totalVramMb - gpuOccupancy(g, liveVramByGpu[String(i)] ?? 0).system : Infinity
+      const over = mb > 0 && Number.isFinite(reach) ? Math.max(0, mb - reach) : 0
+      return {
+        key: `gpu${i}`,
+        label: `#${i}`,
+        color: gpuColor(i),
+        share: (gpuRatios[k] / gpuTotal) * (1 - cpuShare),
+        impossible: mb > 0 ? Math.min(1, over / mb) : 0,
+        impossibleMb: over,
+      }
+    }),
     ...(value.cpu ? [{ key: "cpu", label: "CPU", color: CPU_COLOR, share: cpuShare }] : []),
   ]
   const showBar = segments.length > 1 || (value.cpu && barGpus.length === 0)
@@ -267,7 +282,8 @@ export function SegmentBar({
   editable,
   onChange,
 }: {
-  segments: { key: string; label: string; color: string; share: number }[]
+  /** `impossible`: fracción (0–1) del tramo que no cabe, rayada en rojo. */
+  segments: { key: string; label: string; color: string; share: number; impossible?: number; impossibleMb?: number }[]
   editable: boolean
   onChange: (shares: number[]) => void
 }) {
@@ -303,7 +319,15 @@ export function SegmentBar({
           className="relative flex min-w-0 items-center justify-center truncate text-[11px] font-semibold"
           style={{ width: `${shares[i] * 100}%`, background: `${s.color}33`, color: s.color }}
         >
-          {shares[i] > 0.08 ? `${s.label} · ${Math.round(shares[i] * 100)}%` : ""}
+          {(s.impossible ?? 0) > 0 && (
+            <span
+              className="absolute inset-y-0 right-0 border-l-2 border-red-400"
+              style={{ width: `${(s.impossible ?? 0) * 100}%`, ...HATCH_IMPOSSIBLE }}
+              title={`No cabe en ${s.label}: faltan ${fmtMb(s.impossibleMb ?? 0)} aunque se desalojen los demás. Pasa más a la CPU o a otra GPU.`}
+              data-part="impossible"
+            />
+          )}
+          <span className="relative">{shares[i] > 0.08 ? `${s.label} · ${Math.round(shares[i] * 100)}%` : ""}</span>
           {editable && i < segments.length - 1 && (
             <span
               role="separator"

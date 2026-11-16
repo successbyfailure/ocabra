@@ -11,6 +11,7 @@ import type { LadderRung } from "./usePresetLadder"
 import { GpuBadge } from "@/components/dashboard/GpuBadge"
 import type { ModelEditorState } from "./useModelEditor"
 import { Callout, Chip } from "./ui"
+import { gpuOccupancy } from "./sections/capacity/occupancy"
 
 /** Colores de las partes de la huella de memoria, iguales en toda la página. */
 export const PART_META: Record<string, { label: string; color: string }> = {
@@ -106,8 +107,14 @@ export function PreviewPanel({
   const used = gpus.filter((g) => shares.has(g.index))
   const verdict = (() => {
     if (!p || !est || !used.length) return null
-    const fitsNow = used.every((g) => (shares.get(g.index)?.mb ?? 0) <= g.totalVramMb - Math.max(0, g.usedVramMb - (liveVramByGpu[String(g.index)] ?? 0)))
-    const fitsEmpty = used.every((g) => (shares.get(g.index)?.mb ?? 0) <= g.totalVramMb)
+    // Igual que las barras de Capacidad (y que el planificador, cuando el
+    // servidor da el hueco): el sistema y el escritorio no se desalojan.
+    const room = (g: GPUState) => {
+      const occ = gpuOccupancy(g, liveVramByGpu[String(g.index)] ?? 0)
+      return { now: g.totalVramMb - occ.system - occ.others, evicting: g.totalVramMb - occ.system }
+    }
+    const fitsNow = used.every((g) => (shares.get(g.index)?.mb ?? 0) <= room(g).now)
+    const fitsEmpty = used.every((g) => (shares.get(g.index)?.mb ?? 0) <= room(g).evicting)
     if (fitsNow) return { tone: "ok" as const, text: "cabe ahora" }
     if (fitsEmpty) return { tone: "warn" as const, text: "cabe desalojando otros" }
     return { tone: "error" as const, text: "no cabe" }

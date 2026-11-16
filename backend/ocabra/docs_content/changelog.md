@@ -16,6 +16,21 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.95.3 — 2026-11-16
+
+### Corregido
+
+- El editor de modelos decía «cabe desalojando otros» para cargas que luego
+  fallaban por falta de VRAM: contaba los programas del escritorio de la GPU
+  como modelos que se pueden desalojar y no descontaba el margen que guarda el
+  planificador. `POST /ocabra/models/{id}/preview` devuelve ahora `capacity`
+  (por GPU: `availableMb` ahora, `budgetMb` desalojando los demás modelos de
+  oCabra y `systemMb`, con la misma cuenta que la carga) y
+  `estimate.fits_after_eviction`; `estimate.fits_current_gpu` usa esa misma
+  cuenta.
+
+---
+
 ## 0.95.2 — 2026-11-16
 
 ### Cambios

@@ -121,6 +121,8 @@ export interface PreviewResult {
   estimate: MemoryEstimate
   gpuIndices: number[]
   gpus: PreviewGpu[]
+  /** Hueco por GPU según el planificador (servidores ≥ 0.95.3). */
+  capacity?: ({ index: number; totalMb: number } & import("@/types").GpuCapacity)[]
   launch: { argv?: string[]; env?: Record<string, string>; visibleGpus?: number[]; error?: string } | null
 }
 

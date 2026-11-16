@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { withCapacity } from "@/components/model-editor/sections/capacity/occupancy"
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import {
   ArrowLeft,
@@ -101,7 +102,11 @@ export function ModelEditor() {
   const isAdmin = useIsAdmin()
   const readOnly = !canEdit
   const editor = useModelEditor(modelId)
-  const gpus = useGpuStore((s) => s.gpus)
+  const liveGpus = useGpuStore((s) => s.gpus)
+  // El hueco por GPU lo cuenta el servidor (como el planificador) en cada
+  // vista previa; las barras de memoria, reparto y encaje lo leen de aquí.
+  const previewCapacity = editor.preview?.capacity
+  const gpus = useMemo(() => withCapacity(liveGpus, previewCapacity), [liveGpus, previewCapacity])
   const { data: activity } = useLiveActivity()
   const ladder = usePresetLadder(modelId)
   const [logical, setLogical] = useState<LogicalModel | null>(null)

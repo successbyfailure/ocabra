@@ -556,7 +556,7 @@ export function MemoryBars({
             </div>
             <div className="relative flex h-4 overflow-hidden rounded-md bg-muted/40">
               {occ.system > 0 && (
-                <div className="h-full shrink-0" style={{ width: pct(occ.system), ...HATCH_SYSTEM }} title={`Sistema (driver, CUDA, escritorio): ${fmtMb(occ.system)}`} data-part="system" />
+                <div className="h-full shrink-0" style={{ width: pct(occ.system), ...HATCH_SYSTEM }} title={`Sistema (driver, CUDA, escritorio y margen del planificador): ${fmtMb(occ.system)}`} data-part="system" />
               )}
               {occ.others > 0 && (
                 <div
@@ -593,7 +593,7 @@ export function MemoryBars({
         )
       })}
       <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-border/60 pt-2 text-[10.5px] text-muted-foreground" data-testid="memory-legend">
-        <span className="flex items-center gap-1" title="Reserva del driver, contextos CUDA y escritorio: ningún modelo puede usarla">
+        <span className="flex items-center gap-1" title="Reserva del driver, contextos CUDA, escritorio y el margen del planificador: ningún modelo puede usarla">
           <span className="h-2 w-2 rounded-sm" style={HATCH_SYSTEM} /> sistema
         </span>
         {anyOthers && (

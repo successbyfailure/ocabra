@@ -1070,7 +1070,6 @@ async def list_speculative_candidates(
     )
 
 
-
 @router.get(
     "/models/{model_id:path}/insights",
     summary="Measured behaviour of a model, for the model editor",
@@ -1834,14 +1833,18 @@ class ModelConfigPreviewRequest(BaseModel):
     extra_config: dict = Field(default_factory=dict, alias="extraConfig")
 
 
-def _preview_gpu_indices(state, extra: dict, preferred_gpu: int | None, gpu_count: int) -> list[int]:
+def _preview_gpu_indices(
+    state, extra: dict, preferred_gpu: int | None, gpu_count: int
+) -> list[int]:
     """GPUs a load with this draft would most likely get (approximation of the
     scheduler's choice, for the preview only)."""
     target = preferred_gpu if preferred_gpu is not None else settings.default_gpu_index
     if state.backend_type in ("vllm", "sglang"):
         # Tensor parallel shards the model over that many GPUs, starting with
         # the preferred one.
-        section = extra.get(state.backend_type) if isinstance(extra.get(state.backend_type), dict) else {}
+        section = (
+            extra.get(state.backend_type) if isinstance(extra.get(state.backend_type), dict) else {}
+        )
         try:
             tp = int(section.get("tensor_parallel_size") or 1)
         except (TypeError, ValueError):
@@ -1993,14 +1996,79 @@ async def preview_model_config(
     except Exception as exc:  # noqa: BLE001
         launch = {"error": str(exc)}
 
+    capacity = await _preview_capacity(mm, gpu_manager, state)
+    if capacity and gpus:
+        room = {c["index"]: c for c in capacity}
+        used = [g for g in gpus if g["index"] in room]
+        if used:
+            # Same rule as the scheduler: what it would grant now (this model's
+            # own copy released) and with every other oCabra model evicted.
+            estimate = {
+                **estimate,
+                "fits_current_gpu": all(g["mb"] <= room[g["index"]]["availableMb"] for g in used),
+                "fits_after_eviction": all(g["mb"] <= room[g["index"]]["budgetMb"] for g in used),
+            }
+
     return {
         "errors": errors,
         "unknownKeys": config_schema.unknown_keys(state.backend_type, draft),
         "estimate": estimate,
         "gpuIndices": gpu_indices,
         "gpus": gpus,
+        "capacity": capacity,
         "launch": launch,
     }
+
+
+async def _preview_capacity(mm: Any, gpu_manager: Any, state: Any) -> list[dict]:
+    """Room per GPU for this model, as the scheduler counts it.
+
+    ``availableMb``: what a load would get right now (free VRAM minus the
+    scheduler buffer and service reservations, with this model's own copy
+    released if it is loaded). ``budgetMb``: what it would get with every other
+    oCabra model evicted — the card minus the driver reservation, the buffer,
+    the eviction threshold and processes oCabra does not own (a desktop).
+    ``systemMb`` is the difference between the card and the budget. The editor
+    used to work this out from the process list and counted a desktop as
+    evictable models: "fits after evicting" for a load that then failed.
+    """
+    if gpu_manager is None:
+        return []
+    from ocabra.core.auto_setup import gpu_budgets
+
+    try:
+        states = await gpu_manager.get_all_states()
+        indices = [int(g.index) for g in states]
+        budgets = {b.index: b for b in await gpu_budgets(mm, indices)}
+        pid = getattr(getattr(state, "worker_info", None), "pid", None)
+        own_loaded = bool(getattr(state, "current_gpu", None)) and pid is not None
+        out: list[dict] = []
+        for gpu in states:
+            index = int(gpu.index)
+            if own_loaded and index in (state.current_gpu or []):
+                available = await gpu_manager.get_free_vram_if_released(
+                    index, {state.model_id: pid}
+                )
+            else:
+                available = await gpu_manager.get_free_vram(index)
+            budget = budgets.get(index)
+            budget_mb = max(int(budget.budget_mb), int(available)) if budget else int(available)
+            total = int(gpu.total_vram_mb)
+            out.append(
+                {
+                    "index": index,
+                    "totalMb": total,
+                    "availableMb": int(available),
+                    "budgetMb": budget_mb,
+                    "systemMb": max(0, total - budget_mb),
+                }
+            )
+        return out
+    except Exception as exc:  # noqa: BLE001 - the preview stands without it
+        import structlog
+
+        structlog.get_logger(__name__).info("preview_capacity_failed", error=str(exc))
+        return []
 
 
 @router.post(
@@ -2077,9 +2145,7 @@ def _apply_fit_projection(
     total = int(projection.get("estimated_vram_mb") or 0)
     host = int(projection.get("host_mb") or 0)
     fits = (
-        all(g["mb"] <= totals[g["index"]] for g in gpus if g["index"] in totals)
-        if totals
-        else None
+        all(g["mb"] <= totals[g["index"]] for g in gpus if g["index"] in totals) if totals else None
     )
     notes = [
         "Proyección de llama.cpp (llama-fit-params): la misma cuenta que hace al "

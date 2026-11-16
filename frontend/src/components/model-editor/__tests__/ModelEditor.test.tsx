@@ -202,7 +202,8 @@ describe("ModelEditor", () => {
   it("memory bars split system memory from other models and hatch what does not fit", async () => {
     useGpuStore.setState({
       gpus: [
-        // 2.288 MB usados: 2.000 son de otro modelo de oCabra, el resto es sistema.
+        // 2.288 MB usados: 2.000 son de otro modelo de oCabra, el resto es
+        // sistema (288) y se suma el margen de 512 que guarda el planificador.
         { index: 0, name: "NVIDIA GeForce RTX 3060", totalVramMb: 12288, freeVramMb: 10000, usedVramMb: 2288, utilizationPct: 0, temperatureC: 40, powerDrawW: 20, powerLimitW: 170, lockedVramMb: 0,
           processes: [{ pid: 7, processName: "whisper", processType: "compute", usedVramMb: 2000 }] },
       ],
@@ -219,14 +220,14 @@ describe("ModelEditor", () => {
     const bars = await screen.findByTestId("memory-bars")
     const bar = bars.querySelector('[data-gpu-bar="0"]') as HTMLElement
     await waitFor(() => expect(bar.querySelector('[data-part="impossible"]')).toBeTruthy())
-    expect((bar.querySelector('[data-part="system"]') as HTMLElement).title).toContain("288 MB")
+    expect((bar.querySelector('[data-part="system"]') as HTMLElement).title).toContain("800 MB")
     // Orden: sistema, otros modelos, este modelo; lo que se sale, rayado rojo.
     expect([...bar.querySelectorAll("[data-part]")].map((e) => e.getAttribute("data-part"))).toEqual(["system", "others", "weights", "kv", "impossible"])
     expect((bar.querySelector('[data-part="impossible"]') as HTMLElement).style.backgroundImage).toContain("repeating-linear-gradient")
     expect((bar.querySelector('[data-part="system"]') as HTMLElement).style.backgroundImage).toContain("repeating-linear-gradient")
     expect(screen.getByTestId("memory-legend").textContent).toContain("no cabe")
     expect(bars.textContent).toContain("No cabe en estas GPUs.")
-    expect(screen.getByTestId("device-placement").textContent).toContain("otros modelos 2.0 GB · sistema 288 MB")
+    expect(screen.getByTestId("device-placement").textContent).toContain("otros modelos 2.0 GB · sistema 800 MB")
   })
 
   it("marking both GPUs together in the base writes split_policy always", async () => {
@@ -321,14 +322,15 @@ describe("ModelEditor", () => {
     })
     renderEditor("capacity")
     const control = await screen.findByTestId("context-control")
-    // 24.576 MB − 576 de sistema − 19.400 fijos = 4.600 MB de KV a 100 MB/1k: caben 46k.
+    // 24.576 MB − 1.024 de sistema (512 sin atribuir + 512 de margen del
+    // planificador) − 19.400 fijos: ~4.100 MB de KV a 100 MB/1k, unos 41k.
     const hatch = await waitFor(() => {
       const el = control.querySelector('[data-testid="context-impossible"]') as HTMLElement
       expect(el).toBeTruthy()
       return el
     })
     expect(hatch.style.backgroundImage).toContain("repeating-linear-gradient")
-    expect(screen.getByTestId("context-verdict").textContent).toMatch(/de 23 GB · cabe · hasta 46(\.0)?k/)
+    await waitFor(() => expect(screen.getByTestId("context-verdict").textContent).toMatch(/de 23 GB · cabe · hasta 40\.9k/))
     expect(screen.getByTestId("context-choice").className).toContain("bg-emerald-400")
     // Elegir 64k (dentro del rayado) marca la elección como imposible.
     fireEvent.change(screen.getByTestId("ctx-slider"), { target: { value: "16" } })
@@ -573,8 +575,9 @@ describe("MemoryBars", () => {
   }
 
   it("draws a measured preset (unknown part key) after the other loaded models and stripes what needs evicting", () => {
-    // Otro modelo ocupa ~22,7 GB; el peldaño medido necesita 23,7 GB.
-    render(<MemoryBars gpus={[gpu3090]} memory={[{ gpu: 1, parts: { measured: 23776 } }]} liveVramByGpu={{}} />)
+    // Otro modelo ocupa ~22,7 GB; el peldaño medido necesita 23,2 GB (cabe en
+    // los 23,5 GB que dejan el sistema y el margen del planificador).
+    render(<MemoryBars gpus={[gpu3090]} memory={[{ gpu: 1, parts: { measured: 23276 } }]} liveVramByGpu={{}} />)
     const bar = screen.getByTestId("memory-bars").querySelector('[data-gpu-bar="1"]') as HTMLElement
     expect([...bar.querySelectorAll("[data-part]")].map((e) => e.getAttribute("data-part"))).toEqual(["system", "others", "measured", "impossible"])
     expect((bar.querySelector('[data-part="impossible"]') as HTMLElement).title).toContain("desalojar")
