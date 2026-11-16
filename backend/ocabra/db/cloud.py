@@ -7,6 +7,9 @@ from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+# cloud_nodes has FKs to federation_invites / federation_peers: register them
+# with the metadata whenever this module is used on its own.
+import ocabra.db.federation  # noqa: E402,F401
 from ocabra.database import Base
 
 

@@ -31,6 +31,7 @@ from ocabra.api.openai._deps import (
 )
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
+from ocabra.core.federation import note_federation_fallback
 from ocabra.core.output_limits import apply_declared_output_limit
 
 from ._mapper import resolve_model
@@ -113,6 +114,7 @@ async def generate(
                         error=str(exc),
                     )
                     request.state.federation_remote_node_id = None
+                    note_federation_fallback(peer, exc)
                     resp = None
                 if resp is not None and (
                     resp.status_code < 400 or not should_fallback_to_local(resp.status_code)
@@ -131,6 +133,7 @@ async def generate(
                         body_preview=resp.text[:200],
                     )
                     request.state.federation_remote_node_id = None
+                    note_federation_fallback(peer, resp.status_code)
                 # Fall through to local processing.
     # --- End federation hook ---
 

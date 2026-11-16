@@ -861,6 +861,11 @@ async def get_recent_requests(limit: int = 20) -> dict:
                 "groupId": str(r.group_id) if r.group_id else None,
                 "groupName": group_name_map.get(r.group_id) if r.group_id else None,
                 "apiKeyName": getattr(r, "api_key_name", None),
+                # Federation: who served it, who sent it, and why.
+                "node": getattr(r, "remote_node_name", None)
+                or (r.remote_node_id if getattr(r, "remote_node_id", None) else None),
+                "inboundFrom": getattr(r, "federation_inbound_from", None),
+                "route": getattr(r, "federation_route", None),
                 "clientAddr": getattr(r, "client_addr", None),
                 "userAgent": getattr(r, "user_agent", None),
                 "runtimeTelemetry": getattr(r, "runtime_telemetry", None),
@@ -939,6 +944,11 @@ async def get_recent_requests_for_user(user_id: str, limit: int = 20) -> dict:
                 "outputTokens": r.output_tokens,
                 "error": r.error,
                 "apiKeyName": getattr(r, "api_key_name", None),
+                # Federation: who served it, who sent it, and why.
+                "node": getattr(r, "remote_node_name", None)
+                or (r.remote_node_id if getattr(r, "remote_node_id", None) else None),
+                "inboundFrom": getattr(r, "federation_inbound_from", None),
+                "route": getattr(r, "federation_route", None),
                 "runtimeTelemetry": getattr(r, "runtime_telemetry", None),
                 **_rendimiento_de_la_peticion(r),
             }
@@ -1496,42 +1506,174 @@ async def get_federation_stats(
     from_dt: datetime | None = None,
     to_dt: datetime | None = None,
 ) -> dict:
-    """Return federation request distribution: local vs. remote nodes."""
+    """Federated traffic in a window, both ways, aggregated in SQL.
+
+    * ``outbound``: requests we sent to each node — count, errors, tokens,
+      p50/p95 duration, top models and, for cloud nodes, what they cost in the
+      window (``costUsd``, per request and per 1k tokens).
+    * ``inbound``: requests other nodes sent us (served here).
+    * ``routes``: why requests went where they did (decision reasons, forced
+      nodes, ``fallback_local`` when a chosen peer failed).
+    * ``byNode``: the old shape (id, name, count, average), kept for clients.
+
+    Nodes are keyed by name when known (kept after a peer is deleted), else id.
+    """
+    from ocabra.core.cloud.manager import node_cost
+    from ocabra.db.cloud import CloudNode
+
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
+    R = RequestStat
+    window = sa.and_(R.started_at >= from_dt, R.started_at <= to_dt)
+    is_error = sa.or_(R.status_code >= 400, R.error.is_not(None))
 
+    def _summary_cols():
+        return (
+            sa.func.count().label("n"),
+            sa.func.count().filter(is_error).label("errors"),
+            sa.func.coalesce(sa.func.sum(R.input_tokens), 0).label("tin"),
+            sa.func.coalesce(sa.func.sum(R.output_tokens), 0).label("tout"),
+            sa.func.avg(R.duration_ms).label("avg"),
+            sa.func.percentile_cont(0.5).within_group(R.duration_ms).label("p50"),
+            sa.func.percentile_cont(0.95).within_group(R.duration_ms).label("p95"),
+        )
+
+    out_key = sa.func.coalesce(R.remote_node_name, R.remote_node_id)
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
+        totals = (
+            await session.execute(
+                sa.select(
+                    sa.func.count().filter(R.remote_node_id.is_(None)),
+                    sa.func.count().filter(R.remote_node_id.is_not(None)),
+                    sa.func.count().filter(R.federation_inbound_from.is_not(None)),
+                    sa.func.count().filter(R.federation_route == "fallback_local"),
+                ).where(window)
+            )
+        ).one()
+        outbound_rows = (
+            await session.execute(
+                sa.select(out_key.label("node"), sa.func.max(R.remote_node_id), *_summary_cols())
+                .where(window, R.remote_node_id.is_not(None))
+                .group_by(out_key)
+            )
+        ).all()
+        inbound_rows = (
+            await session.execute(
+                sa.select(R.federation_inbound_from.label("node"), *_summary_cols())
+                .where(window, R.federation_inbound_from.is_not(None))
+                .group_by(R.federation_inbound_from)
+            )
+        ).all()
+        model_rows = (
+            await session.execute(
+                sa.select(
+                    sa.case(
+                        (R.remote_node_id.is_not(None), sa.literal("out")), else_=sa.literal("in")
+                    ).label("dir"),
+                    sa.func.coalesce(out_key, R.federation_inbound_from).label("node"),
+                    R.model_id,
+                    sa.func.count().label("n"),
+                )
+                .where(
+                    window,
+                    sa.or_(R.remote_node_id.is_not(None), R.federation_inbound_from.is_not(None)),
+                )
+                .group_by("dir", "node", R.model_id)
+            )
+        ).all()
+        route_rows = (
+            await session.execute(
+                sa.select(R.federation_route, sa.func.count())
+                .where(window, R.federation_route.is_not(None))
+                .group_by(R.federation_route)
+            )
+        ).all()
+        fallback_rows = (
+            await session.execute(
+                sa.select(R.model_id, sa.func.count())
+                .where(window, R.federation_route == "fallback_local")
+                .group_by(R.model_id)
+            )
+        ).all()
+        cloud_rows = (
+            (
+                await session.execute(
+                    sa.select(CloudNode).where(
+                        sa.func.coalesce(CloudNode.terminated_at, to_dt) >= from_dt,
+                        sa.func.coalesce(CloudNode.started_at, CloudNode.created_at) <= to_dt,
+                    )
+                )
+            )
+            .scalars()
+            .all()
         )
-        result = await session.execute(q)
-        rows = result.scalars().all()
 
-    local_count = 0
-    remote_count = 0
-    by_node: dict[str, list] = defaultdict(list)
+    models: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for direction, node, model_id, n in model_rows:
+        models[(direction, str(node))].append({"model": model_id, "count": int(n)})
+    for lst in models.values():
+        lst.sort(key=lambda m: -m["count"])
+        del lst[5:]
 
-    for r in rows:
-        if r.remote_node_id is None:
-            local_count += 1
-        else:
-            remote_count += 1
-            by_node[r.remote_node_id].append(r)
+    # By peer id while the peer exists, and by name after: deleting a pod's
+    # peer (it terminated) nulls ``cloud_nodes.peer_id``, and the pod's peer is
+    # named after the pod.
+    cost_by_peer: dict[str, float] = defaultdict(float)
+    cost_by_name: dict[str, float] = defaultdict(float)
+    for row in cloud_rows:
+        cost = node_cost(row, since=from_dt, now=min(to_dt, datetime.now(UTC)))
+        if row.peer_id is not None:
+            cost_by_peer[str(row.peer_id)] += cost
+        cost_by_name[row.name] += cost
 
-    node_summaries = []
-    for node_id, nrows in sorted(by_node.items()):
-        n = len(nrows)
-        durations = [max(0, int(r.duration_ms or 0)) for r in nrows]
-        node_summaries.append(
-            {
-                "nodeId": node_id,
-                "count": n,
-                "avgDurationMs": int(sum(durations) / n) if n else 0,
-            }
-        )
+    def _row(r, direction: str, node_id: str | None = None) -> dict:
+        tokens = int(r.tin or 0) + int(r.tout or 0)
+        out = {
+            "node": str(r.node),
+            "count": int(r.n),
+            "errors": int(r.errors),
+            "inputTokens": int(r.tin or 0),
+            "outputTokens": int(r.tout or 0),
+            "avgDurationMs": int(r.avg or 0),
+            "p50DurationMs": int(r.p50 or 0),
+            "p95DurationMs": int(r.p95 or 0),
+            "topModels": models.get((direction, str(r.node)), []),
+        }
+        if direction == "out":
+            cost = (cost_by_peer.get(str(node_id)) if node_id else None) or cost_by_name.get(
+                str(r.node)
+            )
+            out["nodeId"] = node_id
+            out["costUsd"] = round(cost, 4) if cost else None
+            out["usdPerRequest"] = round(cost / r.n, 5) if cost and r.n else None
+            out["usdPer1kTokens"] = round(cost * 1000 / tokens, 5) if cost and tokens else None
+        return out
 
+    outbound = sorted(
+        (_row(r, "out", r[1]) for r in outbound_rows), key=lambda x: -x["count"]
+    )
+    inbound = sorted((_row(r, "in") for r in inbound_rows), key=lambda x: -x["count"])
     return {
-        "localCount": local_count,
-        "remoteCount": remote_count,
-        "byNode": node_summaries,
+        "localCount": int(totals[0]),
+        "remoteCount": int(totals[1]),
+        "inboundCount": int(totals[2]),
+        "fallbackCount": int(totals[3]),
+        "outbound": outbound,
+        "inbound": inbound,
+        "routes": sorted(
+            ({"route": route, "count": int(n)} for route, n in route_rows),
+            key=lambda x: -x["count"],
+        ),
+        "fallbacksByModel": sorted(
+            ({"model": m, "count": int(n)} for m, n in fallback_rows),
+            key=lambda x: -x["count"],
+        ),
+        "byNode": [
+            {
+                "nodeId": o["nodeId"],
+                "nodeName": o["node"],
+                "count": o["count"],
+                "avgDurationMs": o["avgDurationMs"],
+            }
+            for o in outbound
+        ],
     }

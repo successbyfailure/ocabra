@@ -169,9 +169,12 @@ export interface ModelState {
   lastUpdated?: string | null;
   metadataFetchedAt?: string | null;
   federation?: {
+    /** Only on other nodes (not configured here). */
     remote: boolean;
     nodeName: string;
     nodeId: string;
+    /** Where it is loaded right now ("aquí" = this server). */
+    loadedOn?: string[];
   } | null;
 }
 
@@ -729,6 +732,12 @@ export type RequestLoadPhase =
   "loading" | "waiting_for_gpu" | "prompt_eval" | "generating";
 
 export interface ActiveRequestProgress {
+  /** Federation: node that served it (null = here), node that sent it to us,
+   *  and why it went where it did (see lib/federationRoute). */
+  node?: string | null;
+  inboundFrom?: string | null;
+  route?: string | null;
+
   requestId: string;
   username?: string | null;
   elapsedSeconds: number;
@@ -811,6 +820,12 @@ export type RequestStage =
 
 /** Petición recién terminada (feed en vivo del dashboard, 20 s). */
 export interface FinishedRequest {
+  /** Federation: node that served it (null = here), node that sent it to us,
+   *  and why it went where it did (see lib/federationRoute). */
+  node?: string | null;
+  inboundFrom?: string | null;
+  route?: string | null;
+
   requestId: string | null;
   model: string;
   backendType: string | null;
@@ -1045,6 +1060,12 @@ export interface OverviewStats {
 }
 
 export interface RecentRequest {
+  /** Federation: node that served it (null = here), node that sent it to us,
+   *  and why it went where it did (see lib/federationRoute). */
+  node?: string | null;
+  inboundFrom?: string | null;
+  route?: string | null;
+
   id: string;
   modelId: string;
   /** Nombre que usó el cliente (perfil, alias): distingue un -diarized. */
@@ -1180,10 +1201,33 @@ export interface UserDetailStats {
   }[];
 }
 
+export interface FederationNodeTraffic {
+  node: string;
+  count: number;
+  errors: number;
+  inputTokens: number;
+  outputTokens: number;
+  avgDurationMs: number;
+  p50DurationMs: number;
+  p95DurationMs: number;
+  topModels: { model: string; count: number }[];
+  /** Outbound to cloud nodes: what they cost in the window. */
+  nodeId?: string | null;
+  costUsd?: number | null;
+  usdPerRequest?: number | null;
+  usdPer1kTokens?: number | null;
+}
+
 export interface FederationStats {
   localCount: number;
   remoteCount: number;
-  byNode: { nodeId: string; count: number; avgDurationMs: number }[];
+  inboundCount?: number;
+  fallbackCount?: number;
+  outbound?: FederationNodeTraffic[];
+  inbound?: FederationNodeTraffic[];
+  routes?: { route: string; count: number }[];
+  fallbacksByModel?: { model: string; count: number }[];
+  byNode: { nodeId: string; nodeName?: string; count: number; avgDurationMs: number }[];
 }
 
 export interface BatchVsInteractiveSummary {

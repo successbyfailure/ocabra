@@ -16,6 +16,35 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.89.0 — 2026-11-16
+
+### Novedades
+
+- **Elegir el nodo de la federación por petición:** cabecera
+  `X-Ocabra-Node: <nombre del nodo>` (o `local` para este servidor) en
+  cualquier endpoint de inferencia. Es una elección explícita para esa
+  petición; si el nodo no está en línea se enruta como siempre. El Playground
+  tiene un selector de nodo que la usa.
+- `GET /ocabra/stats/federation` da mucho más: por nodo, lo **enviado**
+  (peticiones, errores, tokens, p50/p95, modelos y, en nodos en la nube, el
+  **coste** en el periodo, por petición y por 1.000 tokens) y lo **recibido**
+  de otros nodos; por qué fue cada petición donde fue (`routes`) y los
+  respaldos locales (`fallbackCount`, `fallbacksByModel`). `byNode` se
+  mantiene y gana `nodeName`.
+- `GET /ocabra/stats/recent` y el feed en vivo traen `node` (nodo que la
+  sirvió), `inboundFrom` (nodo que nos la mandó) y `route` (por qué).
+- `GET /ocabra/models`: `federation` trae `remote` y, en cada nodo, `loaded`.
+
+### Correcciones
+
+- Las peticiones servidas por un nodo que después se borró quedaban en las
+  estadísticas solo con su id; ahora se guarda también el nombre (y se ha
+  rellenado para los nodos que siguen existiendo).
+- Cuando un nodo elegido fallaba y la petición se servía aquí, no quedaba
+  rastro; ahora se registra como `fallback_local`.
+
+---
+
 ## 0.88.0 — 2026-11-16
 
 ### Novedades

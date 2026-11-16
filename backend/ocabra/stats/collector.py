@@ -809,6 +809,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 remote_bound=remote_bound,
                 streaming=_payload_streaming(request_payload, path),
                 max_output_tokens=_payload_max_output_tokens(request_payload),
+                federation_info=getattr(request.state, "federation_info", None),
             )
             if inflight_request_id is None:
                 # Admission control: the worker is already at capacity. Reject
@@ -1653,6 +1654,9 @@ async def _record_stat(
         # Federation: check if the request was proxied to a remote node.
         if remote_node_id is None:
             remote_node_id = getattr(request.state, "federation_remote_node_id", None)
+        remote_node_name, inbound_from, federation_route = _federation_fields(
+            request, auth_user, remote_node_id
+        )
 
         # Pull agent context from the executor's contextvars (only set during
         # an agent invocation).  This stamps the *root* request_stat row with
@@ -1691,6 +1695,11 @@ async def _record_stat(
                     "ttftMs": getattr(telemetry_now, "ttft_ms", None),
                     "queueMs": getattr(telemetry_now, "queue_ms", None),
                     # Transcripciones: con durationMs da el factor de tiempo real.
+                    # Federation: where it ran (None = here), who sent it
+                    # to us, and why it went where it did.
+                    "node": remote_node_name,
+                    "inboundFrom": inbound_from,
+                    "route": federation_route,
                     "audioSeconds": (
                         round(float(work_size_meta["audio_seconds"]), 1)
                         if isinstance(work_size_meta, dict)
@@ -1730,6 +1739,9 @@ async def _record_stat(
                 client_addr=client_addr,
                 user_agent=user_agent,
                 remote_node_id=remote_node_id,
+                remote_node_name=remote_node_name,
+                federation_inbound_from=inbound_from,
+                federation_route=federation_route,
                 agent_id=agent_id_ctx,
                 # Bloque 20 — Duration estimator + Router audit.
                 work_size_meta=work_size_meta,
@@ -1799,3 +1811,51 @@ async def record_realtime_request(
         client_addr=_client_addr(websocket),  # type: ignore[arg-type]
         error=error_message,
     )
+
+
+def _federation_fields(
+    request: Request, auth_user: Any, remote_node_id: str | None
+) -> tuple[str | None, str | None, str | None]:
+    """``(remote_node_name, inbound_from, route)`` for a finished request.
+
+    Read from ``request.state.federation_info`` (filled by
+    ``resolve_federated`` and the proxy helpers) and the federation manager:
+    the serving peer's *name* (its id alone loses meaning once the peer is
+    deleted), the peer that sent us the request, and the decision reason —
+    ``fallback_local`` when a peer was chosen but failed and we served it.
+    """
+    info = getattr(request.state, "federation_info", None) or {}
+    fm = getattr(getattr(request, "app", None), "state", None)
+    fm = getattr(fm, "federation_manager", None)
+    peers = []
+    if fm is not None:
+        try:
+            peers = fm.get_all_peers()
+        except Exception:  # noqa: BLE001 — stats must not fail on this
+            peers = []
+
+    name = None
+    if remote_node_id:
+        name = info.get("peer_name") or next(
+            (p.name for p in peers if p.peer_id == str(remote_node_id)), None
+        )
+
+    inbound = None
+    hop = info.get("inbound_hop")
+    if hop:
+        inbound = next(
+            (p.name for p in peers if str(p.remote_node_id or "") == hop or p.peer_id == hop),
+            None,
+        )
+    username = str(getattr(auth_user, "username", "") or "")
+    if inbound is None and username.startswith("federation:"):
+        inbound = username.split(":", 1)[1] or None
+    if inbound is None and hop:
+        inbound = hop[:256]
+
+    route = None
+    if info.get("fallback"):
+        route = "fallback_local"
+    elif info.get("reason") and (remote_node_id or info.get("reason") != "local_loaded"):
+        route = str(info["reason"])[:64]
+    return name, inbound, route

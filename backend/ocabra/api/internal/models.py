@@ -175,12 +175,22 @@ async def list_models(
         # Add federation metadata if enabled
         if federation_manager is not None:
             peers_for_model = remote_models.get(state.model_id, [])
+            local_loaded = str(getattr(state.status, "value", state.status)).lower() == "loaded"
             item["federation"] = {
                 "local": True,
+                "remote": False,
+                # Where it is loaded right now: here and/or which peers.
                 "nodes": [
-                    {"node_name": "local", "node_id": federation_manager.node_id},
+                    {
+                        "node_name": "local",
+                        "node_id": federation_manager.node_id,
+                        "loaded": local_loaded,
+                    },
                 ]
-                + [{"node_name": p.name, "node_id": p.peer_id} for p in peers_for_model],
+                + [
+                    {"node_name": p.name, "node_id": p.peer_id, "loaded": True}
+                    for p in peers_for_model
+                ],
             }
 
         payloads.append(item)
@@ -221,8 +231,12 @@ async def list_models(
                     "disk_size_bytes": None,
                     "federation": {
                         "local": False,
+                        "remote": True,
                         "read_only": True,
-                        "nodes": [{"node_name": p.name, "node_id": p.peer_id} for p in peers],
+                        "nodes": [
+                            {"node_name": p.name, "node_id": p.peer_id, "loaded": True}
+                            for p in peers
+                        ],
                     },
                 }
             )

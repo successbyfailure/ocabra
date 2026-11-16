@@ -6,6 +6,7 @@ import { useAuthStore } from "@/stores/authStore"
 import { useServerStatus } from "@/hooks/useServerStatus"
 import { api } from "@/api/client"
 import { DownloadsIndicator } from "./DownloadsIndicator"
+import { FederationStatusChip } from "./FederationStatusChip"
 
 interface HeaderProps {
   sidebarOpen: boolean
@@ -92,6 +93,7 @@ export function Header({ sidebarOpen, onToggleSidebar, connected }: HeaderProps)
 
       {/* Right: server-load pill + connection status + user */}
       <div className="flex items-center gap-3">
+        <FederationStatusChip />
         <DownloadsIndicator />
         {serverStatus && (activeLoads > 0 || queueDepth > 0 || serviceGpuWaits.length > 0) && (
           <Tooltip.Provider delayDuration={100}>

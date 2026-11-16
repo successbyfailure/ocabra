@@ -23,6 +23,7 @@ from ocabra.api.openai._deps import (
     merge_profile_defaults,
     resolve_profile,
 )
+from ocabra.core.federation import note_federation_fallback
 from ocabra.core.request_telemetry import mark_prefill_since
 
 from ._mapper import resolve_model
@@ -80,6 +81,7 @@ async def _run_embeddings(
                         error=str(exc),
                     )
                     request.state.federation_remote_node_id = None
+                    note_federation_fallback(peer, exc)
                     resp = None
                 if resp is not None and (
                     resp.status_code < 400 or not should_fallback_to_local(resp.status_code)
@@ -101,6 +103,7 @@ async def _run_embeddings(
                         body_preview=resp.text[:200],
                     )
                     request.state.federation_remote_node_id = None
+                    note_federation_fallback(peer, resp.status_code)
                 # Fall through to local processing.
     # --- End federation hook ---
 

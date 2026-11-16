@@ -34,6 +34,7 @@ from ocabra.agents.resolver import is_agent_model, resolve_agent
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
+from ocabra.core.federation import note_federation_fallback
 from ocabra.core.output_limits import apply_declared_output_limit
 from ocabra.core.router_resolver import NoRoutableTargetError
 from ocabra.core.worker_pool import (
@@ -194,6 +195,7 @@ async def chat_completions(
                         error=str(exc),
                     )
                     request.state.federation_remote_node_id = None
+                    note_federation_fallback(peer, exc)
                     resp = None
                 if resp is not None and resp.status_code < 400:
                     return Response(
@@ -216,6 +218,7 @@ async def chat_completions(
                         body_preview=resp.text[:200],
                     )
                     request.state.federation_remote_node_id = None
+                    note_federation_fallback(peer, resp.status_code)
                 # Fall through to local processing.
     # --- End federation hook ---
 

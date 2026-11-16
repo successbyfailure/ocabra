@@ -48,6 +48,53 @@ federation_hop: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "federation_hop", default=None
 )
 
+# Per-request record of what the federation did with it, filled by
+# ``resolve_federated`` and the proxy helpers and read by the stats collector:
+# which node served it, why (the decision reason), whether a peer failed and we
+# fell back to local, which node sent it to us. A dict created per request by
+# ``FederationHopMiddleware`` (also reachable as ``request.state.federation_info``)
+# so writes from the handler are visible to code running after it.
+federation_request_info: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "federation_request_info", default=None
+)
+
+FORCE_NODE_HEADER = "x-ocabra-node"
+LOCAL_NODE_NAMES = frozenset({"local", "here", "aqui", "aquí", "este"})
+
+
+def note_federation(**fields: Any) -> None:
+    """Record *fields* about the current request's federation handling."""
+    info = federation_request_info.get()
+    if info is not None:
+        info.update({k: v for k, v in fields.items() if v is not None})
+
+
+def note_federation_fallback(peer: Any = None, detail: Any = None) -> None:
+    """A peer was chosen but failed: the request is being served here instead."""
+    note_federation(
+        fallback=True,
+        fallback_peer=getattr(peer, "name", None),
+        fallback_detail=str(detail)[:200] if detail is not None else None,
+    )
+
+
+def _decide(decision: str, reason: str, model_id: str, peer: Any = None, **log: Any) -> None:
+    logger.info(
+        "federation_resolve",
+        decision=decision,
+        reason=reason,
+        model_id=model_id,
+        peer=getattr(peer, "name", None),
+        **log,
+    )
+    note_federation(
+        decision=decision,
+        reason=reason,
+        peer_id=getattr(peer, "peer_id", None),
+        peer_name=getattr(peer, "name", None),
+    )
+
+
 # Maximum consecutive heartbeat failures before marking a peer offline.
 _MAX_FAILURES = 3
 # Maximum backoff interval (seconds) for offline peer retry.
@@ -1332,42 +1379,51 @@ async def resolve_federated(
                 if resolved is not None:
                     resolved["model_id"] = model_id
 
+    # 0. The caller named the node (``X-Ocabra-Node``: a peer name, or
+    # "local"). An explicit choice for this request — comparing nodes from the
+    # Playground — not a routing strategy. A request that came from a peer is
+    # never forwarded again, forced or not.
+    forced = (federation_request_info.get() or {}).get("force_node")
+    if forced and federation_hop.get() is None:
+        if str(forced).strip().lower() in LOCAL_NODE_NAMES:
+            if local_known:
+                _decide("local", "forced_local", model_id)
+                return ("local", None)
+        elif federation_manager is not None:
+            wanted = str(forced).strip().lower()
+            peer = next(
+                (
+                    p
+                    for p in federation_manager.get_online_peers()
+                    if wanted in {p.name.lower(), p.peer_id, str(p.remote_node_id or "").lower()}
+                ),
+                None,
+            )
+            if peer is not None:
+                _decide("remote", "forced", model_id, peer)
+                return ("remote", peer)
+        note_federation(forced_unavailable=str(forced)[:64])
+
     # 1. Loaded locally → let the load balancer pick (it knows the local bias).
     if local_loaded:
         if federation_manager is not None:
             target = federation_manager.select_target(model_id, local_available=True)
             if target != "local" and target is not None:
-                logger.info(
-                    "federation_resolve",
-                    decision="remote",
-                    reason="local_loaded_peer_lower_load",
-                    model_id=model_id,
-                    peer=getattr(target, "name", None),
-                )
+                _decide("remote", "local_loaded_peer_lower_load", model_id, target)
                 return ("remote", target)
-        logger.info(
-            "federation_resolve",
-            decision="local",
-            reason="local_loaded",
-            model_id=model_id,
-        )
+        _decide("local", "local_loaded", model_id)
         return ("local", None)
 
     # 2. Not loaded locally but a peer has it warm → proxy to the peer.
     if remote_peers and federation_manager is not None:
         best_peer = federation_manager.find_best_peer(model_id)
         if best_peer is not None:
-            logger.info(
-                "federation_resolve",
-                decision="remote",
-                reason="local_cold_peer_warm",
-                model_id=model_id,
-                peer=best_peer.name,
-            )
+            _decide("remote", "local_cold_peer_warm", model_id, best_peer)
             return ("remote", best_peer)
 
     # 3. Nobody has it loaded, but it's registered locally → load it locally.
     if local_known:
+        note_federation(decision="local", reason="no_peer_has_model")
         logger.info(
             "federation_resolve",
             decision="local",
@@ -1419,14 +1475,28 @@ class FederationHopMiddleware:
     def __init__(self, app: Any) -> None:
         self.app = app
 
+    _FORCE = FORCE_NODE_HEADER.encode()
+
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope.get("type") == "http":
-            for key, value in scope.get("headers") or ():
-                if key == self._HEADER:
-                    token = federation_hop.set(value.decode("latin-1") or "peer")
-                    try:
-                        await self.app(scope, receive, send)
-                    finally:
-                        federation_hop.reset(token)
-                    return
-        await self.app(scope, receive, send)
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        info: dict[str, Any] = {}
+        hop = None
+        for key, value in scope.get("headers") or ():
+            if key == self._HEADER:
+                hop = value.decode("latin-1") or "peer"
+            elif key == self._FORCE:
+                info["force_node"] = value.decode("latin-1")[:64]
+        if hop is not None:
+            info["inbound_hop"] = hop
+        # Starlette's ``request.state`` is this dict: the collector reads it.
+        scope.setdefault("state", {})["federation_info"] = info
+        info_token = federation_request_info.set(info)
+        hop_token = federation_hop.set(hop) if hop is not None else None
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            if hop_token is not None:
+                federation_hop.reset(hop_token)
+            federation_request_info.reset(info_token)

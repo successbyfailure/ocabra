@@ -169,7 +169,22 @@ def request_live_detail(
         prefill_tps = rate
         prefill_source = source
 
+    # Federation: where it is running, if not here; who sent it, if a peer.
+    fed = getattr(req, "federation_info", None) or {}
+    node = (
+        fed.get("peer_name")
+        if fed.get("decision") == "remote" and not fed.get("fallback")
+        else None
+    )
+    inbound = None
+    username = str(getattr(req, "username", "") or "")
+    if username.startswith("federation:"):
+        inbound = username.split(":", 1)[1] or None
+
     return {
+        "node": node,
+        "inboundFrom": inbound,
+        "route": "fallback_local" if fed.get("fallback") else fed.get("reason"),
         "stage": stage,
         "streaming": streaming,
         "requestKind": getattr(req, "request_kind", None),

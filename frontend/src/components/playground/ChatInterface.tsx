@@ -11,6 +11,7 @@ import {
 import type { PlaygroundParams } from "@/components/playground/ParamsPanel"
 import type { BackendType, ChatAudioFormat, ChatContentPart, ChatRequestMessage } from "@/types"
 
+import { playgroundFetch } from "@/lib/playgroundNode"
 interface ChatInterfaceProps {
   modelId: string
   backendType: BackendType | null
@@ -304,7 +305,7 @@ export function ChatInterface({
             },
       )
 
-      const response = await fetch(useOllama ? "/api/chat" : "/v1/chat/completions", {
+      const response = await playgroundFetch(useOllama ? "/api/chat" : "/v1/chat/completions", {
         method: "POST",
         // Opt into oCabra tool-progress SSE events (event: ocabra.tool_*) so the
         // agent tool cards render. Plain OpenAI clients omit this and get a
@@ -678,7 +679,7 @@ export function ChatInterface({
 async function retryOpenAINonStreaming(requestBody: string): Promise<ResponseContent> {
   const parsedBody = JSON.parse(requestBody) as Record<string, unknown>
   const retryBody = JSON.stringify({ ...parsedBody, stream: false })
-  const response = await fetch("/v1/chat/completions", {
+  const response = await playgroundFetch("/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: retryBody,

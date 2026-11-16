@@ -298,6 +298,9 @@ class ActiveRequest:
     # eternamente en prefill. ``max_output_tokens`` alimenta la estimacion.
     streaming: bool | None = None
     max_output_tokens: int | None = None
+    # The request's federation record (``request.state.federation_info``),
+    # shared by reference: once routing decides, the live view shows the node.
+    federation_info: dict | None = None
     # Primer token visible (contenido o razonamiento) del stream: separa la
     # fase de prefill de la de generacion y es la base del t/s de generacion
     # en vivo. ``None`` mientras no haya llegado o si no hay streaming.
@@ -667,6 +670,7 @@ class ModelManager:
         remote_bound: bool = False,
         streaming: bool | None = None,
         max_output_tokens: int | None = None,
+        federation_info: dict | None = None,
     ) -> str | None:
         """Admission control: mark one request in-flight, or return None when the
         model already has ``max_inflight`` requests running (so the caller can
@@ -711,6 +715,7 @@ class ModelManager:
                 request_kind=request_kind,
                 streaming=streaming,
                 max_output_tokens=max_output_tokens,
+                federation_info=federation_info,
             )
         # Bloque 20 — track start on the estimator so
         # ``in_flight_remaining`` returns useful numbers for the dynamic

@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { toast } from "sonner"
 
+import { playgroundFetch } from "@/lib/playgroundNode"
 interface PoolingInterfaceProps {
   modelId: string
   scoreCapable: boolean
@@ -41,7 +42,7 @@ export function PoolingInterface({
     if (!input.trim()) return
     setRunningPooling(true)
     try {
-      const response = await fetch("/v1/pooling", {
+      const response = await playgroundFetch("/v1/pooling", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -69,7 +70,7 @@ export function PoolingInterface({
     }
     setRunningScore(true)
     try {
-      const response = await fetch("/v1/score", {
+      const response = await playgroundFetch("/v1/score", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -103,7 +104,7 @@ export function PoolingInterface({
     if (!rerankQuery.trim() || documents.length === 0) return
     setRunningRerank(true)
     try {
-      const response = await fetch("/v1/rerank", {
+      const response = await playgroundFetch("/v1/rerank", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -133,7 +134,7 @@ export function PoolingInterface({
     if (!classificationInput.trim()) return
     setRunningClassification(true)
     try {
-      const response = await fetch("/v1/classify", {
+      const response = await playgroundFetch("/v1/classify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

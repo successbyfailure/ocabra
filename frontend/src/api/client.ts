@@ -1099,7 +1099,7 @@ function toOpenAITTSVoiceMapEntry(raw: unknown): OpenAITTSVoiceMapEntry {
   };
 }
 
-function toModelState(raw: unknown): ModelState {
+export function toModelState(raw: unknown): ModelState {
   const data = isRecord(raw) ? raw : {};
   const schedulesRaw = data.schedules;
   const schedules = Array.isArray(schedulesRaw)
@@ -1177,12 +1177,24 @@ function toModelState(raw: unknown): ModelState {
       ? data.profiles.map(toModelProfile)
       : undefined,
     federation: (() => {
+      // The backend sends {local, remote, nodes: [{node_name, node_id, loaded}]};
+      // this used to require a ``remote`` key it never sent, so the
+      // "federated model" badge never showed.
       const fed = isRecord(data.federation) ? data.federation : null;
-      if (!fed || !fed.remote) return null;
+      if (!fed) return null;
+      const nodes = Array.isArray(fed.nodes) ? fed.nodes.filter(isRecord) : [];
+      const loadedOn = nodes
+        .filter((n) => n.loaded !== false)
+        .map((n) => (n.node_name === "local" ? "aquí" : String(n.node_name ?? n.node_id ?? "")))
+        .filter(Boolean);
+      const remote = fed.remote === true || fed.local === false;
+      const first = nodes.find((n) => n.node_name !== "local");
+      if (!remote && !loadedOn.some((n) => n !== "aquí")) return null;
       return {
-        remote: Boolean(fed.remote),
-        nodeName: String(fed.node_name ?? fed.nodeName ?? ""),
-        nodeId: String(fed.node_id ?? fed.nodeId ?? ""),
+        remote,
+        nodeName: String(first?.node_name ?? ""),
+        nodeId: String(first?.node_id ?? ""),
+        loadedOn,
       };
     })(),
     releaseDate: (data.release_date ?? data.releaseDate ?? null) as

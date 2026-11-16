@@ -3,6 +3,7 @@ import { Mic, Square, Upload } from "lucide-react"
 import { toast } from "sonner"
 import type { PlaygroundParams } from "@/components/playground/ParamsPanel"
 
+import { playgroundFetch } from "@/lib/playgroundNode"
 interface AudioInterfaceProps {
   modelId: string
   params: PlaygroundParams
@@ -107,7 +108,7 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
   useEffect(() => {
     if (!modelId || !canTTS) return
     setVoiceInfo(null)
-    fetch(`/v1/audio/voices?model=${encodeURIComponent(modelId)}`)
+    playgroundFetch(`/v1/audio/voices?model=${encodeURIComponent(modelId)}`)
       .then((r) => r.json())
       .then((data: VoiceInfo) => {
         setVoiceInfo(data)
@@ -160,7 +161,7 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
       form.append("response_format", params.responseFormat)
       form.append("temperature", String(params.temperature))
 
-      const response = await fetch("/v1/audio/transcriptions", { method: "POST", body: form })
+      const response = await playgroundFetch("/v1/audio/transcriptions", { method: "POST", body: form })
       if (!response.ok) {
         const err = await response.json().catch(() => ({}))
         const msg = err?.error?.message ?? err?.detail?.error?.message ?? (typeof err?.detail === "string" ? err.detail : null) ?? `HTTP ${response.status}`
@@ -249,7 +250,7 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
         if (instruct.trim()) body.instruct = instruct.trim()
       }
 
-      const response = await fetch("/v1/audio/speech", {
+      const response = await playgroundFetch("/v1/audio/speech", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

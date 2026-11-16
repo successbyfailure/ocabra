@@ -22,6 +22,7 @@ import { ModelSelector } from "@/components/playground/ModelSelector"
 import { ParamsPanel, type PlaygroundParams } from "@/components/playground/ParamsPanel"
 import { PoolingInterface } from "@/components/playground/PoolingInterface"
 import { RealtimeInterface } from "@/components/playground/RealtimeInterface"
+import { NodeSelector } from "@/components/playground/NodeSelector"
 import type { ModelState } from "@/types"
 
 type TaskTab = "text" | "image" | "audio" | "embeddings" | "realtime"
@@ -254,6 +255,7 @@ export function Playground() {
                     agents={activeTab === "text" ? agents : []}
                   />
                 </div>
+                <NodeSelector />
                 {activeTab === "text" && (
                   <button
                     type="button"

@@ -298,12 +298,21 @@ export function ModelCard({ logical, deploymentId, states, live, gpus, nowMs, bu
               Mantenimiento
             </span>
           )}
-          {model?.federation?.remote && (
-            <span className="inline-flex items-center gap-1 rounded-md bg-sky-500/15 px-1.5 py-0.5 text-sky-200" title="Modelo federado">
+          {model?.federation && (model.federation.loadedOn?.length || model.federation.remote) ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-md bg-sky-500/15 px-1.5 py-0.5 text-sky-700 dark:text-sky-200"
+              title={
+                model.federation.remote
+                  ? "Modelo de otro nodo de la federación: las peticiones van allí"
+                  : "Nodos de la federación donde está cargado ahora mismo"
+              }
+            >
               <Globe size={11} />
-              {model.federation.nodeName || model.federation.nodeId}
+              {model.federation.loadedOn?.length
+                ? `cargado en ${model.federation.loadedOn.join(", ")}`
+                : model.federation.nodeName || model.federation.nodeId}
             </span>
-          )}
+          ) : null}
           {disk && (
             <span className="inline-flex items-center gap-1" title="Tamaño en disco">
               <HardDrive size={11} />

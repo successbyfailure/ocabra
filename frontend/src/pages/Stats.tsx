@@ -458,7 +458,8 @@ export function Stats() {
     [modelId, range.from, range.to],
   )
 
-  const hasFederation = federationStats.localCount + federationStats.remoteCount > 0
+  const hasFederation =
+    federationStats.remoteCount + (federationStats.inboundCount ?? 0) + (federationStats.fallbackCount ?? 0) > 0
 
   useEffect(() => {
     let active = true

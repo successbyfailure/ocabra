@@ -552,6 +552,7 @@ def test_stats_middleware_returns_504_and_releases_canonical_worker() -> None:
         # /v1 sin "stream" en el cuerpo: OpenAI responde de una vez.
         streaming=False,
         max_output_tokens=None,
+        federation_info=None,
     )
     model_manager.end_request.assert_called_once_with(
         "ollama/gemma:12b",

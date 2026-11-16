@@ -30,6 +30,8 @@ import structlog
 from fastapi import Request
 from fastapi.responses import Response
 
+from ocabra.core.federation import note_federation_fallback
+
 # Sentinel — when an endpoint wants the helper to return a plain dict instead
 # of a Response (e.g. so it can post-process with json.loads), it can opt out
 # by passing ``return_raw=True``. Default is the safer Response wrap.
@@ -203,6 +205,7 @@ async def try_proxy_json(
             error_type=type(exc).__name__,
         )
         request.state.federation_remote_node_id = None
+        note_federation_fallback(peer, exc)
         return None
 
     if resp.status_code < 400 or not should_fallback_to_local(resp.status_code):
@@ -263,6 +266,7 @@ async def try_proxy_json(
         body_preview=resp.text[:200],
     )
     request.state.federation_remote_node_id = None
+    note_federation_fallback(peer, resp.status_code)
     return None
 
 
@@ -328,6 +332,7 @@ async def try_proxy_multipart(
             error_type=type(exc).__name__,
         )
         request.state.federation_remote_node_id = None
+        note_federation_fallback(peer, exc)
         return None
 
     if resp.status_code < 400 or not should_fallback_to_local(resp.status_code):
@@ -341,4 +346,5 @@ async def try_proxy_multipart(
         body_preview=resp.text[:200],
     )
     request.state.federation_remote_node_id = None
+    note_federation_fallback(peer, resp.status_code)
     return None

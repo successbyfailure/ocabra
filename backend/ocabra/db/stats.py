@@ -82,6 +82,13 @@ class RequestStat(Base):
     user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # Node ID of the remote peer when the request was proxied via federation.
     remote_node_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Its name at the time (kept after the peer is deleted).
+    remote_node_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Name of the peer that sent us this request (served here for another node).
+    federation_inbound_from: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Why it went where it did: the federation decision reason, ``forced`` /
+    # ``forced_local`` (X-Ocabra-Node), or ``fallback_local`` (peer failed).
+    federation_route: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Agent that originated this request (NULL for non-agent traffic).
     # Set on both the root request and every intermediate hop.
     agent_id: Mapped[uuid.UUID | None] = mapped_column(

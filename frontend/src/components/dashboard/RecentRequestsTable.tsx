@@ -6,6 +6,7 @@ import { BackendIcon } from "./BackendIcon"
 import { fmtClock, fmtContext, fmtDuration, fmtRealtime, fmtTokens, fmtTps } from "./format"
 import { useGpuStore } from "@/stores/gpuStore"
 import { GpuBadge } from "./GpuBadge"
+import { NodeBadge } from "./NodeBadge"
 import { RequestKindBadge } from "./RequestKindBadge"
 import { CacheCell, PhaseLegend, prefillSpeedText, TimingBreakdown } from "./RequestBreakdown"
 
@@ -124,6 +125,7 @@ function Row({ r, error }: { r: RecentRequest; error: boolean }) {
         </td>
         <td className="px-3 py-2">
           <RequestKindBadge kind={r.requestKind ?? r.backendType} />
+          <NodeBadge node={r.node} inboundFrom={r.inboundFrom} route={r.route} />
         </td>
         <td className="px-3 py-2">
           <div className={r.username ? "text-muted-foreground" : "italic text-muted-foreground/60"}>{r.username ?? "anónimo"}</div>

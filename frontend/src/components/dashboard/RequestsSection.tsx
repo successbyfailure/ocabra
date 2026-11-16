@@ -10,6 +10,7 @@ import type {
 import { BackendIcon } from "./BackendIcon"
 import { GpuBadge } from "./GpuBadge"
 import { STAGE_META, VISUAL, audioProgressText, fmtClock, fmtDuration, fmtRealtime, fmtTokens, fmtTps } from "./format"
+import { NodeBadge } from "./NodeBadge"
 import { RequestKindBadge } from "./RequestKindBadge"
 
 const ACTIVE_STAGES = new Set(["prefill", "generating", "processing"])
@@ -91,6 +92,7 @@ function ActiveRow({ row }: { row: Row }) {
           <span className={`h-2 w-2 shrink-0 rounded-full ${visual.anim}`} style={{ background: visual.color }} />
           <Who username={req.username} apiKeyName={req.apiKeyName} />
           <RequestKindBadge kind={req.requestKind} />
+          <NodeBadge node={req.node} inboundFrom={req.inboundFrom} route={req.route} />
         </span>
         <span className={`shrink-0 font-medium ${visual.text}`}>
           {req.stalled
@@ -192,6 +194,7 @@ function WaitingRow({ row }: { row: Row }) {
           <span className={`h-2 w-2 shrink-0 rounded-full ${visual.anim}`} style={{ background: visual.color }} />
           <Who username={req.username} apiKeyName={req.apiKeyName} />
           <RequestKindBadge kind={req.requestKind} />
+          <NodeBadge node={req.node} inboundFrom={req.inboundFrom} route={req.route} />
         </span>
         <span className={`truncate text-right font-medium ${reason.cls}`}>{reason.text}</span>
       </div>
@@ -238,6 +241,7 @@ function FinishedRow({ item, models }: { item: FinishedRequest; models: Record<s
       </span>
       <Who username={item.username} apiKeyName={item.apiKeyName} />
       <RequestKindBadge kind={item.requestKind} />
+      <NodeBadge node={item.node} inboundFrom={item.inboundFrom} route={item.route} />
       <span className="truncate text-muted-foreground">{model?.displayName ?? item.model}</span>
       {item.inputTokens != null && (
         <Stat

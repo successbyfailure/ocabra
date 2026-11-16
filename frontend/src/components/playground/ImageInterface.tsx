@@ -12,6 +12,7 @@ import {
 import { toast } from "sonner"
 import type { PlaygroundParams } from "@/components/playground/ParamsPanel"
 
+import { playgroundFetch } from "@/lib/playgroundNode"
 type Mode = "generate" | "edit"
 
 interface ImageResult {
@@ -234,7 +235,7 @@ export function ImageInterface({
     try {
       let response: Response
       if (mode === "generate") {
-        response = await fetch("/v1/images/generations", {
+        response = await playgroundFetch("/v1/images/generations", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -269,7 +270,7 @@ export function ImageInterface({
           }
         }
         if (maskFile) fd.append("mask", maskFile, maskFile.name)
-        response = await fetch("/v1/images/edits", { method: "POST", body: fd })
+        response = await playgroundFetch("/v1/images/edits", { method: "POST", body: fd })
       }
 
       if (!response.ok) {
