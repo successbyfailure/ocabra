@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.84.2 — 2026-11-16
+
+### Correcciones
+
+- **Los nodos sin Ollama pueden instalar modelos de Ollama.** Una descarga con
+  `source: "ollama"` en un servidor sin el servicio de Ollama (como los nodos
+  en la nube) fallaba; ahora oCabra baja la etiqueta directamente del registro
+  de Ollama, comprobando cada fichero, y el modelo funciona igual (con su
+  proyector de visión y su capa de borrador si la etiqueta los trae).
+
+---
+
 ## 0.84.1 — 2026-11-16
 
 ### Correcciones

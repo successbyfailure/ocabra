@@ -340,6 +340,99 @@ class OllamaRegistry:
         model_ref: str,
         progress_callback: Callable[[float, float | None], None],
     ) -> Path:
+        try:
+            return await self._pull_via_daemon(model_ref, progress_callback)
+        except httpx.ConnectError as exc:
+            # No Ollama daemon here (the ocabra-node image on a rented GPU has
+            # none): fetch the tag from the registry ourselves, into the same
+            # store layout, so everything that reads Ollama tags still works.
+            logger.warning(
+                "ollama daemon unreachable (%s); pulling %s straight from the registry",
+                exc,
+                model_ref,
+            )
+            return await self.pull_from_registry(model_ref, progress_callback)
+
+    async def pull_from_registry(
+        self,
+        model_ref: str,
+        progress_callback: Callable[[float, float | None], None],
+        *,
+        root: str | Path | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> Path:
+        """Download an Ollama tag without the daemon (OCI registry protocol).
+
+        Writes ``<root>/manifests/<host>/<ns>/<name>/<tag>`` and
+        ``<root>/blobs/sha256-<hex>`` exactly like ``ollama pull`` does, checking
+        each blob's sha256. Blobs already present are skipped.
+        """
+        import hashlib
+
+        from ocabra.core.artifacts import ollama_manifest_relpath, ollama_root
+
+        store = Path(root or ollama_root())
+        relpath = ollama_manifest_relpath(model_ref)
+        host, _, rest = relpath.partition("/")
+        repo, _, tag = rest.rpartition("/")
+        base = f"https://{host}/v2/{repo}"
+        accept = (
+            "application/vnd.docker.distribution.manifest.v2+json, "
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        started = time.monotonic()
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0, read=300.0), follow_redirects=True, transport=transport
+        ) as client:
+            resp = await client.get(f"{base}/manifests/{tag}", headers={"Accept": accept})
+            if resp.status_code == 404:
+                raise RuntimeError(f"Ollama tag not found in the registry: {model_ref}")
+            resp.raise_for_status()
+            manifest_raw = resp.content
+            manifest = json.loads(manifest_raw)
+            blobs = [*(manifest.get("layers") or []), manifest.get("config") or {}]
+            blobs = [b for b in blobs if b.get("digest")]
+            total = float(sum(int(b.get("size") or 0) for b in blobs)) or 1.0
+            done = 0.0
+            (store / "blobs").mkdir(parents=True, exist_ok=True)
+            for blob in blobs:
+                digest = str(blob["digest"])
+                algo, _, hexdigest = digest.partition(":")
+                if algo != "sha256" or not re.fullmatch(r"[0-9a-f]{64}", hexdigest):
+                    raise RuntimeError(f"unexpected blob digest {digest!r}")
+                target = store / "blobs" / f"sha256-{hexdigest}"
+                if target.exists() and target.stat().st_size == int(blob.get("size") or -1):
+                    done += float(blob.get("size") or 0)
+                    continue
+                partial = target.with_name(target.name + ".partial")
+                hasher = hashlib.sha256()
+                async with client.stream("GET", f"{base}/blobs/{digest}") as r:
+                    r.raise_for_status()
+                    with partial.open("wb") as fh:
+                        async for chunk in r.aiter_bytes(1024 * 1024):
+                            fh.write(chunk)
+                            hasher.update(chunk)
+                            done += len(chunk)
+                            elapsed = max(time.monotonic() - started, 1e-6)
+                            progress_callback(
+                                min(99.9, done / total * 100.0), done / (1024 * 1024) / elapsed
+                            )
+                if hasher.hexdigest() != hexdigest:
+                    partial.unlink(missing_ok=True)
+                    raise RuntimeError(f"sha256 mismatch for {digest} of {model_ref}")
+                partial.replace(target)
+        manifest_path = store / "manifests" / relpath
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_bytes(manifest_raw)
+        progress_callback(100.0, None)
+        logger.info("ollama tag %s pulled from the registry into %s", model_ref, store)
+        return Path(settings.models_dir) / "ollama" / model_ref.replace(":", "_")
+
+    async def _pull_via_daemon(
+        self,
+        model_ref: str,
+        progress_callback: Callable[[float, float | None], None],
+    ) -> Path:
         started = time.monotonic()
         last_pct = 0.0
         saw_success = False
