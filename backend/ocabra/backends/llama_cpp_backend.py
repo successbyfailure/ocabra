@@ -57,6 +57,10 @@ class _LlamaCppWorker:
     log_file: Any  # open file handle, stdout/stderr target — see load()
 
 
+#: Per-GPU CUDA context that llama-fit-params leaves out of its projection.
+_CUDA_CONTEXT_MB = 150
+
+
 def _compose_visible_devices(
     preferred_gpu: list[int],
     disabled_gpus: list[int] | None,
@@ -354,6 +358,7 @@ class LlamaCppBackend(BackendInterface):
             str(model_file),
             visible,
             llama_fit.args_from_options(str(model_file), options),
+            options.get("tensor_split"),
         )
         if projection is None:
             return None
@@ -364,7 +369,14 @@ class LlamaCppBackend(BackendInterface):
         speculative = options.get("speculative")
         if isinstance(speculative, dict) and speculative.get("spec_type") and main is not None:
             slots = int(options.get("parallel_slots") or 1)
-            extras["draft"] = int(vp.mtp_draft_overhead_mb(slots))
+            # The table only has 1-3 slots measured; its per-slot fallback fell
+            # ~1.1 GB short for qwen3.8 with 4 slots (projection 22.2 GB at 115k
+            # vs 23.4 GB measured by its probe, 2026-11-16). Calibrated from
+            # that one point; a context probe refines it per model.
+            draft = vp.mtp_draft_overhead_mb(slots)
+            if slots > 3:
+                draft *= 1.5
+            extras["draft"] = int(draft)
             draft_id = speculative.get("draft_model_id")
             draft_path = self._resolve_draft_model_path(str(draft_id)) if draft_id else None
             if draft_path is not None and not speculative.get("draft_cpu_moe"):
@@ -384,6 +396,11 @@ class LlamaCppBackend(BackendInterface):
                 pass
         if main is not None and extras:
             breakdown.setdefault(main, {}).update(extras)
+        # nvidia-smi counts each process's CUDA context, llama-fit-params does
+        # not: ~150 MB per GPU, from gemma4:26b (projection 3755 vs 3752 measured
+        # once the unified-pool saving is accounted) and qwen3.8 (23422 vs 23448).
+        for gpu in breakdown:
+            breakdown[gpu]["cuda"] = _CUDA_CONTEXT_MB
         return {
             "source": "llama_fit",
             "vram_by_gpu": {g: sum(p.values()) for g, p in breakdown.items()},

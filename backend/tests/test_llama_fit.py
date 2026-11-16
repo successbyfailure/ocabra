@@ -148,3 +148,11 @@ def test_la_vista_previa_traduce_las_partes_y_da_la_ram():
     assert est["model_loading_memory_mb"] == 3755 and est["host_ram_mb"] == 14583
     assert est["source"] == "llama_fit" and est["fits_current_gpu"] is True
     assert est["formula"]["model_loading_memory_mb"] == 4371
+
+
+def test_modo_tensor_imprime_meta_y_se_reparte_por_proporcion():
+    p = llama_fit.parse_output("Meta() 16000 1600 400\nHost 680 0 48\n", [1, 0], [3.0, 1.0])
+    assert p.gpus[1] == {"model": 12000, "context": 1200, "compute": 300}
+    assert p.gpus[0] == {"model": 4000, "context": 400, "compute": 100}
+    sin_proporcion = llama_fit.parse_output("Meta() 1000 0 0\n", [0, 1])
+    assert sin_proporcion.vram_by_gpu == {0: 500, 1: 500}

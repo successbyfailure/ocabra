@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.94.1 — 2026-11-16
+
+### Correcciones
+
+- **La estimación de memoria de llama.cpp cuenta bien los modelos repartidos
+  en modo `tensor` y los que usan decodificación especulativa MTP.** En la
+  0.94.0 un modelo en modo `tensor` (como `qwen3.8:27b`) se estimaba muy por
+  debajo de lo real, y a los MTP les faltaba ~1 GB. Contrastado con cargas
+  reales: `qwen3.8:27b` proyecta 23,4 GB a 115k y ocupa 23,4; `gemma4:26b` con
+  los expertos en RAM proyecta 3,9 GB y ocupa 3,75.
+
+---
+
 ## 0.94.0 — 2026-11-16
 
 ### Correcciones

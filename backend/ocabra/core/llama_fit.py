@@ -127,7 +127,9 @@ def build_args(
     return args
 
 
-def parse_output(stdout: str, gpu_indices: list[int]) -> FitProjection | None:
+def parse_output(
+    stdout: str, gpu_indices: list[int], ratios: list[float] | None = None
+) -> FitProjection | None:
     """Parse ``<device> <model> <context> <compute>`` lines (MiB).
 
     ``CUDA<k>`` is the k-th *visible* device, mapped back to ``gpu_indices``;
@@ -147,6 +149,20 @@ def parse_output(stdout: str, gpu_indices: list[int]) -> FitProjection | None:
         values = {"model": model, "context": context, "compute": compute}
         if name.lower() in {"host", "cpu"}:
             host = values
+        elif name.lower().startswith("meta") and gpu_indices:
+            # ``--split-mode tensor`` groups the GPUs into one virtual device
+            # printed as ``Meta()``: split it back by the tensor ratios (even
+            # without them). Before this, a qwen3.8 projection lost its 17 GB.
+            weights = (
+                [max(0.0, float(r)) for r in ratios]
+                if ratios and len(ratios) == len(gpu_indices) and sum(ratios) > 0
+                else [1.0] * len(gpu_indices)
+            )
+            total = sum(weights)
+            for gpu, weight in zip(gpu_indices, weights, strict=True):
+                share = {k: int(v * weight / total) for k, v in values.items()}
+                previous = gpus.get(int(gpu), {})
+                gpus[int(gpu)] = {k: previous.get(k, 0) + share[k] for k in share}
         elif name.upper().startswith("CUDA"):
             try:
                 ordinal = int(name[4:])
@@ -164,6 +180,7 @@ async def project(
     model_file: str,
     gpu_indices: list[int],
     args: list[str],
+    ratios: list[float] | None = None,
 ) -> FitProjection | None:
     """Run the projection (cached per file, devices and arguments).
 
@@ -208,7 +225,7 @@ async def project(
                 logger.warning("llama_fit_timeout", model_file=model_file)
                 stdout, stderr = b"", b""
             if proc.returncode == 0:
-                result = parse_output(stdout.decode(errors="replace"), list(gpu_indices))
+                result = parse_output(stdout.decode(errors="replace"), list(gpu_indices), ratios)
             else:
                 logger.info(
                     "llama_fit_failed",

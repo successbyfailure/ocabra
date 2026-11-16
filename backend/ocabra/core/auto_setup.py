@@ -176,7 +176,7 @@ class _Projector:
         section.pop("disabled_gpus", None)
         section.pop("main_gpu", None)
         section.update({k: v for k, v in overrides.items() if v is not None})
-        for key in ("n_cpu_moe", "tensor_split", "gpu_layers"):
+        for key in ("n_cpu_moe", "tensor_split", "gpu_layers", "split_mode"):
             if key in overrides and overrides[key] is None:
                 section.pop(key, None)
         extra["llama_cpp"] = section
@@ -221,11 +221,13 @@ async def _max_context(
     return best, best_proj
 
 
-def _split(gpus: list[int], budgets: dict[int, int]) -> dict[str, Any]:
+def _split(gpus: list[int], budgets: dict[int, int], mode: str = "layer") -> dict[str, Any]:
+    """Multi-GPU split: ``mode`` comes from the model's base config (qwen3.8
+    keeps ``tensor``, +9 % prefill with P2P/NCCL), else ``layer``."""
     if len(gpus) < 2:
         return {"split_mode": None, "tensor_split": None}
     return {
-        "split_mode": "layer",
+        "split_mode": mode,
         "tensor_split": [float(max(1, budgets.get(g, 1))) for g in gpus],
     }
 
@@ -239,9 +241,10 @@ async def _fit_on(
     layers: int,
     moe: bool,
     allow_cpu: bool,
+    mode: str = "layer",
 ) -> tuple[int, dict[str, Any], dict | None]:
     """``(context, placement, projection)`` for ``gpus``; context 0 = no fit."""
-    base = {"parallel_slots": DEFAULT_PARALLEL, **_split(gpus, budgets)}
+    base = {"parallel_slots": DEFAULT_PARALLEL, **_split(gpus, budgets, mode)}
     full = {**base, "gpu_layers": 999, "n_cpu_moe": None}
     ctx, proj = await _max_context(project, gpus, full, budgets, native)
     if ctx or not allow_cpu or layers <= 0:
@@ -344,6 +347,8 @@ async def _plan_setup(
     project = _Projector(backend, state)
 
     section = materialized_extra(state).get("llama_cpp") or {}
+    base_mode = str(section.get("split_mode") or "")
+    mode = base_mode if base_mode in {"layer", "row", "tensor"} else "layer"
     model_file = section.get("model_path")
     arch = vp.arch_from_gguf(model_file) if model_file else None
     layers = int(getattr(arch, "layers", 0) or 0)
@@ -374,7 +379,7 @@ async def _plan_setup(
     all_gpus = [b.index for b in budgets_list]
 
     single_ctx, single_place, single_proj = await _fit_on(
-        project, [big], budgets, native, layers=layers, moe=moe, allow_cpu=False
+        project, [big], budgets, native, layers=layers, moe=moe, allow_cpu=False, mode=mode
     )
     if single_ctx:
         plan.rungs.append(
@@ -390,17 +395,24 @@ async def _plan_setup(
         )
         if len(all_gpus) > 1 and single_ctx < native:
             ctx, place, proj = await _fit_on(
-                project, all_gpus, budgets, native, layers=layers, moe=moe, allow_cpu=False
+                project,
+                all_gpus,
+                budgets,
+                native,
+                layers=layers,
+                moe=moe,
+                allow_cpu=False,
+                mode=mode,
             )
             if ctx > single_ctx:
-                overrides = {"parallel_slots": DEFAULT_PARALLEL, **_split(all_gpus, budgets)}
+                overrides = {"parallel_slots": DEFAULT_PARALLEL, **_split(all_gpus, budgets, mode)}
                 plan.rungs.append(
                     Rung(
                         key="extended",
                         label=f"Dual · {ctx // 1024}k",
                         gpus=all_gpus,
                         context=ctx,
-                        placement={**place, **_split(all_gpus, budgets)},
+                        placement={**place, **_split(all_gpus, budgets, mode)},
                         vram_by_gpu=dict((proj or {}).get("vram_by_gpu") or {}),
                         host_mb=int((proj or {}).get("host_mb") or 0),
                         probe=await _probe_from_projection(
@@ -412,7 +424,7 @@ async def _plan_setup(
 
     # It does not fit on one GPU by itself: all selected GPUs, then the CPU.
     ctx, place, proj = await _fit_on(
-        project, all_gpus, budgets, native, layers=layers, moe=moe, allow_cpu=allow_cpu
+        project, all_gpus, budgets, native, layers=layers, moe=moe, allow_cpu=allow_cpu, mode=mode
     )
     if not ctx:
         plan.needs_cpu = not allow_cpu
@@ -430,12 +442,12 @@ async def _plan_setup(
             )
         return plan
     multi = len(all_gpus) > 1
-    placement = {**place, **(_split(all_gpus, budgets) if multi else {})}
+    placement = {**place, **(_split(all_gpus, budgets, mode) if multi else {})}
     in_ram = place.get("n_cpu_moe") or (place.get("gpu_layers") is not None)
     label = ("Dual" if multi else budgets_list[0].name.split()[-1]) + f" · {ctx // 1024}k"
     if in_ram:
         label += " · RAM"
-    overrides = {"parallel_slots": DEFAULT_PARALLEL, **_split(all_gpus, budgets)}
+    overrides = {"parallel_slots": DEFAULT_PARALLEL, **_split(all_gpus, budgets, mode)}
     plan.rungs.append(
         Rung(
             key="normal",

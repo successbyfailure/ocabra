@@ -2055,7 +2055,7 @@ async def auto_setup_model(
     }
 
 
-_FIT_PART_KEYS = {"model": "weights", "context": "kv", "compute": "overhead"}
+_FIT_PART_KEYS = {"model": "weights", "context": "kv", "compute": "overhead", "cuda": "overhead"}
 
 
 def _apply_fit_projection(
