@@ -36,7 +36,8 @@ RUN BACKEND_DIR=/out SRC_DIR=/src BIN_DIR=/out/bin \
     LLAMA_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
     bash /tmp/install_llama_cpp.sh \
     # Self-contained bin/: look for the sibling .so files, not the build tree.
-    && for f in /out/bin/llama-server /out/bin/*.so*; do \
+    && for f in /out/bin/llama-server /out/bin/llama-fit-params /out/bin/*.so*; do \
+           [ -f "$f" ] || continue; \
            patchelf --set-rpath '$ORIGIN' "$f"; \
        done \
     && rm -rf /out/bin/llama-bench
@@ -45,7 +46,7 @@ RUN BACKEND_DIR=/out SRC_DIR=/src BIN_DIR=/out/bin \
 # looks in the build tree, where the links exist. Separate step so the
 # (long) compile above stays cached.
 RUN cp -a /src/build/bin/*.so* /out/bin/ \
-    && find /out/bin -maxdepth 1 -type f \( -name 'llama-server' -o -name '*.so*' \) \
+    && find /out/bin -maxdepth 1 -type f \( -name 'llama-server' -o -name 'llama-fit-params' -o -name '*.so*' \) \
            -exec patchelf --set-rpath '$ORIGIN' {} \; \
     && ls -la /out/bin
 
@@ -111,7 +112,7 @@ open("/data/backends/llamacpp_mks/metadata.json", "w").write(json.dumps(meta, in
 PY
 # Every library must resolve except libcuda (the driver, injected at run time).
 RUN chmod +x /app/docker-entrypoint.sh /app/node-entrypoint.sh \
-    && missing="$(ldd /data/backends/llamacpp_mks/bin/llama-server | grep 'not found' | grep -v libcuda.so.1 || true)" \
+    && missing="$(for b in llama-server llama-fit-params; do f=/data/backends/llamacpp_mks/bin/$b; [ -f "$f" ] && ldd "$f"; done | grep 'not found' | grep -v libcuda.so.1 || true)" \
     && if [ -n "$missing" ]; then echo "unresolved libraries:"; echo "$missing"; exit 1; fi
 
 # Without these the NVIDIA runtime of hosts that read them from the image
