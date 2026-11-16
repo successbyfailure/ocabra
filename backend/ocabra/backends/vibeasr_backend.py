@@ -53,8 +53,6 @@ class VibeAsrBackend(BackendInterface):
         """Native build of microsoft/VibeASR.cpp (asr_stream_server) + a small
         FastAPI worker (core runtime) that wraps its stdin/stdout protocol."""
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-vibeasr",
-            oci_tags={"cpu": "latest-cpu", "cuda12": "latest-cuda12"},
             apt_packages=["build-essential", "cmake", "git", "ca-certificates", "ffmpeg"],
             git_repo="https://github.com/microsoft/VibeASR.cpp.git",
             git_ref="main",

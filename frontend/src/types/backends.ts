@@ -9,7 +9,7 @@ export type BackendInstallStatus =
   | "error"
   | "built-in"
 
-export type BackendInstallMethod = "oci" | "source"
+export type BackendInstallMethod = "auto" | "oci" | "source"
 
 export type BackendInstallSource = "oci" | "source" | "built-in" | null
 
@@ -30,4 +30,27 @@ export interface BackendModuleState {
   installDetail: string | null
   error: string | null
   alwaysAvailable: boolean
+  /** Prebuilt installs: image and digest it came from. */
+  ociRef: string | null
+  ociDigest: string | null
+  /** Installed versions of the packages the spec names. */
+  packages: Record<string, string>
+  declaredPackages: string[]
+  gitRef: string | null
+}
+
+/** What the OCI repository publishes for a backend. */
+export interface BackendPublished {
+  ref: string
+  digest: string
+  sizeBytes: number
+  version: string | null
+  packages: Record<string, string>
+  gpuArchs: string | null
+  created: string | null
+}
+
+export interface BackendPublishedInfo {
+  published: BackendPublished | null
+  updateAvailable: boolean
 }

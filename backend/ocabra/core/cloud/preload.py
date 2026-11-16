@@ -293,6 +293,39 @@ async def validate_models(session_factory: Any, model_ids: list[str]) -> None:
         await asyncio.to_thread(plan_replication, row, None)
 
 
+async def required_cuda(session_factory: Any, model_ids: list[str]) -> str | None:
+    """Newest CUDA the prebuilt backends these models need are built for.
+
+    The node installs backends prebuilt when published, with production's
+    exact versions — our torch is a CUDA 13 build, which a host whose driver
+    stops at 12.8 can't run. Best effort: ``None`` if nothing needs it or the
+    registry can't be asked.
+    """
+    from ocabra.config import settings
+    from ocabra.core.oci_registry import cuda_tuple, inspect_backend
+
+    if not model_ids or not settings.backend_oci_repository:
+        return None
+    rows = await load_model_rows(session_factory, model_ids)
+    backends: set[str] = set()
+    for row in rows.values():
+        try:
+            plan = await asyncio.to_thread(plan_replication, row, None)
+        except CloudError:
+            continue
+        backends |= {s["backend"] for s in plan["steps"] if s["kind"] == "backend"}
+    best: str | None = None
+    for backend in sorted(backends):
+        try:
+            found = await inspect_backend(settings.backend_oci_repository, backend)
+        except Exception:  # noqa: BLE001 — the node falls back to source anyway
+            continue
+        need = found.labels.get("org.ocabra.backend.cuda") if found else None
+        if need and (best is None or cuda_tuple(need) > cuda_tuple(best)):
+            best = need
+    return best
+
+
 def _node_gpu_total(peer: Any) -> int | None:
     gpus = getattr(peer, "gpus", None) or []
     totals = [int(g.get("total_vram_mb") or 0) for g in gpus if isinstance(g, dict)]
@@ -336,7 +369,7 @@ async def _start_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) -
             peer,
             "POST",
             f"/ocabra/backends/{backend}/install",
-            b'{"method": "source"}',
+            b'{"method": "auto"}',
             {"content-type": "application/json"},
         )
         try:

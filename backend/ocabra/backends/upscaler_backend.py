@@ -47,8 +47,6 @@ class UpscalerBackend(BackendInterface):
     @property
     def install_spec(self) -> BackendInstallSpec:
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-upscaler",
-            oci_tags={"cuda12": "latest-cuda12"},
             pip_packages=[
                 "torch>=2.5",
                 "numpy",

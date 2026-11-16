@@ -16,6 +16,34 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.88.0 — 2026-11-16
+
+### Novedades
+
+- **Backends precompilados.** `POST /ocabra/backends/{tipo}/install` con
+  `"method": "oci"` ya funciona (antes respondía 501): descarga el backend
+  publicado en el repositorio OCI (`ghcr.io/successbyfailure/ocabra-backends`,
+  una etiqueta por backend), con **exactamente las versiones** del servidor
+  que lo publicó, sin pip ni compilar. Los nativos (llama.cpp, whisper.cpp) se
+  publican compilados para todas las GPUs recientes y CPUs x86-64 con AVX2, y
+  llevan su propio runtime de CUDA (basta el driver ≥ 12.8).
+- `"method": "auto"` es ahora **el valor por defecto**: precompilado si está
+  publicado, desde el código si no (o si la descarga falla). **Acción:** si
+  dependías de que sin `method` se instalara desde el código, manda
+  `"method": "source"`.
+- **Actualizar un backend:** instalarlo encima de uno instalado lo actualiza
+  (se descarga al lado y se intercambian las carpetas; si falla, queda el
+  anterior). Responde 409 mientras haya modelos de ese backend cargados.
+- `GET /ocabra/backends/{tipo}/published`: qué hay publicado (referencia,
+  digest, tamaño, versiones de los paquetes clave, arquitecturas de GPU) y
+  `update_available`.
+- El estado de cada backend (`GET /ocabra/backends`) trae `oci_ref`,
+  `oci_digest`, `packages` (versiones instaladas de los paquetes que declara),
+  `declared_packages` y `git_ref`, para comparar lo declarado con lo instalado.
+- Los nodos en la nube instalan los backends que necesitan con `auto`.
+
+---
+
 ## 0.87.3 — 2026-11-16
 
 ### Correcciones

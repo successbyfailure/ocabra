@@ -1,0 +1,132 @@
+# Prebuilt native backends (llama.cpp, llama.cpp-mks, whisper.cpp) for any box.
+#
+# What production installs from source is tuned to *this* server: CUDA code for
+# our GPUs only, CPU code for our CPU (-march=native) and linked against the
+# CUDA 13 runtime of the API image. This builds the same backend for
+# everywhere, under the same /data/backends/<type> path the installer uses:
+#
+#   * CUDA kernels for every recent architecture (+ PTX for newer ones),
+#   * portable CPU code (AVX2/FMA/F16C, no -march=native),
+#   * its own CUDA runtime/cuBLAS next to the binaries (rpath $ORIGIN), so only
+#     the NVIDIA driver (>= 12.8) is needed on the machine,
+#
+# then checks in a Debian like the runtime that every library resolves and
+# publishes the folder with core/oci_registry.py. Build and push:
+#
+#   docker build -f backend/Dockerfile.backend-native \
+#       --build-arg BACKEND=llamacpp_mks \
+#       --build-arg GIT_REPO=https://github.com/makespacemadrid/llama.cpp-mks \
+#       --build-arg GIT_REF=96fff6cab237f60dd2e46606a6aeaf0de7abe15b \
+#       --build-arg SCRIPT=install_llama_cpp.sh \
+#       --build-arg BINS="server=bin/llama-server" \
+#       -t ocabra-backend-build:llamacpp_mks backend
+#   docker run --rm -e GHCR_TOKEN=$(gh auth token) -e GHCR_USER=<user> \
+#       ocabra-backend-build:llamacpp_mks
+#
+# (scripts/publish-native-backends.sh does it for every native backend.)
+
+ARG CUDA_VERSION=12.8.1
+
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS build
+ARG BACKEND
+ARG GIT_REPO
+ARG GIT_REF
+ARG SCRIPT
+# Space-separated name=relative/path pairs, as in the install_spec's extra_bins.
+ARG BINS
+ARG CUDA=ON
+ARG CUDA_ARCHS="75;80;86;89;90;100;120"
+ENV BACKEND_DIR=/data/backends/${BACKEND}
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake ninja-build build-essential patchelf ca-certificates python3 file \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init "${BACKEND_DIR}/src" && cd "${BACKEND_DIR}/src" \
+    && git remote add origin "${GIT_REPO}" \
+    && git fetch --depth 1 origin "${GIT_REF}" \
+    && git checkout --quiet FETCH_HEAD \
+    && git rev-parse HEAD > /tmp/commit
+COPY scripts/ /build/scripts/
+RUN SRC_DIR="${BACKEND_DIR}/src" BIN_DIR="${BACKEND_DIR}/bin" \
+    ENABLE_CUDA="${CUDA}" LLAMA_CUDA_NCCL=OFF \
+    LLAMA_CUDA_ARCHITECTURES="${CUDA_ARCHS}" BITNET_CUDA_ARCHS="${CUDA_ARCHS}" \
+    GGML_CPU_FLAGS="-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON" \
+    bash "/build/scripts/${SCRIPT}"
+# Self-contained bin/: the build tree's SONAME links, the CUDA libraries the
+# binaries load, and an rpath that looks next to them. The source tree (and
+# its build products) is not needed at run time.
+RUN set -eu; bin="${BACKEND_DIR}/bin"; \
+    if [ -d "${BACKEND_DIR}/src/build/bin" ]; then \
+        find "${BACKEND_DIR}/src/build/bin" -maxdepth 1 -name '*.so*' -exec cp -a {} "$bin/" \; ; fi; \
+    for f in "$bin"/*; do \
+        file -L "$f" | grep -q ELF || continue; \
+        ldd "$f" | awk '/=> \/usr\/local\/cuda/ {print $3}' ; \
+    done | sort -u | while read -r lib; do \
+        cp -L "$lib" "$bin/"; \
+    done; \
+    for f in "$bin"/*; do \
+        [ -L "$f" ] && continue; file "$f" | grep -q ELF || continue; \
+        patchelf --set-rpath '$ORIGIN' "$f"; \
+    done; \
+    rm -rf "${BACKEND_DIR}/src" "$bin/llama-bench"; \
+    ls -la "$bin"
+ARG CUDA_VERSION
+RUN BINS="${BINS}" GIT_REPO="${GIT_REPO}" GIT_REF="${GIT_REF}" CUDA_ARCHS="${CUDA_ARCHS}" \
+    BUILD_CUDA="$( [ "${CUDA}" = ON ] && echo "${CUDA_VERSION%.*}" || true )" python3 - <<'PY'
+import datetime, json, os, pathlib
+root = pathlib.Path(os.environ["BACKEND_DIR"])
+backend = root.name
+commit = pathlib.Path("/tmp/commit").read_text().strip()
+bins = {}
+for pair in os.environ["BINS"].split():
+    name, rel = pair.split("=", 1)
+    path = root / rel
+    assert path.is_file(), f"missing {path}"
+    path.chmod(0o755)
+    bins[name] = str(path)
+size = sum(p.stat().st_size for p in root.rglob("*") if p.is_file() and not p.is_symlink())
+meta = {
+    "schema_version": 1,
+    "backend_type": backend,
+    "version": f"{os.environ['GIT_REF']}@{commit[:10]}" if os.environ["GIT_REF"] != commit else commit[:10],
+    "installed_at": datetime.datetime.now(datetime.UTC).isoformat(),
+    "install_source": "source",
+    "python_bin": None,
+    "extra_bins": bins,
+    "size_mb": size // (1024 * 1024),
+    "pip_packages": [],
+    "pip_extra_index_urls": [],
+    "include_core_runtime": False,
+    "apt_packages": [],
+    "git_repo": os.environ["GIT_REPO"],
+    "git_ref": commit,
+    "src_dir": None,
+    "bin_dir": str(root / "bin"),
+    "gpu_archs": os.environ["CUDA_ARCHS"] if os.environ.get("BUILD_CUDA") else None,
+    # The CUDA runtime it ships: the driver must support at least this.
+    "cuda": os.environ.get("BUILD_CUDA") or None,
+    "portable": True,
+}
+(root / "metadata.json").write_text(json.dumps(meta, indent=2, sort_keys=True))
+print(json.dumps(meta, indent=2))
+PY
+
+# ── check + publish, in a Debian like the runtime images ─────────────────────
+FROM python:3.11-slim-bookworm AS publish
+ARG BACKEND
+ARG CUDA_ARCHS="75;80;86;89;90;100;120"
+ENV BACKEND=${BACKEND} CUDA_ARCHS=${CUDA_ARCHS}
+RUN pip install --no-cache-dir "httpx>=0.28"
+COPY --from=build /data/backends/${BACKEND} /data/backends/${BACKEND}
+COPY ocabra/core/oci_registry.py /publish/oci_registry.py
+# Everything must resolve here except libcuda (the driver, from the host).
+RUN set -eu; missing=""; \
+    for f in /data/backends/${BACKEND}/bin/*; do \
+        [ -L "$f" ] && continue; \
+        out="$(ldd "$f" 2>/dev/null || true)"; \
+        echo "$out" | grep -q "=>" || continue; \
+        m="$(echo "$out" | grep 'not found' | grep -v 'libcuda.so' || true)"; \
+        [ -n "$m" ] && missing="$missing\n$f: $m"; \
+    done; \
+    if [ -n "$missing" ]; then printf "unresolved libraries:%b\n" "$missing"; exit 1; fi; \
+    echo "all libraries resolve"
+CMD python /publish/oci_registry.py publish --dir /data/backends/${BACKEND} --type ${BACKEND} --gpu-archs "${CUDA_ARCHS}"

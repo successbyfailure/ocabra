@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.87.3"
+APP_VERSION = "0.88.0"
 
 
 class Settings(BaseSettings):
@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     download_job_cleanup_poll_interval_s: int = 900
     # Bloque 15 — Modular backends install root (one subdir per backend).
     backends_dir: str = "/data/backends"
+    # Prebuilt backends (see core/oci_registry.py): one public repository, one
+    # tag per backend. Empty disables OCI installs (source only).
+    backend_oci_repository: str = "ghcr.io/successbyfailure/ocabra-backends"
     # True on the fat image (all backends pre-installed): unknown backends
     # without metadata.json are reported as "built-in" so they stay usable.
     # Set to False on the slim image so the same backends show as

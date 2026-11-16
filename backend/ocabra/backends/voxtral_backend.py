@@ -55,8 +55,6 @@ class VoxtralBackend(BackendInterface):
         """
 
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-voxtral",
-            oci_tags={"cuda12": "latest-cuda12"},
             apt_packages=[
                 # Same as vllm: Triton JIT requires a C compiler.
                 "gcc",

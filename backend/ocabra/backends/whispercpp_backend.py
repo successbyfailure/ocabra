@@ -95,8 +95,6 @@ class WhisperCppBackend(BackendInterface):
         """Native build of ggml-org/whisper.cpp — ``whisper-server`` is the
         worker itself, so no ``include_core_runtime`` venv is needed."""
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-whispercpp",
-            oci_tags={"cpu": "latest-cpu"},
             apt_packages=[
                 "build-essential",
                 "cmake",

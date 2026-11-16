@@ -139,8 +139,6 @@ class LlamaCppBackend(BackendInterface):
         """
 
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-llama-cpp",
-            oci_tags={"cuda12": "latest-cuda12", "cpu": "latest-cpu"},
             apt_packages=[
                 "build-essential",
                 "cmake",

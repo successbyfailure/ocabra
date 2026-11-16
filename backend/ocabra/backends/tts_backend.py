@@ -98,8 +98,6 @@ class TTSBackend(BackendInterface):
         """
 
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-tts",
-            oci_tags={"cuda12": "latest-cuda12"},
             pip_packages=[
                 "torch>=2.5",
                 "torchaudio>=2.5",

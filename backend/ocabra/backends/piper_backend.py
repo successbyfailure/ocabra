@@ -65,8 +65,6 @@ class PiperBackend(BackendInterface):
         index — this is what keeps it out of the VRAM budget entirely.
         """
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-piper",
-            oci_tags={"cpu": "latest-cpu"},
             pip_packages=[
                 "piper-tts>=1.8.0",
                 "huggingface_hub>=0.24",

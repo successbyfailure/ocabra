@@ -22,7 +22,6 @@ def _make_executable(path: Path) -> None:
 def test_install_spec_shape() -> None:
     spec = VLLMBackend().install_spec
     assert isinstance(spec, BackendInstallSpec)
-    assert spec.oci_image == "ghcr.io/ocabra/backend-vllm"
     assert any(p.lower().startswith("vllm") for p in spec.pip_packages)
     assert "LLM" in spec.tags
     assert spec.estimated_size_mb >= 5000

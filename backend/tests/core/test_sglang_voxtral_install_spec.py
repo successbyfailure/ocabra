@@ -28,7 +28,6 @@ def _make_executable(path: Path) -> None:
 def test_sglang_install_spec_shape() -> None:
     spec = SGLangBackend().install_spec
     assert isinstance(spec, BackendInstallSpec)
-    assert spec.oci_image == "ghcr.io/ocabra/backend-sglang"
     assert any("sglang" in p.lower() for p in spec.pip_packages)
     assert "LLM" in spec.tags
 
@@ -88,7 +87,6 @@ def test_sglang_resolve_python_bin_final_fallback(
 def test_voxtral_install_spec_shape() -> None:
     spec = VoxtralBackend().install_spec
     assert isinstance(spec, BackendInstallSpec)
-    assert spec.oci_image == "ghcr.io/ocabra/backend-voxtral"
     pkgs = " ".join(spec.pip_packages).lower()
     assert "vllm" in pkgs and "vllm-omni" in pkgs
     assert "TTS" in spec.tags

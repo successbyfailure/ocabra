@@ -13,9 +13,9 @@ class BackendInstallSpec:
     instance of this class through :pyattr:`BackendInterface.install_spec`.
 
     Attributes:
-        oci_image: Fully-qualified OCI image used for pre-built distribution.
-        oci_tags: Mapping of hardware variant → tag (e.g. ``{"cuda12": "latest-cuda12"}``).
-        oci_extract_path: Path inside the OCI image that contains the backend tree.
+        Prebuilt (OCI) distribution needs nothing here: every backend is
+        published as ``<settings.backend_oci_repository>:<backend_type>`` by
+        ``core/oci_registry.py`` from an installed copy.
         pip_packages: Packages to install when using the ``source`` install method.
         pip_extra_index_urls: Extra ``--extra-index-url`` values passed to pip (e.g.
             ``https://download.pytorch.org/whl/cu124`` to pull CUDA-enabled torch).
@@ -54,9 +54,6 @@ class BackendInstallSpec:
         python_version: Python version required for ``source`` installs.
     """
 
-    oci_image: str
-    oci_tags: dict[str, str] = field(default_factory=dict)
-    oci_extract_path: str = "/backend"
     pip_packages: list[str] = field(default_factory=list)
     pip_extra_index_urls: list[str] = field(default_factory=list)
     include_core_runtime: bool = True

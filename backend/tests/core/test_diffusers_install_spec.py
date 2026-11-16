@@ -17,8 +17,6 @@ def test_install_spec_shape() -> None:
     spec = DiffusersBackend().install_spec
 
     assert isinstance(spec, BackendInstallSpec)
-    assert spec.oci_image == "ghcr.io/ocabra/backend-diffusers"
-    assert spec.oci_tags.get("cuda12")
     assert spec.pip_packages
     assert spec.display_name
     assert "Image" in spec.tags

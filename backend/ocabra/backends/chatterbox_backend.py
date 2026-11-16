@@ -97,8 +97,6 @@ class ChatterboxBackend(BackendInterface):
         """Declarative install spec for chatterbox (Bloque 15 Fase 2)."""
 
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-chatterbox",
-            oci_tags={"cuda12": "latest-cuda12"},
             pip_packages=[
                 "torch>=2.5",
                 "torchaudio>=2.5",

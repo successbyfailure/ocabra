@@ -5,6 +5,8 @@ import type {
   BackendModuleState,
 } from "@/types"
 
+const NO_OCI = { ociRef: null, ociDigest: null, packages: {}, declaredPackages: [], gitRef: null }
+
 // Mock fixture used only when VITE_MOCK_BACKENDS=1. Kept for offline/dev work —
 // the real /ocabra/backends API is the default source of truth.
 const MOCK_BACKENDS: BackendModuleState[] = [
@@ -25,6 +27,7 @@ const MOCK_BACKENDS: BackendModuleState[] = [
     installDetail: null,
     error: null,
     alwaysAvailable: false,
+    ...NO_OCI,
   },
   {
     backendType: "diffusers",
@@ -43,6 +46,7 @@ const MOCK_BACKENDS: BackendModuleState[] = [
     installDetail: null,
     error: null,
     alwaysAvailable: false,
+    ...NO_OCI,
   },
   {
     backendType: "whisper",
@@ -61,6 +65,7 @@ const MOCK_BACKENDS: BackendModuleState[] = [
     installDetail: null,
     error: null,
     alwaysAvailable: false,
+    ...NO_OCI,
   },
   {
     backendType: "llama_cpp",
@@ -79,6 +84,7 @@ const MOCK_BACKENDS: BackendModuleState[] = [
     installDetail: null,
     error: null,
     alwaysAvailable: false,
+    ...NO_OCI,
   },
   {
     backendType: "ollama",
@@ -97,6 +103,7 @@ const MOCK_BACKENDS: BackendModuleState[] = [
     installDetail: null,
     error: null,
     alwaysAvailable: true,
+    ...NO_OCI,
   },
 ]
 
@@ -202,7 +209,7 @@ export const useBackendsStore = create<BackendsStore>((set, get) => ({
             installDetail: null,
             installedAt: new Date().toISOString(),
             installedVersion: latest.installedVersion ?? "mock-1.0.0",
-            installSource: method,
+            installSource: method === "auto" ? "oci" : method,
             actualSizeMb: latest.estimatedSizeMb,
           })
         } else {

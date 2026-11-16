@@ -71,6 +71,8 @@ class PodSpec:
     cloud_type: str
     container_disk_gb: int
     env: dict[str, str]
+    # Newest CUDA the backends to install need (None = the node image's own).
+    min_cuda_version: str | None = None
 
 
 @dataclass
@@ -391,6 +393,7 @@ class CloudNodeManager:
             cloud_type=(cloud_type or cfg["cloud_type"]).upper(),
             container_disk_gb=int(cfg["container_disk_gb"]),
             env=env,
+            min_cuda_version=await preload.required_cuda(self.fm.session_factory, models),
         )
         client = await self._client(provider)
         try:

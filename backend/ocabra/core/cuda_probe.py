@@ -16,7 +16,10 @@ _RESULT: dict[str, Any] | None = None
 
 
 def probe_cuda() -> dict[str, Any]:
-    """``{"ok": bool | None, "devices": int, "error": str | None}`` (cached).
+    """``{"ok", "devices", "error", "driver_cuda"}`` (cached).
+
+    ``driver_cuda`` is the newest CUDA the driver supports (``"13.0"``): a
+    backend built for a newer CUDA than that does not start here.
 
     ``ok`` is ``None`` when there is no NVIDIA driver at all (CPU-only node):
     nothing is broken, there is just no GPU to use.
@@ -29,14 +32,28 @@ def probe_cuda() -> dict[str, Any]:
     except OSError:
         _RESULT = {"ok": None, "devices": 0, "error": "libcuda.so.1 not found"}
         return _RESULT
+    version = ctypes.c_int(0)
+    driver_cuda = None
+    if lib.cuDriverGetVersion(ctypes.byref(version)) == 0 and version.value:
+        driver_cuda = f"{version.value // 1000}.{(version.value % 1000) // 10}"
     rc = lib.cuInit(0)
     if rc != 0:
-        _RESULT = {"ok": False, "devices": 0, "error": f"cuInit failed with CUDA error {rc}"}
+        _RESULT = {
+            "ok": False,
+            "devices": 0,
+            "error": f"cuInit failed with CUDA error {rc}",
+            "driver_cuda": driver_cuda,
+        }
         return _RESULT
     count = ctypes.c_int(0)
     rc = lib.cuDeviceGetCount(ctypes.byref(count))
     if rc != 0 or count.value == 0:
-        _RESULT = {"ok": False, "devices": count.value, "error": f"no CUDA devices (error {rc})"}
+        _RESULT = {
+            "ok": False,
+            "devices": count.value,
+            "error": f"no CUDA devices (error {rc})",
+            "driver_cuda": driver_cuda,
+        }
         return _RESULT
-    _RESULT = {"ok": True, "devices": count.value, "error": None}
+    _RESULT = {"ok": True, "devices": count.value, "error": None, "driver_cuda": driver_cuda}
     return _RESULT

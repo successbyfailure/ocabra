@@ -1982,6 +1982,8 @@ export type {
   BackendInstallMethod,
   BackendInstallSource,
   BackendModuleState,
+  BackendPublished,
+  BackendPublishedInfo,
 } from "./backends";
 
 import type { BackendModuleState } from "./backends";

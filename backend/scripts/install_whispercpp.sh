@@ -17,6 +17,9 @@
 # libggml*/libwhisper*.so referenced by them, copied next to the binaries for
 # LD_LIBRARY_PATH-free loading.
 
+# GGML_CPU_FLAGS (optional): extra cmake flags for the CPU code. Empty = ggml's
+#   default (-march=native, tuned to this machine). Prebuilt packages for other
+#   machines pass portable ones (see Dockerfile.backend-native).
 set -euo pipefail
 
 : "${BACKEND_DIR:?BACKEND_DIR is required}"
@@ -33,6 +36,7 @@ cd "${SRC_DIR}"
 
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
+    ${GGML_CPU_FLAGS:-} \
     -DGGML_CUDA=OFF \
     -DWHISPER_BUILD_SERVER=ON
 cmake --build build --target whisper-server whisper-cli whisper-quantize -j"${BUILD_JOBS}"

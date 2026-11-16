@@ -30,7 +30,8 @@ export function Backends() {
 
   const handleInstall = (backendType: string, method: BackendInstallMethod) => {
     install(backendType, method)
-    toast.success(`Instalando ${backendType} desde ${method}`)
+    const how = { auto: "", oci: " (precompilado)", source: " desde el código" }[method]
+    toast.success(`Instalando ${backendType}${how}`)
   }
 
   const handleCancel = (backendType: string) => {
@@ -139,9 +140,7 @@ export function Backends() {
               onInstall={handleInstall}
               onCancelInstall={handleCancel}
               onUninstall={handleRequestUninstall}
-              onUpdate={(b) =>
-                handleInstall(b.backendType, b.installSource === "source" ? "source" : "oci")
-              }
+              onUpdate={(b) => handleInstall(b.backendType, "oci")}
               onViewLogs={handleViewLogs}
             />
           ))}

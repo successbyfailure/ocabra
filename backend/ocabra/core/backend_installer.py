@@ -13,8 +13,13 @@ This module only covers Fase 1:
 * uninstallation (refuses if any model using the backend is loaded),
 * concurrent-install safety (per-backend :class:`asyncio.Lock`).
 
-OCI-based installation (``method="oci"``) is deliberately out of scope and will
-raise :class:`NotImplementedError`.  It will land in Fase 3.
+Prebuilt installs (``method="oci"``) download the backend's folder as
+published in ``settings.backend_oci_repository`` (see ``core/oci_registry.py``)
+— the exact versions that run on the server that published it, without pip or
+compilers. ``method="auto"`` uses it when the backend is published and falls
+back to the source install otherwise (or if the download fails). Installing
+over an installed backend (an *update*) unpacks next to it and swaps the
+folders, so a failure leaves the old one in place.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ import os
 import shutil
 import sys
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -83,6 +88,14 @@ class BackendModuleState:
     error: str | None = None
     install_progress: float | None = None
     install_detail: str | None = None
+    # Prebuilt installs: the image it came from and its digest.
+    oci_ref: str | None = None
+    oci_digest: str | None = None
+    # Installed versions of the packages the spec names (venv backends) and
+    # what the spec asks for: "declared vs installed" at a glance.
+    packages: dict[str, str] = field(default_factory=dict)
+    declared_packages: list[str] = field(default_factory=list)
+    git_ref: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +156,8 @@ class BackendInstaller:
         # monkeypatch ``_run_subprocess`` set this to False so they don't have
         # to mock the pip-progress path separately.
         self._pip_progress_enabled = True
+        # backend_type -> (monotonic time, published summary | None)
+        self._published_cache: dict[str, tuple[float, dict | None]] = {}
 
     # ------------------------------------------------------------------
     # Registry helpers
@@ -198,17 +213,8 @@ class BackendInstaller:
                 continue
 
             if meta is not None:
-                self._states[backend_type] = BackendModuleState(
-                    backend_type=backend_type,
-                    display_name=spec.display_name or backend_type,
-                    description=spec.description,
-                    tags=list(spec.tags),
-                    install_status=BackendInstallStatus.INSTALLED,
-                    installed_version=meta.get("version"),
-                    installed_at=_parse_iso(meta.get("installed_at")),
-                    install_source=meta.get("install_source"),
-                    estimated_size_mb=spec.estimated_size_mb,
-                    actual_size_mb=meta.get("size_mb"),
+                self._states[backend_type] = await self._installed_state(
+                    backend_type, spec, meta
                 )
             elif self._assume_fat_image:
                 # No metadata on disk but the fat image has every backend
@@ -243,6 +249,55 @@ class BackendInstaller:
             backends_dir=str(self._backends_dir),
         )
 
+    async def _installed_state(
+        self, backend_type: str, spec: BackendInstallSpec, meta: dict[str, Any]
+    ) -> BackendModuleState:
+        from ocabra.core.oci_registry import installed_packages, package_names
+
+        packages = meta.get("packages")
+        if not isinstance(packages, dict):
+            packages = await asyncio.to_thread(
+                installed_packages, meta.get("python_bin"), package_names(spec.pip_packages)
+            )
+        return BackendModuleState(
+            backend_type=backend_type,
+            display_name=spec.display_name or backend_type,
+            description=spec.description,
+            tags=list(spec.tags),
+            install_status=BackendInstallStatus.INSTALLED,
+            installed_version=meta.get("version"),
+            installed_at=_parse_iso(meta.get("installed_at")),
+            install_source=meta.get("install_source"),
+            estimated_size_mb=spec.estimated_size_mb,
+            actual_size_mb=meta.get("size_mb"),
+            oci_ref=meta.get("oci_ref"),
+            oci_digest=meta.get("oci_digest"),
+            packages=dict(packages),
+            declared_packages=list(spec.pip_packages),
+            git_ref=meta.get("git_ref"),
+        )
+
+    async def published(self, backend_type: str, *, refresh: bool = False) -> dict | None:
+        """What the OCI repository offers for *backend_type* (cached 10 min).
+
+        ``None`` when nothing is published or OCI is off; raises
+        :class:`~ocabra.core.oci_registry.OciError` when the registry fails.
+        """
+        import time
+
+        from ocabra.config import settings
+        from ocabra.core.oci_registry import inspect_backend
+
+        if not settings.backend_oci_repository:
+            return None
+        cached = self._published_cache.get(backend_type)
+        if cached and not refresh and time.monotonic() - cached[0] < 600:
+            return cached[1]
+        found = await inspect_backend(settings.backend_oci_repository, backend_type)
+        summary = found.summary() if found else None
+        self._published_cache[backend_type] = (time.monotonic(), summary)
+        return summary
+
     # ------------------------------------------------------------------
     # Query API
     # ------------------------------------------------------------------
@@ -268,7 +323,7 @@ class BackendInstaller:
     # ------------------------------------------------------------------
 
     async def install(
-        self, backend_type: str, method: str = "source"
+        self, backend_type: str, method: str = "auto"
     ) -> AsyncIterator[BackendModuleState]:
         """Install *backend_type* and yield :class:`BackendModuleState` updates.
 
@@ -277,8 +332,9 @@ class BackendInstaller:
 
         Args:
             backend_type: Registered backend identifier.
-            method: Either ``"source"`` (venv + pip) or ``"oci"``.  ``"oci"``
-                raises :class:`NotImplementedError` in Fase 1.
+            method: ``"source"`` (venv + pip / build), ``"oci"`` (the
+                prebuilt image) or ``"auto"`` (prebuilt when published,
+                source otherwise or if the download fails).
 
         Yields:
             Successive :class:`BackendModuleState` snapshots with
@@ -290,7 +346,7 @@ class BackendInstaller:
             KeyError: If *backend_type* is not registered.
             BackendAlreadyInstallingError: If another install is already in
                 progress for the same backend.
-            NotImplementedError: If *method* is ``"oci"``.
+            RuntimeError: Replacing an installed backend while models use it.
         """
         if backend_type not in self._backends:
             raise KeyError(f"Backend '{backend_type}' is not registered")
@@ -301,10 +357,8 @@ class BackendInstaller:
                 f"Backend '{backend_type}' is already being installed"
             )
 
-        if method not in {"source", "oci"}:
+        if method not in {"source", "oci", "auto"}:
             raise ValueError(f"Unknown install method '{method}'")
-        if method == "oci":
-            raise NotImplementedError("OCI-based install will ship in Fase 3")
 
         backend = self._backends[backend_type]
         spec = backend.install_spec
@@ -312,6 +366,10 @@ class BackendInstaller:
             raise ValueError(
                 f"Backend '{backend_type}' is always-available and cannot be installed"
             )
+        # Swapping a venv under a running worker breaks its lazy imports.
+        blocker = self.reinstall_blocker(backend_type)
+        if blocker:
+            raise RuntimeError(blocker)
 
         # Run the actual install as a detached task: a client disconnect must
         # not orphan the state machine (deuda 9f).  We bridge the task and
@@ -324,6 +382,19 @@ class BackendInstaller:
             async with lock:
                 self._install_logs[backend_type] = []
                 try:
+                    use_oci = method == "oci"
+                    if method == "auto":
+                        use_oci = await self._oci_available(backend_type)
+                    if use_oci:
+                        failed = False
+                        async for state in self._install_from_oci(backend_type, backend, spec):
+                            failed = state.install_status == BackendInstallStatus.ERROR
+                            if failed and method == "auto":
+                                break  # fall back to source below
+                            queue.put_nowait(state)
+                        if not (failed and method == "auto"):
+                            return
+                        self._log(backend_type, "Prebuilt install failed: building from source")
                     async for state in self._install_from_source(
                         backend_type, backend, spec
                     ):
@@ -367,6 +438,170 @@ class BackendInstaller:
             # Client disconnected; the install task keeps running on its
             # own and will land the final state in self._states.
             raise
+
+    def reinstall_blocker(self, backend_type: str) -> str | None:
+        """Why *backend_type* can't be (re)installed right now, if it can't."""
+        current = self._states.get(backend_type)
+        if (
+            current is not None
+            and current.install_status == BackendInstallStatus.INSTALLED
+            and _count_models_for_backend(self._worker_pool, backend_type) > 0
+        ):
+            return f"Cannot reinstall '{backend_type}' while models use it: unload them first"
+        return None
+
+    async def _oci_available(self, backend_type: str) -> bool:
+        try:
+            return await self.published(backend_type, refresh=True) is not None
+        except Exception as exc:  # noqa: BLE001 — registry down: source still works
+            self._log(backend_type, f"Prebuilt image unavailable ({exc}): building from source")
+            return False
+
+    async def _install_from_oci(
+        self,
+        backend_type: str,
+        backend: BackendInterface,
+        spec: BackendInstallSpec,
+    ) -> AsyncIterator[BackendModuleState]:
+        """Download the published folder, check it runs here, swap it in."""
+        import uuid
+
+        from ocabra.config import settings
+        from ocabra.core.oci_registry import inspect_backend, pull_backend
+
+        target_dir = self._backends_dir / backend_type
+        work = self._backends_dir / f".oci-{backend_type}-{uuid.uuid4().hex[:8]}"
+        state = self._states[backend_type] = BackendModuleState(
+            backend_type=backend_type,
+            display_name=spec.display_name or backend_type,
+            description=spec.description,
+            tags=list(spec.tags),
+            install_status=BackendInstallStatus.INSTALLING,
+            estimated_size_mb=spec.estimated_size_mb,
+            install_progress=0.0,
+            install_detail="Looking up the prebuilt image...",
+        )
+        yield self._snapshot(state)
+        try:
+            published = await inspect_backend(settings.backend_oci_repository, backend_type)
+            if published is None:
+                raise RuntimeError(f"No prebuilt image for {backend_type}")
+            from ocabra.core.cuda_probe import probe_cuda
+            from ocabra.core.oci_registry import cuda_tuple
+
+            need_cuda = published.labels.get("org.ocabra.backend.cuda")
+            have_cuda = (await asyncio.to_thread(probe_cuda)).get("driver_cuda")
+            if need_cuda and have_cuda and cuda_tuple(have_cuda) < cuda_tuple(need_cuda):
+                raise RuntimeError(
+                    f"The prebuilt image needs CUDA {need_cuda}; this machine's driver "
+                    f"supports up to {have_cuda}"
+                )
+            want_py = published.labels.get("org.ocabra.backend.python")
+            have_py = f"{sys.version_info.major}.{sys.version_info.minor}"
+            if want_py and want_py != have_py:
+                raise RuntimeError(
+                    f"The prebuilt image needs Python {want_py}; this server runs {have_py}"
+                )
+            self._log(
+                backend_type,
+                f"Pulling {published.ref} ({published.digest}, "
+                f"{published.size / 1e9:.2f} GB in {len(published.layers)} layers)",
+            )
+            # Progress is pushed from the download callbacks: snapshot it
+            # every couple of seconds instead of on every chunk.
+            loop_state = {"done": 0, "total": published.size or 1}
+
+            def _progress(done: int, total: int) -> None:
+                loop_state.update(done=done, total=total)
+
+            pull = asyncio.create_task(pull_backend(published, work, _progress))
+            while not pull.done():
+                await asyncio.wait({pull}, timeout=2.0)
+                frac = loop_state["done"] / loop_state["total"]
+                state.install_progress = round(0.02 + 0.8 * frac, 3)
+                state.install_detail = (
+                    f"Downloading {loop_state['done'] / 1e9:.1f} / "
+                    f"{loop_state['total'] / 1e9:.1f} GB"
+                    if frac < 1
+                    else "Unpacking..."
+                )
+                yield self._snapshot(state)
+            tree = pull.result()
+
+            state.install_progress = 0.86
+            state.install_detail = "Checking it runs here..."
+            yield self._snapshot(state)
+            meta = json.loads(await asyncio.to_thread((tree / METADATA_FILENAME).read_text))
+            await self._check_prebuilt(backend_type, tree, target_dir, meta)
+
+            # Swap: the old folder stays until the new one is in place.
+            old = None
+            if target_dir.exists():
+                old = target_dir.with_name(f".old-{backend_type}-{uuid.uuid4().hex[:8]}")
+                await asyncio.to_thread(target_dir.rename, old)
+            await asyncio.to_thread(tree.rename, target_dir)
+            if old is not None:
+                await asyncio.to_thread(shutil.rmtree, old, True)
+
+            from ocabra.core.oci_registry import installed_packages, package_names
+
+            python_bin = meta.get("python_bin")
+            meta.update(
+                installed_at=datetime.now(UTC).isoformat(),
+                install_source="oci",
+                oci_ref=str(published.ref),
+                oci_digest=published.digest,
+                published_from=published.labels.get("org.opencontainers.image.created"),
+                packages=await asyncio.to_thread(
+                    installed_packages, python_bin, package_names(spec.pip_packages)
+                ),
+                size_mb=await asyncio.to_thread(_compute_dir_size_mb, target_dir),
+            )
+            await self._write_metadata(backend_type, meta)
+            self._register(backend_type, backend)
+            final = await self._installed_state(backend_type, spec, meta)
+            final.install_progress = 1.0
+            final.install_detail = "Installed (prebuilt)"
+            self._states[backend_type] = final
+            self._log(backend_type, f"Installed {published.ref} ({published.digest})")
+            yield self._snapshot(final)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("backend_oci_install_failed", backend_type=backend_type)
+            self._log(backend_type, f"ERROR: {exc}")
+            state.install_status = BackendInstallStatus.ERROR
+            state.error = str(exc)
+            state.install_detail = f"Install failed: {exc}"
+            yield self._snapshot(state)
+        finally:
+            await asyncio.to_thread(shutil.rmtree, work, True)
+
+    async def _check_prebuilt(
+        self, backend_type: str, tree: Path, target_dir: Path, meta: dict[str, Any]
+    ) -> None:
+        """Refuse an image that wouldn't run from *target_dir* on this machine.
+
+        Paths in a venv and in ``metadata.json`` are absolute: the image must
+        have been built for this same location. Its interpreter must exist
+        here, and every library a native binary needs must resolve except
+        ``libcuda`` (the driver, provided by the host at run time).
+        """
+        if meta.get("backend_type") not in (None, backend_type):
+            raise RuntimeError(f"The image holds {meta.get('backend_type')}, not {backend_type}")
+        staged_bins = await asyncio.to_thread(_check_prebuilt_files, tree, target_dir, meta)
+        if shutil.which("ldd") is None:
+            return
+        for name, staged in staged_bins.items():
+            proc = await asyncio.create_subprocess_exec(
+                "ldd", str(staged), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+            )
+            out, _ = await proc.communicate()
+            missing = [
+                line.split("=>", 1)[0].strip()
+                for line in out.decode(errors="replace").splitlines()
+                if "not found" in line and "libcuda.so" not in line
+            ]
+            if missing:
+                raise RuntimeError(f"{name} needs libraries this machine lacks: {', '.join(missing)}")
 
     async def _install_from_source(
         self,
@@ -953,6 +1188,33 @@ class BackendInstaller:
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
+
+
+def _check_prebuilt_files(tree: Path, target_dir: Path, meta: dict[str, Any]) -> dict[str, Path]:
+    """Filesystem side of ``_check_prebuilt``: returns the staged binaries."""
+    prefix = str(target_dir)
+    python_bin = meta.get("python_bin")
+    if python_bin:
+        if not str(python_bin).startswith(prefix + "/"):
+            raise RuntimeError(f"The image's venv was built for {python_bin}, not {prefix}")
+        staged = tree / Path(python_bin).relative_to(target_dir)
+        cfg = staged.parent.parent / "pyvenv.cfg"
+        home = None
+        if cfg.is_file():
+            for line in cfg.read_text().splitlines():
+                if line.split("=", 1)[0].strip() == "home":
+                    home = line.split("=", 1)[1].strip()
+        if home and not Path(home).exists():
+            raise RuntimeError(f"The image's venv needs the interpreter in {home}")
+    bins: dict[str, Path] = {}
+    for name, path in (meta.get("extra_bins") or {}).items():
+        if not str(path).startswith(prefix + "/"):
+            raise RuntimeError(f"Binary {name} points outside the backend: {path}")
+        staged = tree / Path(path).relative_to(target_dir)
+        if not staged.is_file():
+            raise RuntimeError(f"The image lacks its binary {name} ({path})")
+        bins[name] = staged
+    return bins
 
 def _count_models_for_backend(worker_pool: WorkerPool, backend_type: str) -> int:
     """Count currently loaded workers that belong to *backend_type*."""

@@ -26,8 +26,6 @@ def test_install_spec_shape() -> None:
     spec = backend.install_spec
 
     assert isinstance(spec, BackendInstallSpec)
-    assert spec.oci_image == "ghcr.io/ocabra/backend-whisper"
-    assert spec.oci_tags.get("cuda12"), "expected a cuda12 OCI tag"
     assert spec.pip_packages, "expected non-empty pip_packages"
     assert spec.display_name, "expected a non-empty display_name"
     assert "STT" in spec.tags

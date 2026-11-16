@@ -139,8 +139,6 @@ class VLLMBackend(BackendInterface):
         """Declarative install spec for vllm (Bloque 15 Fase 2)."""
 
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-vllm",
-            oci_tags={"cuda12": "latest-cuda12"},
             apt_packages=[
                 # Triton JIT compiles kernels at runtime and needs a C/C++
                 # compiler. The slim base image does not ship gcc/g++; without

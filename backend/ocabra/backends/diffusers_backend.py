@@ -77,8 +77,6 @@ class DiffusersBackend(BackendInterface):
         """Declarative install spec for the diffusers backend (Bloque 15 Fase 2)."""
 
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-diffusers",
-            oci_tags={"cuda12": "latest-cuda12"},
             pip_packages=[
                 "torch>=2.5",
                 "torchvision>=0.20",

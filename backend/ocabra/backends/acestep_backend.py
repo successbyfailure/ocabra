@@ -98,8 +98,6 @@ class AceStepBackend(BackendInterface):
         """
 
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-acestep",
-            oci_tags={"cuda12": "latest-cuda12"},
             apt_packages=[
                 "ca-certificates",
                 "curl",

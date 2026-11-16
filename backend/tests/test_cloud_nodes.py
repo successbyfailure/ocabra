@@ -494,12 +494,21 @@ def test_cuda_probe_outcomes(monkeypatch):
             ref._obj.value = self.count
             return 0
 
+        def cuDriverGetVersion(self, ref):
+            ref._obj.value = 12080  # a driver that stops at CUDA 12.8
+            return 0
+
     def run(factory):
         monkeypatch.setattr(cuda_probe, "_RESULT", None)
         monkeypatch.setattr(ctypes, "CDLL", factory)
         return cuda_probe.probe_cuda()
 
-    assert run(lambda name: Lib(0, 1)) == {"ok": True, "devices": 1, "error": None}
+    assert run(lambda name: Lib(0, 1)) == {
+        "ok": True,
+        "devices": 1,
+        "error": None,
+        "driver_cuda": "12.8",
+    }
     broken = run(lambda name: Lib(999, 0))
     assert broken["ok"] is False and "999" in broken["error"]
 

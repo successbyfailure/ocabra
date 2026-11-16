@@ -1,7 +1,7 @@
 # Plan: distribución y actualización de backends · `llamacpp_mks`
 
 **Fecha de apertura:** 2026-11-06
-**Estado:** 🟡 diseño; Paso 0 (fork publicado) completado 2026-11-06
+**Estado:** 🟢 distribución OCI implementada (v0.88.0, 2026-11-16); Paso 0 (fork publicado) completado 2026-11-06
 **Relacionado:** [`modular-backends-plan.md`](modular-backends-plan.md) (Bloque 15),
 [`llama-cpp-elastic-kv-plan.md`](llama-cpp-elastic-kv-plan.md)
 
@@ -185,3 +185,56 @@ dos perfiles apuntando a los dos backends, con un router delante.
 3. ¿Se completa OCI con CI, o se elimina y la distribución es desde fuente?
 4. ¿La actualización de un backend es manual (cambiar el pin y reinstalar) o hay
    comprobación de novedades upstream?
+
+
+---
+
+## Hecho 2026-11-16 (v0.88.0): distribución OCI
+
+Motivo inmediato: un pod de RunPod instaló diffusers desde el código y resolvió
+`diffusers` de git `main` (0.44.0.dev0, commit `43e3002`) y CUDA 13, mientras
+producción corre 0.41.0.dev0 (`bdc2bea`) con torch cu124. Funcionó de chiripa.
+
+**Decisiones**
+
+- **Un solo repositorio** `ghcr.io/successbyfailure/ocabra-backends` (setting
+  `backend_oci_repository`), una etiqueta móvil por backend (`diffusers`) más
+  una inmutable (`diffusers-<fecha>-<hash>`). Un único paquete en GHCR que
+  hacer público; los nodos descargan sin credenciales. Se quitaron los
+  `oci_image`/`oci_tags` de los specs (apuntaban a `ghcr.io/ocabra/...`, que no
+  existe).
+- **Formato:** imagen OCI normal; capas gzip de ~1 GB con el árbol bajo
+  `backend/`; etiquetas `org.ocabra.backend.*` (tipo, versión, paquetes clave,
+  python, arquitecturas). Cliente propio sin docker (`core/oci_registry.py`):
+  token → manifiesto → blobs en paralelo, verificados por sha256. Subida: un
+  PATCH en streaming por blob (GHCR rechaza trozos con `Content-Range` de más de
+  4 MiB).
+- **Backends Python:** se publican **copiando la instalación de producción**
+  (mismas versiones exactas). Funciona porque la imagen de producción y la del
+  nodo tienen el mismo Python en la misma ruta (`/usr/local/bin/python3.11`,
+  bookworm) y los backends viven en la misma ruta (`/data/backends/<tipo>`).
+  `_check_prebuilt` rechaza una imagen hecha para otra ruta o con un intérprete
+  que no existe aquí. Se saltan los puntos de montaje dentro de la carpeta
+  (checkpoints de ACE-Step).
+- **Nativos:** `backend/Dockerfile.backend-native` +
+  `scripts/publish-native-backends.sh`: compilación limpia para sm 75–120 con
+  PTX, CPU portable (`GGML_CPU_FLAGS`, sin `-march=native`), CUDA runtime y
+  cuBLAS dentro de `bin/` con rpath `$ORIGIN`, comprobación de `ldd` en un
+  Debian como el de ejecución. No sustituyen a los de producción (allí van con
+  NCCL y para nuestras GPUs): son para los nodos.
+- **Instalar** = `auto` por defecto (precompilado si existe, código si no o si
+  falla). **Actualizar** = instalar encima: se descarga al lado y se
+  intercambian carpetas; 409 mientras haya modelos de ese backend cargados.
+- **Versiones:** el estado trae `packages` (instaladas), `declared_packages`,
+  `git_ref`, `oci_ref/oci_digest`; `GET /backends/{tipo}/published` da lo
+  publicado y `update_available`. La UI de Backends lo compara en una tabla.
+
+**Pendiente**
+
+- CI que publique en cada cambio de spec (los minutos de Actions están agotados;
+  hoy se publica a mano desde este servidor).
+- Variantes por hardware (CPU-only, ROCm) si hicieran falta: hoy una etiqueta
+  por backend, CUDA.
+- Los backends Python con extensiones CUDA compiladas (flashvsr: sm_80) solo
+  corren en GPUs de esa familia; la etiqueta `gpu-archs` lo dice si se pasa al
+  publicar, pero el instalador no lo comprueba.

@@ -72,8 +72,6 @@ class SGLangBackend(BackendInterface):
         """Declarative install spec for the sglang backend (Bloque 15 Fase 2)."""
 
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-sglang",
-            oci_tags={"cuda12": "latest-cuda12"},
             apt_packages=[
                 # SGLang's tvm_ffi JIT-compiles inline C++/CUDA at runtime.
                 # gcc/g++ are mandatory; ninja-build speeds up the JIT.

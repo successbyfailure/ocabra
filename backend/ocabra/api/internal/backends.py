@@ -7,6 +7,7 @@ Endpoints:
 * ``POST   /ocabra/backends/{backend_type}/install``  SSE stream of progress
 * ``POST   /ocabra/backends/{backend_type}/uninstall``
 * ``GET    /ocabra/backends/{backend_type}/logs``     install/uninstall logs
+* ``GET    /ocabra/backends/{backend_type}/published`` prebuilt image on offer
 
 All endpoints require the ``model_manager`` role or higher.
 """
@@ -41,9 +42,15 @@ router = APIRouter(tags=["backends"])
 
 
 class InstallRequest(BaseModel):
-    method: Literal["source", "oci"] = Field(
-        default="source",
-        description="Install method — 'source' creates a venv and runs pip; 'oci' pulls a pre-built image (Fase 3).",
+    method: Literal["source", "oci", "auto"] = Field(
+        default="auto",
+        description=(
+            "Install method — 'oci' downloads the prebuilt backend published in the "
+            "OCI repository (same versions as the server that published it); 'source' "
+            "creates a venv and runs pip / builds; 'auto' uses the prebuilt image when "
+            "there is one and falls back to source. Installing over an installed "
+            "backend updates it (the old folder is kept until the new one is in place)."
+        ),
     )
 
 
@@ -58,6 +65,11 @@ class BackendStateResponse(BaseModel):
     installed_version: str | None = None
     installed_at: str | None = None
     install_source: str | None = None
+    oci_ref: str | None = None
+    oci_digest: str | None = None
+    packages: dict[str, str] = Field(default_factory=dict)
+    declared_packages: list[str] = Field(default_factory=list)
+    git_ref: str | None = None
     estimated_size_mb: int = 0
     actual_size_mb: int | None = None
     error: str | None = None
@@ -149,9 +161,11 @@ async def get_backend(
     ),
     responses={
         404: {"description": "Backend not registered"},
-        409: {"description": "Install already in progress"},
+        409: {
+            "description": "Install already in progress, or models of this backend "
+            "are loaded (unload them to update it)"
+        },
         400: {"description": "Invalid install method for this backend"},
-        501: {"description": "OCI install not implemented yet (Fase 3)"},
     },
 )
 async def install_backend(
@@ -171,11 +185,9 @@ async def install_backend(
             status_code=404, detail=f"Backend '{backend_type}' not registered"
         ) from exc
 
-    if payload.method == "oci":
-        raise HTTPException(
-            status_code=501,
-            detail="OCI-based install is not yet implemented (planned for Fase 3).",
-        )
+    blocker = installer.reinstall_blocker(backend_type)
+    if blocker:
+        raise HTTPException(status_code=409, detail=blocker)
 
     async def _event_stream():
         try:
@@ -214,15 +226,17 @@ async def install_backend(
     ),
     responses={
         404: {"description": "Backend not registered"},
-        409: {"description": "Install already in progress"},
+        409: {
+            "description": "Install already in progress, or models of this backend "
+            "are loaded (unload them to update it)"
+        },
         400: {"description": "Invalid install method for this backend"},
-        501: {"description": "OCI install not implemented yet (Fase 3)"},
     },
 )
 async def install_backend_get(
     backend_type: str,
     request: Request,
-    method: str = "source",
+    method: str = "auto",
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> StreamingResponse:
     return await install_backend(
@@ -286,3 +300,49 @@ async def get_backend_logs(
             status_code=404, detail=f"Backend '{backend_type}' not registered"
         ) from exc
     return {"backend_type": backend_type, "lines": lines}
+
+
+@router.get(
+    "/backends/{backend_type}/published",
+    summary="Prebuilt image on offer for a backend",
+    description=(
+        "What the OCI repository (`BACKEND_OCI_REPOSITORY`) publishes for this backend: "
+        "reference, digest, size, version and key package versions, so it can be "
+        "compared with what is installed. `update_available` is true when the backend "
+        "was installed from an older image, or from source with different package "
+        "versions. Cached for 10 minutes unless `refresh=true`."
+    ),
+    responses={
+        404: {"description": "Backend not registered"},
+        502: {"description": "The registry could not be reached"},
+    },
+)
+async def get_backend_published(
+    backend_type: str,
+    request: Request,
+    refresh: bool = False,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict[str, Any]:
+    """Published prebuilt image for *backend_type*.
+
+    Returns:
+        ``{"published": {...} | null, "update_available": bool}``.
+    """
+    installer = _get_installer(request)
+    try:
+        state = installer.get_state(backend_type)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"Backend '{backend_type}' not registered"
+        ) from exc
+    try:
+        published = await installer.published(backend_type, refresh=refresh)
+    except Exception as exc:  # noqa: BLE001 — surface as a gateway problem
+        raise HTTPException(status_code=502, detail=f"Registry: {exc}") from exc
+    update = False
+    if published and str(state.install_status) == "installed":
+        if state.oci_digest:
+            update = state.oci_digest != published["digest"]
+        elif state.install_source == "source":
+            update = bool(published["packages"]) and published["packages"] != state.packages
+    return {"published": published, "update_available": update}

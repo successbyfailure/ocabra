@@ -1,17 +1,19 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu"
 import {
   ChevronDown,
   Download,
   FileText,
   Hammer,
+  Package,
   RefreshCw,
   Trash2,
   X,
 } from "lucide-react"
 import { BackendStatusBadge } from "@/components/backends/BackendStatusBadge"
 import { InstallProgressBar } from "@/components/backends/InstallProgressBar"
-import type { BackendInstallMethod, BackendModuleState } from "@/types"
+import { api } from "@/api/client"
+import type { BackendInstallMethod, BackendModuleState, BackendPublishedInfo } from "@/types"
 
 interface BackendCardProps {
   backend: BackendModuleState
@@ -26,6 +28,43 @@ function formatSize(mb: number | null | undefined): string {
   if (mb == null || mb <= 0) return "-"
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`
   return `${Math.round(mb)} MB`
+}
+
+/** Installed vs published package versions, differences highlighted. */
+function PackageVersions({
+  installed,
+  published,
+}: {
+  installed: Record<string, string>
+  published: Record<string, string> | null
+}) {
+  const names = Array.from(new Set([...Object.keys(installed), ...Object.keys(published ?? {})])).sort()
+  if (names.length === 0) return null
+  return (
+    <table className="mt-3 w-full text-[11px]">
+      <thead>
+        <tr className="text-left text-muted-foreground">
+          <th className="font-normal">Paquete</th>
+          <th className="font-normal">Instalado</th>
+          {published && <th className="font-normal">Publicado</th>}
+        </tr>
+      </thead>
+      <tbody className="font-mono">
+        {names.map((n) => {
+          const a = installed[n]
+          const b = published?.[n]
+          const differs = published != null && a !== b
+          return (
+            <tr key={n} className={differs ? "text-amber-600 dark:text-amber-300" : ""}>
+              <td className="pr-2">{n}</td>
+              <td className="truncate pr-2">{a ?? "—"}</td>
+              {published && <td className="truncate">{b ?? "—"}</td>}
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  )
 }
 
 function formatDate(iso: string | null): string {
@@ -46,7 +85,22 @@ export function BackendCard({
   onViewLogs,
 }: BackendCardProps) {
   const [installMenuOpen, setInstallMenuOpen] = useState(false)
+  const [offer, setOffer] = useState<BackendPublishedInfo | null>(null)
   const status = backend.installStatus
+  const published = offer?.published ?? null
+
+  // What the OCI repository offers, re-read whenever the install changes.
+  useEffect(() => {
+    if (status === "built-in" || status === "installing" || status === "uninstalling") return
+    let cancelled = false
+    api.backends
+      .published(backend.backendType)
+      .then((info) => !cancelled && setOffer(info))
+      .catch(() => !cancelled && setOffer(null))
+    return () => {
+      cancelled = true
+    }
+  }, [backend.backendType, status, backend.ociDigest])
 
   const displaySize =
     status === "installed" || status === "uninstalling"
@@ -109,7 +163,16 @@ export function BackendCard({
         {backend.installSource && (
           <div className="flex justify-between">
             <dt className="text-muted-foreground">Fuente</dt>
-            <dd className="font-medium">{backend.installSource}</dd>
+            <dd className="font-medium">
+              {{ oci: "precompilado", source: "código", "built-in": "integrado" }[backend.installSource] ??
+                backend.installSource}
+            </dd>
+          </div>
+        )}
+        {backend.gitRef && (
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">Rama/commit</dt>
+            <dd className="truncate font-mono font-medium">{backend.gitRef}</dd>
           </div>
         )}
         <div className="flex justify-between">
@@ -117,6 +180,29 @@ export function BackendCard({
           <dd className="font-medium">{backend.modelsLoaded}</dd>
         </div>
       </dl>
+
+      {/* Prebuilt image on offer */}
+      {published && status !== "built-in" && (
+        <div className="mt-3 flex items-center gap-1.5 rounded-md border border-border bg-muted/30 px-2 py-1.5 text-xs text-muted-foreground">
+          <Package size={12} />
+          <span>
+            Precompilado publicado {published.created ? formatDate(published.created) : ""} ·{" "}
+            {formatSize(published.sizeBytes / 1048576)}
+            {published.gpuArchs ? ` · GPUs sm ${published.gpuArchs}` : ""}
+          </span>
+          {offer?.updateAvailable && (
+            <span className="ml-auto font-medium text-emerald-600 dark:text-emerald-300">
+              actualización disponible
+            </span>
+          )}
+        </div>
+      )}
+      {(Object.keys(backend.packages).length > 0 || published) && status === "installed" && (
+        <PackageVersions
+          installed={backend.packages}
+          published={published && Object.keys(published.packages).length ? published.packages : null}
+        />
+      )}
 
       {/* Error banner */}
       {backend.error && status !== "installing" && (
@@ -158,18 +244,19 @@ export function BackendCard({
                 align="start"
               >
                 <DropdownMenu.Item
-                  className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-muted focus:bg-muted"
+                  disabled={!published}
+                  className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-muted focus:bg-muted data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50"
                   onSelect={() => onInstall(backend.backendType, "oci")}
                 >
                   <Download size={14} />
-                  Desde OCI (pre-built)
+                  {published ? "Precompilado (recomendado)" : "Precompilado (no publicado)"}
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-muted focus:bg-muted"
                   onSelect={() => onInstall(backend.backendType, "source")}
                 >
                   <Hammer size={14} />
-                  Desde source
+                  Desde el código
                 </DropdownMenu.Item>
               </DropdownMenu.Content>
             </DropdownMenu.Portal>
@@ -205,7 +292,7 @@ export function BackendCard({
               <FileText size={14} />
               Ver logs
             </button>
-            {backend.hasUpdate && onUpdate && (
+            {(offer?.updateAvailable || backend.hasUpdate) && onUpdate && (
               <button
                 type="button"
                 onClick={() => onUpdate(backend)}
@@ -222,7 +309,7 @@ export function BackendCard({
           <>
             <button
               type="button"
-              onClick={() => onInstall(backend.backendType, "oci")}
+              onClick={() => onInstall(backend.backendType, "auto")}
               className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-sm text-amber-100 hover:bg-amber-500/20"
             >
               <RefreshCw size={14} />

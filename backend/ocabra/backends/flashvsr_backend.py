@@ -52,8 +52,6 @@ class FlashVSRBackend(BackendInterface):
     @property
     def install_spec(self) -> BackendInstallSpec:
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-flashvsr",
-            oci_tags={"cuda12": "latest-cuda12"},
             # torch 2.6 + cu124 es la combinación con la que se validó la
             # compilación de Block-Sparse-Attention en sm_86.
             pip_packages=[

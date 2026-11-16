@@ -84,8 +84,6 @@ class WhisperBackend(BackendInterface):
         """
 
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-whisper",
-            oci_tags={"cuda12": "latest-cuda12"},
             pip_packages=[
                 # CUDA-enabled wheels come from pip_extra_index_urls below.
                 "torch>=2.5",

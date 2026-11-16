@@ -22,6 +22,13 @@ BASE_URL = "https://api.runpod.io/v2"
 # Must match the CUDA the ocabra-node image is built with (Dockerfile.node).
 MIN_CUDA_VERSION = "12.8"
 
+
+def _max_cuda(a: str, b: str | None) -> str:
+    def key(v: str) -> tuple[int, ...]:
+        return tuple(int(x) for x in v.split(".")[:2] if x.isdigit())
+
+    return b if b and key(b) > key(a) else a
+
 _STATUS_MAP = {
     "PROVISIONING": "starting",
     "STARTING": "starting",
@@ -139,7 +146,9 @@ class RunPodClient:
             "gpu": {
                 "id": spec.gpu_type_id,
                 "count": spec.gpu_count,
-                "minCudaVersion": MIN_CUDA_VERSION,
+                # Raised when the models it will carry need a backend built
+                # for a newer CUDA (prebuilt diffusers: torch cu130).
+                "minCudaVersion": _max_cuda(MIN_CUDA_VERSION, spec.min_cuda_version),
             },
             "cloud": spec.cloud_type,
             "disk": spec.container_disk_gb,

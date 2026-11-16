@@ -1951,6 +1951,32 @@ export function toBackendModuleState(
       string | null,
     error: (d.error ?? null) as string | null,
     alwaysAvailable,
+    ociRef: (d.oci_ref ?? d.ociRef ?? null) as string | null,
+    ociDigest: (d.oci_digest ?? d.ociDigest ?? null) as string | null,
+    packages: (isRecord(d.packages) ? d.packages : {}) as Record<string, string>,
+    declaredPackages: Array.isArray(d.declared_packages ?? d.declaredPackages)
+      ? ((d.declared_packages ?? d.declaredPackages) as unknown[]).map(String)
+      : [],
+    gitRef: (d.git_ref ?? d.gitRef ?? null) as string | null,
+  };
+}
+
+export function toBackendPublishedInfo(raw: unknown): import("@/types").BackendPublishedInfo {
+  const d = isRecord(raw) ? raw : {};
+  const p = isRecord(d.published) ? d.published : null;
+  return {
+    updateAvailable: Boolean(d.update_available ?? d.updateAvailable ?? false),
+    published: p
+      ? {
+          ref: String(p.ref ?? ""),
+          digest: String(p.digest ?? ""),
+          sizeBytes: Number(p.size_bytes ?? p.sizeBytes ?? 0),
+          version: (p.version ?? null) as string | null,
+          packages: (isRecord(p.packages) ? p.packages : {}) as Record<string, string>,
+          gpuArchs: (p.gpu_archs ?? p.gpuArchs ?? null) as string | null,
+          created: (p.created ?? null) as string | null,
+        }
+      : null,
   };
 }
 
@@ -3165,9 +3191,19 @@ export const api = {
       ),
     // NOTE: POST /install is modelled as GET here because EventSource only supports GET.
     // The backend exposes the install endpoint as GET so SSE works with a query param.
+    published: async (
+      backendType: string,
+      refresh = false,
+    ): Promise<import("@/types").BackendPublishedInfo> =>
+      toBackendPublishedInfo(
+        await request<unknown>(
+          "GET",
+          `/ocabra/backends/${encodeURIComponent(backendType)}/published${refresh ? "?refresh=true" : ""}`,
+        ),
+      ),
     install: (
       backendType: string,
-      method: import("@/types").BackendInstallMethod = "oci",
+      method: import("@/types").BackendInstallMethod = "auto",
     ): EventSource => {
       const qs = new URLSearchParams({ method });
       return new EventSource(

@@ -29,8 +29,6 @@ class _InstallableMockBackend(MockBackend):
     """MockBackend that exposes an install_spec so it is a modular backend."""
 
     _spec = BackendInstallSpec(
-        oci_image="ghcr.io/ocabra/backend-mock",
-        oci_tags={"cuda12": "latest"},
         pip_packages=["cowsay==6.1"],
         estimated_size_mb=10,
         display_name="Mock",
@@ -231,7 +229,6 @@ async def test_install_source_honours_extra_index_and_core_runtime(
         type(backend),
         "_spec",
         BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-mock",
             pip_packages=["torch>=2.5", "cowsay==6.1"],
             pip_extra_index_urls=["https://download.pytorch.org/whl/cu124"],
             include_core_runtime=True,
@@ -296,7 +293,6 @@ async def test_install_source_skips_core_runtime_when_opted_out(
         type(backend),
         "_spec",
         BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-mock",
             pip_packages=["cowsay==6.1"],
             include_core_runtime=False,
             display_name="Mock",
@@ -381,11 +377,19 @@ async def test_install_survives_consumer_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_install_oci_not_implemented(installer: BackendInstaller) -> None:
+async def test_install_oci_without_a_published_image_errors(
+    installer: BackendInstaller, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ocabra.core.oci_registry as oci
+
+    async def _nothing(repository, backend_type):
+        return None
+
+    monkeypatch.setattr(oci, "inspect_backend", _nothing)
     await installer.start()
-    with pytest.raises(NotImplementedError):
-        async for _ in installer.install("mock", method="oci"):
-            pass
+    states = [s async for s in installer.install("mock", method="oci")]
+    assert states[-1].install_status == BackendInstallStatus.ERROR
+    assert "No prebuilt image" in (states[-1].error or "")
 
 
 @pytest.mark.asyncio
@@ -459,7 +463,6 @@ async def test_install_skips_venv_when_no_python_deps(
         type(backend),
         "_spec",
         BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-mock",
             include_core_runtime=False,
             extra_bins={"server": "bin/mock-server"},
             display_name="Mock",
@@ -506,7 +509,6 @@ async def test_install_runs_apt_when_available(
         type(backend),
         "_spec",
         BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-mock",
             apt_packages=["build-essential", "cmake"],
             include_core_runtime=False,
             display_name="Mock",
@@ -554,7 +556,6 @@ async def test_install_skips_apt_when_unavailable(
         type(backend),
         "_spec",
         BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-mock",
             apt_packages=["build-essential"],
             include_core_runtime=False,
             display_name="Mock",
@@ -595,7 +596,6 @@ async def test_install_clones_git_repo_into_src_dir(
         type(backend),
         "_spec",
         BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-mock",
             git_repo="https://example.com/foo/bar",
             git_ref="v1.2.3",
             git_recursive=True,
@@ -649,7 +649,6 @@ async def test_install_runs_post_install_script_with_env(
         type(backend),
         "_spec",
         BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-mock",
             git_repo="https://example.com/foo/bar",
             post_install_script=str(script_path),
             include_core_runtime=False,
@@ -696,7 +695,6 @@ async def test_install_post_install_script_resolves_repo_relative_paths(
         type(backend),
         "_spec",
         BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-mock",
             post_install_script="backend/scripts/install_llama_cpp.sh",
             include_core_runtime=False,
             display_name="Mock",
@@ -736,7 +734,6 @@ async def test_install_extra_bins_missing_file_fails(
         type(backend),
         "_spec",
         BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-mock",
             extra_bins={"server": "bin/should-have-been-built"},
             include_core_runtime=False,
             display_name="Mock",
@@ -770,7 +767,6 @@ async def test_install_extra_bins_traversal_rejected(
         type(backend),
         "_spec",
         BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-mock",
             extra_bins={"server": "../../../etc/passwd"},
             include_core_runtime=False,
             display_name="Mock",
@@ -1057,12 +1053,13 @@ async def test_get_backend_unknown_returns_404(
 
 
 @pytest.mark.asyncio
-async def test_install_oci_method_rejected_at_http_layer(
-    installer: BackendInstaller,
+async def test_install_refused_at_http_layer_while_models_use_it(
+    installer: BackendInstaller, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from httpx import ASGITransport, AsyncClient
 
     await installer.start()
+    monkeypatch.setattr(installer, "reinstall_blocker", lambda bt: "models loaded")
     app = _build_isolated_app(installer)
 
     async with AsyncClient(
@@ -1072,4 +1069,4 @@ async def test_install_oci_method_rejected_at_http_layer(
             "/ocabra/backends/mock/install", json={"method": "oci"}
         )
 
-    assert resp.status_code == 501
+    assert resp.status_code == 409

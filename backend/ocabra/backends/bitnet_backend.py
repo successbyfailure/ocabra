@@ -72,8 +72,6 @@ class BitnetBackend(BackendInterface):
         """
 
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-bitnet",
-            oci_tags={"cpu": "latest-cpu", "cuda12": "latest-cuda12"},
             apt_packages=[
                 "build-essential",
                 "cmake",

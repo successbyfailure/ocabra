@@ -54,8 +54,6 @@ class MageFlowBackend(BackendInterface):
         # script. torch is pinned to the cu126 wheel so flash-attn (if ever
         # added) builds against a CUDA major matching the host toolkit.
         return BackendInstallSpec(
-            oci_image="",
-            oci_tags={},
             pip_packages=[
                 "torch==2.13.0",
                 "torchvision==0.28.0",

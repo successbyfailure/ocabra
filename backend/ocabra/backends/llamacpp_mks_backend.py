@@ -49,8 +49,6 @@ class LlamaCppMksBackend(LlamaCppBackend):
         """
         upstream = super().install_spec
         return BackendInstallSpec(
-            oci_image="ghcr.io/ocabra/backend-llama-cpp-mks",
-            oci_tags=dict(upstream.oci_tags),
             apt_packages=list(upstream.apt_packages),
             git_repo=FORK_REPO,
             git_ref=FORK_REF,
