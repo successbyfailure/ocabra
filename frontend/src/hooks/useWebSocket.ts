@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import type { GPUState, ModelStatus, ServiceStatus, WSEvent } from "@/types"
+import type { DownloadJob, GPUState, ModelStatus, ServiceStatus, WSEvent } from "@/types"
 import { useGpuStore } from "@/stores/gpuStore"
 import { useModelStore } from "@/stores/modelStore"
 import { useDownloadStore } from "@/stores/downloadStore"
@@ -50,7 +50,7 @@ function normalizeGpuStats(rawData: unknown): GPUState[] | null {
   })
 }
 
-function normalizeEvent(rawEvent: unknown): WSEvent | null {
+export function normalizeEvent(rawEvent: unknown): WSEvent | null {
   if (typeof rawEvent !== "object" || rawEvent === null) {
     return null
   }
@@ -81,12 +81,22 @@ function normalizeEvent(rawEvent: unknown): WSEvent | null {
   if (maybeEvent.type === "download_progress") {
     const data = maybeEvent.data as Record<string, unknown>
     if (data && typeof data.job_id === "string") {
+      // The backend publishes the whole job (``DownloadJob.model_dump``), the
+      // same payload the SSE stream and GET /downloads carry: the percentage
+      // is ``progress_pct``. Reading ``pct`` (absent) turned every WebSocket
+      // update into 0 %, which overwrote the SSE value a moment later — the
+      // bar flashed the real figure and fell back to 0 (2026-11-16).
+      const num = (value: unknown): number | null =>
+        value === null || value === undefined || value === "" ? null : Number(value)
       return {
         type: "download_progress",
         data: {
           jobId: data.job_id,
-          pct: Number(data.pct ?? 0),
-          speedMbS: Number(data.speed_mb_s ?? data.speedMbS ?? 0),
+          pct: Number(data.progress_pct ?? data.progressPct ?? data.pct ?? 0),
+          speedMbS: num(data.speed_mb_s ?? data.speedMbS),
+          etaSeconds: num(data.eta_seconds ?? data.etaSeconds),
+          status: (data.status as DownloadJob["status"] | undefined) ?? null,
+          error: (data.error as string | null | undefined) ?? null,
         },
       }
     }
@@ -222,7 +232,9 @@ export function useWebSocket() {
             updateJob(event.data.jobId, {
               progressPct: event.data.pct,
               speedMbS: event.data.speedMbS,
-              status: event.data.pct >= 100 ? "completed" : "downloading",
+              etaSeconds: event.data.etaSeconds,
+              status: event.data.status ?? (event.data.pct >= 100 ? "completed" : "downloading"),
+              error: event.data.error,
             })
           } else if (event.type === "service_event") {
             updateService(event.data.serviceId, event.data.service)

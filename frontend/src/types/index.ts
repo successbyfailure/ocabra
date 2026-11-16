@@ -2046,7 +2046,14 @@ export type WSEvent =
     }
   | {
       type: "download_progress";
-      data: { jobId: string; pct: number; speedMbS: number };
+      data: {
+        jobId: string;
+        pct: number;
+        speedMbS: number | null;
+        etaSeconds: number | null;
+        status: DownloadJob["status"] | null;
+        error: string | null;
+      };
     }
   | {
       type: "service_event";

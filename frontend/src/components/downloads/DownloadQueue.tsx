@@ -49,11 +49,19 @@ export function DownloadQueue({ jobs: jobsProp, onCancel: onCancelProp }: Downlo
     return () => window.clearInterval(timer)
   }, [jobsProp, setJobs])
 
-  useEffect(() => {
-    const activeJobs = jobs.filter((job) => job.status === "queued" || job.status === "downloading")
-    if (activeJobs.length === 0) return
+  // One SSE stream per active job, keyed by the set of active ids: depending
+  // on ``jobs`` itself closed and reopened every stream on each progress
+  // update (every update changes ``jobs``).
+  const activeIds = jobs
+    .filter((job) => job.status === "queued" || job.status === "downloading")
+    .map((job) => job.jobId)
+    .join(",")
 
-    const streams = activeJobs.map((job) => {
+  useEffect(() => {
+    if (!activeIds) return
+
+    const streams = activeIds.split(",").map((jobId) => {
+      const job = { jobId }
       const source = api.downloads.streamProgress(job.jobId)
       source.onmessage = (event) => {
         try {
@@ -86,7 +94,7 @@ export function DownloadQueue({ jobs: jobsProp, onCancel: onCancelProp }: Downlo
     return () => {
       streams.forEach((stream) => stream.close())
     }
-  }, [jobs, updateJob])
+  }, [activeIds, updateJob])
 
   const handleCancel = async (job: DownloadJob) => {
     if (onCancelProp) {
