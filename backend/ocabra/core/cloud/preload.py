@@ -415,6 +415,10 @@ async def _poll_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) ->
         data = resp.json() if resp.content else {}
         if resp.status_code >= 400 or data.get("status") != "loaded":
             detail = data.get("detail") or data.get("error_message") or resp.text[:200]
+            # Someone loaded it by hand meanwhile (the panel of the node):
+            # that is what we wanted.
+            if "already loaded" in str(detail).lower():
+                return True
             raise CloudError(f"No se pudo cargar: {detail}", 502)
         return True
     return True

@@ -53,6 +53,32 @@ async def _first_execution_profile(profile_registry: Any, profile: Any) -> Any:
     return profile
 
 
+def _model_for_peer(peer: Any, requested: str, resolved: dict[str, Any]) -> str | None:
+    """The ``model`` to send *peer*: what was actually chosen, by a name it knows.
+
+    For a router that is the chosen target, not the router (the peer may not
+    have it: a cloud node only has the models it was given). Prefer the public
+    profile id when the peer advertises it, since access control on a peer can
+    grant a profile without its canonical id; else the canonical id.
+    """
+    profile = resolved.get("profile")
+    base = resolved.get("model_id")
+    if not base:
+        return None
+    names = [requested]
+    if profile is not None:
+        names.insert(0, profile.profile_id)
+    for remote_model in getattr(peer, "models", []) or []:
+        if remote_model.get("model_id") != base:
+            continue
+        advertised = remote_model.get("profiles") or []
+        for name in names:
+            if name in advertised:
+                return name
+        break
+    return base if profile is not None else None
+
+
 async def try_proxy_json(
     request: Request,
     *,
@@ -62,6 +88,7 @@ async def try_proxy_json(
     model_manager: Any,
     profile_registry: Any,
     logger: structlog.stdlib.BoundLogger,
+    required_capability: str | None = None,
 ) -> Response | None:
     """Proxy a JSON request to the best peer for *model_id*.
 
@@ -108,8 +135,14 @@ async def try_proxy_json(
     if execution_policy == "local":
         return None
 
+    resolved: dict[str, Any] = {}
     target, peer = await resolve_federated(
-        model_id, model_manager, federation_manager, profile_registry
+        model_id,
+        model_manager,
+        federation_manager,
+        profile_registry,
+        required_capability=required_capability,
+        resolved=resolved,
     )
     if execution_policy == "remote" and profile is not None:
         forced_peer = federation_manager.find_best_peer(profile.base_model_id)
@@ -146,6 +179,12 @@ async def try_proxy_json(
                 break
             if remote_model_id != body.get("model"):
                 proxy_body = {**body, "model": remote_model_id}
+    # A router: send the target it resolved to (the block above names the
+    # router's *first* target, which is not necessarily the one chosen).
+    if resolved.get("profile") is not None:
+        chosen = _model_for_peer(peer, model_id, resolved)
+        if chosen:
+            proxy_body = {**body, "model": chosen}
 
     request.state.federation_remote_node_id = peer.peer_id
     try:
@@ -237,6 +276,7 @@ async def try_proxy_multipart(
     model_manager: Any,
     profile_registry: Any,
     logger: structlog.stdlib.BoundLogger,
+    required_capability: str | None = None,
 ) -> httpx.Response | None:
     """Proxy a multipart/form-data request to the best peer for *model_id*.
 
@@ -252,11 +292,23 @@ async def try_proxy_multipart(
 
     from ocabra.core.federation import resolve_federated, should_fallback_to_local
 
+    resolved: dict[str, Any] = {}
     target, peer = await resolve_federated(
-        model_id, model_manager, federation_manager, profile_registry
+        model_id,
+        model_manager,
+        federation_manager,
+        profile_registry,
+        required_capability=required_capability,
+        resolved=resolved,
     )
     if target != "remote" or peer is None:
         return None
+    # Routers (and profile ids the peer doesn't advertise) are sent as what
+    # was chosen: the form used to carry ``model=recomendado-imagen`` to a
+    # node that has no such router, which answered 404.
+    chosen = _model_for_peer(peer, model_id, resolved)
+    if chosen and "model" in data and chosen != data.get("model"):
+        data = {**data, "model": chosen}
 
     request.state.federation_remote_node_id = peer.peer_id
     try:

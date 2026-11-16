@@ -610,3 +610,118 @@ async def test_try_proxy_json_does_not_retry_when_already_canonical(monkeypatch)
 
     assert resp is None, "should fall back to local, not retry a canonical id with itself"
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Routers across the federation: capability and the name sent to the peer
+# ---------------------------------------------------------------------------
+
+
+def _image_router_setup(monkeypatch):
+    """``recomendado-imagen`` = [generate-only, edit-capable]; only the first
+    is warm, and only on a cloud node that has no such router."""
+    from types import SimpleNamespace
+
+    import ocabra.core.federation as fed
+
+    gen, edit = "diffusers/qwen-image-2.1", "diffusers/qwen-image-edit-plus"
+    profiles = {
+        "recomendado-imagen": SimpleNamespace(
+            profile_id="recomendado-imagen",
+            profile_kind="router",
+            routing_targets=["qwen-image-2.1", "qwen-image-edit-plus"],
+            base_model_id=None,
+            runtime_presets=[],
+        ),
+        "qwen-image-2.1": SimpleNamespace(
+            profile_id="qwen-image-2.1", profile_kind="execution", base_model_id=gen, runtime_presets=[]
+        ),
+        "qwen-image-edit-plus": SimpleNamespace(
+            profile_id="qwen-image-edit-plus",
+            profile_kind="execution",
+            base_model_id=edit,
+            runtime_presets=[],
+        ),
+    }
+
+    class _Registry:
+        async def get(self, pid):
+            return profiles.get(pid)
+
+        async def resolve_alias(self, pid):
+            return None
+
+        async def list_by_model(self, mid):
+            return []
+
+    async def _capable(_mm, profile, capability):
+        return capability != "image_editing" or profile.base_model_id == edit
+
+    monkeypatch.setattr(fed, "_profile_capable", _capable)
+    monkeypatch.setattr(settings, "federation_enabled", True)
+    pod = _make_peer(
+        name="pod", models=[{"model_id": gen, "status": "loaded", "profiles": ["qwen-image-2.1"]}]
+    )
+    fm = _make_fm_with_peers(pod)
+    mm = _FakeModelManager(
+        {
+            gen: _FakeModelState(model_id=gen, status="configured", backend_type="diffusers"),
+            edit: _FakeModelState(model_id=edit, status="configured", backend_type="diffusers"),
+        }
+    )
+    return fm, mm, _Registry(), pod
+
+
+@pytest.mark.asyncio
+async def test_router_edit_skips_the_warm_generate_only_target(monkeypatch):
+    """Real case 2026-11-16: an edit to recomendado-imagen picked the pod's warm
+    qwen-image-2.1 (can't edit), the pod 404'd the router name, and the local
+    fallback evicted a chat model to load the edit model."""
+    fm, mm, reg, pod = _image_router_setup(monkeypatch)
+
+    resolved: dict = {}
+    target, peer = await resolve_federated(
+        "recomendado-imagen", mm, fm, reg, required_capability="image_editing", resolved=resolved
+    )
+    assert (target, peer) == ("local", None)
+    assert resolved["model_id"] == "diffusers/qwen-image-edit-plus"
+
+    resolved = {}
+    target, peer = await resolve_federated(
+        "recomendado-imagen", mm, fm, reg, required_capability="image_generation", resolved=resolved
+    )
+    assert target == "remote" and peer is pod
+    assert resolved["profile"].profile_id == "qwen-image-2.1"
+
+
+@pytest.mark.asyncio
+async def test_router_is_sent_to_the_peer_as_the_chosen_target(monkeypatch):
+    from types import SimpleNamespace
+
+    from ocabra.api.openai._federation import try_proxy_multipart
+
+    fm, mm, reg, pod = _image_router_setup(monkeypatch)
+    sent = {}
+
+    async def _multipart(peer, path, files, data, headers):
+        sent.update(data)
+        return httpx.Response(200, json={"data": []})
+
+    fm.proxy_multipart = _multipart
+    request = MagicMock()
+    request.state = SimpleNamespace()
+    request.url.path = "/v1/images/generations"
+    request.headers = {}
+    resp = await try_proxy_multipart(
+        request,
+        model_id="recomendado-imagen",
+        files={},
+        data={"model": "recomendado-imagen", "prompt": "x"},
+        federation_manager=fm,
+        model_manager=mm,
+        profile_registry=reg,
+        logger=MagicMock(),
+        required_capability="image_generation",
+    )
+    assert resp is not None and resp.status_code == 200
+    assert sent["model"] == "qwen-image-2.1"  # the pod has no recomendado-imagen

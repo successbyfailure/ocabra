@@ -522,3 +522,25 @@ def test_exact_files_download_stays_inside_the_models_dir(monkeypatch, tmp_path)
     for bad in ("../etc", "/etc", "", "a/../../x", "."):
         with pytest.raises(ValueError):
             _safe_local_dir(bad)
+
+
+async def test_model_loaded_by_hand_meanwhile_counts_as_loaded():
+    import asyncio
+
+    from ocabra.core.cloud import preload
+
+    async def already():
+        return httpx.Response(409, json={"detail": "Model is already loaded"})
+
+    task = asyncio.ensure_future(already())
+    await task
+    item = {
+        "model_id": "m",
+        "status": "loading",
+        "node_model_id": "m",
+        "steps": [{"kind": "load"}],
+        "step": 0,
+    }
+    assert await preload._poll_step(
+        SimpleNamespace(), SimpleNamespace(), item, {("p", "m"): task}, ("p", "m")
+    )

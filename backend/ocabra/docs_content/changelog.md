@@ -16,6 +16,21 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.87.3 — 2026-11-16
+
+### Correcciones
+
+- **Editar con `recomendado-imagen` cuando el modelo de generar estaba cargado
+  en otro nodo de la federación.** La selección federada de un router no
+  miraba qué sabe hacer cada destino: un `POST /v1/images/edits` se mandaba al
+  nodo que tenía cargado el modelo de *generar*, y además con el nombre del
+  router, que ese nodo no tenía; respondía 404 y la edición acababa cargando
+  el modelo de editar aquí (expulsando a otro). Ahora el router solo considera
+  destinos capaces de lo que pide el endpoint (generar o editar) y al nodo se
+  le manda el modelo elegido, no el router.
+
+---
+
 ## 0.87.1 — 2026-11-16
 
 ### Correcciones

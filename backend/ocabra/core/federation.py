@@ -1189,11 +1189,28 @@ def should_fallback_to_local(status_code: int) -> bool:
     return status_code in PEER_FALLBACK_STATUSES
 
 
+async def _profile_capable(model_manager: Any, profile: Any, capability: str) -> bool:
+    """Same rule as ``RouterResolver._target_has_capabilities`` (unknown = keep)."""
+    from ocabra.core.model_manager import resolve_display_capabilities
+
+    try:
+        state = await model_manager.get_state(profile.base_model_id)
+        if state is None:
+            return True
+        caps, _source = resolve_display_capabilities(state)
+        return bool(caps.get(capability))
+    except Exception:  # noqa: BLE001 — never block federation on this
+        return True
+
+
 async def resolve_federated(
     model_id: str,
     model_manager: ModelManager,
     federation_manager: FederationManager | None,
     profile_registry: Any = None,
+    *,
+    required_capability: str | None = None,
+    resolved: dict[str, Any] | None = None,
 ) -> tuple[str, PeerState | None]:
     """Decide whether to handle a request locally or proxy to a remote peer.
 
@@ -1215,6 +1232,14 @@ async def resolve_federated(
             canonical model id (``ollama/qwen3:8b``,
             ``diffusers/image/checkpoints/sd_xl_base_1.0.safetensors``) or a
             short profile id (``sdxl-base``, ``acestep/turbo``).
+        required_capability: For routers, skip targets that can't serve the
+            endpoint (``image_editing`` vs ``image_generation``), as
+            ``RouterResolver.pick`` does locally. Without it an edit went to
+            the warm text-to-image target of ``recomendado-imagen``.
+        resolved: Optional dict filled with what was decided: ``model_id``
+            (canonical) and, for routers, ``profile`` (the chosen target), so
+            the caller sends the peer that model rather than the router id
+            (the peer may not have the router at all).
         profile_registry: Optional :class:`ProfileRegistry`. When provided,
             *model_id* is first resolved through the registry; if it matches a
             profile, the profile's ``base_model_id`` is used for the local /
@@ -1255,6 +1280,10 @@ async def resolve_federated(
                         listed = await profile_registry.list_by_model(str(target_id))
                         candidate = listed[0] if listed else None
                     if candidate is not None and candidate.base_model_id is not None:
+                        if required_capability and not await _profile_capable(
+                            model_manager, candidate, required_capability
+                        ):
+                            continue
                         candidates.append(candidate)
                 target = None
                 for candidate in candidates:
@@ -1268,6 +1297,8 @@ async def resolve_federated(
                     target = candidates[0]
                 if target is not None:
                     model_id = target.base_model_id
+                    if resolved is not None:
+                        resolved["profile"] = target
             elif profile.base_model_id is not None:
                 model_id = profile.base_model_id
 
@@ -1283,6 +1314,8 @@ async def resolve_federated(
 
     local_loaded = state is not None and state.status == ModelStatus.LOADED
     local_known = state is not None
+    if resolved is not None:
+        resolved["model_id"] = model_id
 
     # Look up remote candidates that have the model LOADED right now. Try the
     # ollama/<id> canonical form too when the input wasn't canonical.
@@ -1296,6 +1329,8 @@ async def resolve_federated(
             if canonical_peers:
                 remote_peers = list(canonical_peers)
                 model_id = canonical
+                if resolved is not None:
+                    resolved["model_id"] = model_id
 
     # 1. Loaded locally → let the load balancer pick (it knows the local bias).
     if local_loaded:

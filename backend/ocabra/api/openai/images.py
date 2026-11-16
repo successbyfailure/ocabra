@@ -201,6 +201,7 @@ async def image_generations(
         model_manager=model_manager,
         profile_registry=profile_registry,
         logger=logger,
+        required_capability="image_generation",
     )
     if fed_resp is not None:
         return fed_resp
@@ -426,6 +427,7 @@ async def image_edits(
         model_manager=model_manager,
         profile_registry=profile_registry,
         logger=logger,
+        required_capability="image_editing",
     )
     if fed_resp is not None:
         return Response(
