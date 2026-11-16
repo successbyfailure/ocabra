@@ -374,13 +374,25 @@ def _resolve_rs_rollback_snapshots(state) -> int:
         return _LLAMA_CPP_DEFAULT_DRAFT_N_MAX
 
 
-def _resolve_n_cpu_moe(state) -> int | None:
-    """``llama_cpp.n_cpu_moe`` (MoE experts kept in RAM), or None."""
+def _resolve_n_cpu_moe(state, total_layers: int = 0) -> int | None:
+    """Layers whose MoE experts stay in RAM, or None.
+
+    ``llama_cpp.n_cpu_moe`` when set; otherwise an ``override_tensor`` that
+    sends the experts of the first N layers to CPU (``exps=CPU`` = all of
+    them, the older spelling of ``--cpu-moe``). Without the second case such a
+    model was estimated with every expert on the GPU.
+    """
     try:
         raw = resolve_llama_cpp_option(state, "n_cpu_moe", None)
-        return int(raw) if raw is not None else None
+        if raw is not None:
+            return int(raw)
     except (TypeError, ValueError):
         return None
+    from ocabra.core.vram_planner import n_cpu_moe_from_override_tensor
+
+    return n_cpu_moe_from_override_tensor(
+        resolve_llama_cpp_option(state, "override_tensor", None), total_layers
+    )
 
 
 def estimate_llama_cpp_vram_from_config(
@@ -461,7 +473,7 @@ def estimate_llama_cpp_vram_from_config(
             kv_dtype_bytes=kv_dtype_bytes,
             parallel_slots=parallel_slots,
             rs_rollback_snapshots=rs_rollback_snapshots,
-            n_cpu_moe=_resolve_n_cpu_moe(state),
+            n_cpu_moe=_resolve_n_cpu_moe(state, arch.layers),
         )
         if est > 0:
             return est

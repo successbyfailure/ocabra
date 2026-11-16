@@ -16,6 +16,28 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.89.1 — 2026-11-16
+
+### Correcciones
+
+- **Modelos MoE con los expertos en RAM** (`llama_cpp.n_cpu_moe`) en
+  llama.cpp: tras cargar, el modelo figuraba con la VRAM del fichero entero.
+  Por ejemplo, unos 18 GB para Qwen3-30B-A3B con `gpu_layers: 99`, que en
+  realidad ocupa 2–3 GB en la GPU. Esa cifra era la que veían el
+  planificador, las estadísticas y la recarga de los modelos fijados. En una
+  tarjeta pequeña el modelo parecía ocupar la GPU entera y un modelo fijado no
+  volvía a cargarse. Ahora la cifra tras la carga sale del mismo cálculo que
+  antes de cargar: pesos en GPU, KV del contexto configurado y expertos fuera.
+- Los expertos que se quedan en RAM se miden ahora en el propio GGUF, en lugar
+  de suponer una proporción fija. En Qwen3-30B-A3B la proporción fija dejaba
+  ~1,7 GB de más en la GPU.
+- `llama_cpp.override_tensor` que manda los expertos a CPU (`exps=CPU`, o solo
+  los de las N primeras capas) cuenta ahora como `n_cpu_moe`. Antes el modelo
+  se estimaba entero en la GPU. Para otras reglas, fija `vram_estimate_mb` en
+  el modelo.
+
+---
+
 ## 0.89.0 — 2026-11-16
 
 ### Novedades

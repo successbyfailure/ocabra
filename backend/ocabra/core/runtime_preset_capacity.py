@@ -227,8 +227,9 @@ def _resolve_offload(arch: Any, weights_mb: float, placement: dict[str, Any]) ->
 
     ``gpu_layers`` below the model's layer count leaves the rest of the layers
     (their weights and their KV cache) in RAM. ``n_cpu_moe`` keeps the experts
-    of the first N layers in RAM, approximated as ``_MOE_EXPERT_WEIGHT_SHARE``
-    of those layers' weights. llama.cpp offloads the LAST ``gpu_layers``
+    of the first N layers in RAM: their real size when the GGUF tensor table
+    was read (``ModelArch.expert_mb_by_layer``), else ``_MOE_EXPERT_WEIGHT_SHARE``
+    of those layers' weights (same rule as ``vram_planner.moe_cpu_weights_mb``). llama.cpp offloads the LAST ``gpu_layers``
     layers, so only experts of layers that are on GPU leave it.
     """
     if arch is None or not placement:
@@ -243,9 +244,13 @@ def _resolve_offload(arch: Any, weights_mb: float, placement: dict[str, Any]) ->
     fraction = gpu_layers / layers
     gpu_weights = weights_mb * fraction
     if n_cpu_moe > 0:
-        cpu_layers = layers - gpu_layers
-        moe_layers_on_gpu = max(0, n_cpu_moe - cpu_layers)
-        gpu_weights -= weights_mb * moe_layers_on_gpu / layers * _MOE_EXPERT_WEIGHT_SHARE
+        gpu_weights -= vp.moe_cpu_weights_mb(
+            weights_mb,
+            layers,
+            gpu_layers,
+            n_cpu_moe,
+            expert_mb_by_layer=getattr(arch, "expert_mb_by_layer", ()),
+        )
     gpu_weights = max(0.0, gpu_weights)
     return _Offload(
         gpu_fraction=fraction,

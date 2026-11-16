@@ -27,6 +27,9 @@ Validated to the MB against measured Ollama footprints (see tests).
 
 from __future__ import annotations
 
+import functools
+import os
+import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,6 +77,12 @@ class ModelArch:
     # before this fix). The minor per-sequence portion this approximates
     # away is small enough not to matter in practice.
     fixed_load_overhead_mb: float = 0.0
+    # MiB of MoE expert tensors in each layer, read from the GGUF tensor table
+    # (index = layer). What ``--n-cpu-moe N`` moves to RAM is exactly the
+    # experts of the first N layers, so with this the split is measured, not
+    # guessed. Empty when unknown (non-GGUF source, dense model, unreadable
+    # table): callers fall back to ``MOE_EXPERT_WEIGHT_SHARE``.
+    expert_mb_by_layer: tuple[float, ...] = ()
 
     def kv_bytes_per_token(self, kv_dtype_bytes: float = 2.0) -> int:
         """KV cache bytes for one token across all layers (K and V)."""
@@ -480,12 +489,30 @@ def read_gguf_metadata(path: str | Path) -> dict:
     """Parse the GGUF metadata key/value section. Arrays (tokenizer vocab, etc.)
     are seek-skipped, so this reads only the small header regardless of file size.
     """
+    return _read_gguf_header(path, with_experts=False)[0]
+
+
+# Expert tensors as llama.cpp itself matches them for --n-cpu-moe/--cpu-moe
+# (LLM_FFN_EXPS_REGEX, ``\.ffn_(up|down|gate|gate_up)_(ch|)exps``). The shared
+# expert (``ffn_*_shexp``) is not one of them and stays on the GPU.
+_EXPERT_TENSOR = re.compile(r"^blk\.(\d+)\.ffn_(?:up|down|gate|gate_up)_(?:ch|)exps")
+
+
+def _read_gguf_header(path: str | Path, *, with_experts: bool) -> tuple[dict, dict[int, float]]:
+    """Metadata and, if asked, MiB of expert tensors per layer.
+
+    The tensor table follows the metadata and holds each tensor's name and data
+    offset; a tensor's size is the gap to the next offset (the last one runs to
+    the end of the file). Still header-only reading. A table that cannot be
+    read (truncated or synthetic file) gives no expert data, not an error.
+    """
     out: dict = {}
+    experts: dict[int, float] = {}
     with open(path, "rb") as f:
         if f.read(4) != _GGUF_MAGIC:
             raise ValueError("not a GGUF file")
         _version = _gguf_read(f, "<I")
-        _tensor_count = _gguf_read(f, "<Q")
+        tensor_count = _gguf_read(f, "<Q")
         kv_count = _gguf_read(f, "<Q")
         for _ in range(kv_count):
             key = _gguf_read_string(f)
@@ -493,12 +520,49 @@ def read_gguf_metadata(path: str | Path) -> dict:
             value = _gguf_consume_value(f, vtype)
             if value is not None:
                 out[key] = value
-    return out
+        if not with_experts or tensor_count <= 0:
+            return out, experts
+        try:
+            entries: list[tuple[int, str]] = []
+            for _ in range(tensor_count):
+                name = _gguf_read_string(f)
+                n_dims = _gguf_read(f, "<I")
+                f.seek(8 * n_dims + 4, 1)  # dims (u64 each) + ggml type (u32)
+                entries.append((_gguf_read(f, "<Q"), name))
+            alignment = int(out.get("general.alignment") or 32)
+            data_start = -(-f.tell() // alignment) * alignment
+            data_size = os.fstat(f.fileno()).st_size - data_start
+        except (struct.error, ValueError, OSError):
+            return out, {}
+    entries.sort()
+    for i, (offset, name) in enumerate(entries):
+        match = _EXPERT_TENSOR.match(name)
+        if not match:
+            continue
+        end = entries[i + 1][0] if i + 1 < len(entries) else data_size
+        layer = int(match.group(1))
+        experts[layer] = experts.get(layer, 0.0) + max(0, end - offset) / (1024 * 1024)
+    return out, experts
 
 
 def arch_from_gguf(path: str | Path) -> ModelArch | None:
+    """Architecture of a GGUF file, memoized while the file is unchanged.
+
+    Reading the header costs ~100+ ms on a large model (the tokenizer arrays
+    have to be walked) and runs on request paths, so a file with the same path,
+    size and mtime is not parsed twice.
+    """
     try:
-        md = read_gguf_metadata(path)
+        st = os.stat(path)
+    except OSError:
+        return None
+    return _arch_from_gguf_cached(str(path), st.st_mtime_ns, st.st_size)
+
+
+@functools.lru_cache(maxsize=256)
+def _arch_from_gguf_cached(path: str, _mtime_ns: int, _size: int) -> ModelArch | None:
+    try:
+        md, experts = _read_gguf_header(path, with_experts=True)
     except (OSError, ValueError, struct.error):
         return None
     arch = md.get("general.architecture")
@@ -639,6 +703,7 @@ def arch_from_gguf(path: str | Path) -> ModelArch | None:
             kv_elements_override,
             rs_cache_mb_per_slot,
             fixed_load_overhead_mb,
+            tuple(experts.get(i, 0.0) for i in range(layers)) if experts else (),
         )
     except (TypeError, ValueError):
         return None
@@ -671,26 +736,79 @@ def plan_ollama_vram_mb(
 
 
 # Share of a MoE layer's weights that are experts (``--n-cpu-moe`` moves only
-# those to RAM; attention, norms and the shared expert stay on GPU). Rough, but
-# the same figure the preset planner, the editor preview and admission use.
+# those to RAM; attention, norms and the shared expert stay on GPU). Only the
+# fallback when the GGUF tensor table is not available
+# (``ModelArch.expert_mb_by_layer``): measured 2026-11-16 it is right for
+# gemma4:26b (0.849 of the file) but low for Qwen3-30B-A3B (0.946), which made
+# a 6 GB card look ~1.7 GB fuller than it was with every expert in RAM.
 MOE_EXPERT_WEIGHT_SHARE = 0.85
 
 
 def moe_cpu_weights_mb(
-    file_size_mb: float, total_layers: int, gpu_layers: int | None, n_cpu_moe: int | None
+    file_size_mb: float,
+    total_layers: int,
+    gpu_layers: int | None,
+    n_cpu_moe: int | None,
+    *,
+    expert_mb_by_layer: tuple[float, ...] = (),
 ) -> float:
     """MB of expert weights that ``--n-cpu-moe N`` keeps in RAM.
 
     llama.cpp offloads the LAST ``gpu_layers`` layers and ``n_cpu_moe`` counts
     from the first layer, so only the expert layers that would otherwise be on
-    GPU leave it.
+    GPU leave it. With ``expert_mb_by_layer`` (one entry per layer, from the
+    GGUF) the result is the real size of those layers' experts.
     """
     if not n_cpu_moe or n_cpu_moe <= 0:
         return 0.0
     layers = max(1, int(total_layers))
     on_gpu = layers if gpu_layers is None else max(0, min(int(gpu_layers), layers))
-    moe_on_gpu = max(0, min(int(n_cpu_moe), layers) - (layers - on_gpu))
+    first_gpu_layer = layers - on_gpu
+    last_cpu_moe_layer = min(int(n_cpu_moe), layers)
+    if len(expert_mb_by_layer) == layers:
+        return float(sum(expert_mb_by_layer[first_gpu_layer:last_cpu_moe_layer]))
+    moe_on_gpu = max(0, last_cpu_moe_layer - first_gpu_layer)
     return file_size_mb * moe_on_gpu / layers * MOE_EXPERT_WEIGHT_SHARE
+
+
+def n_cpu_moe_from_override_tensor(pattern: str | None, total_layers: int) -> int | None:
+    """``--override-tensor`` rules that send experts to CPU, as ``--n-cpu-moe``.
+
+    ``exps=CPU`` (or ``\\.ffn_.*_exps\\.=CPU``…) is the older spelling of
+    ``--cpu-moe``. The rules are regexes llama.cpp searches in tensor names, so
+    each is tried against every layer's expert tensor names: if the CPU rules
+    cover exactly the first N layers, that is ``n_cpu_moe = N``. Anything else
+    (a scattered set of layers, a non-expert tensor, a GPU target) returns
+    ``None``: the estimate then ignores the rule and over-reserves; set
+    ``vram_estimate_mb`` on the model for an exact figure.
+    """
+    if not pattern or total_layers <= 0:
+        return None
+    cpu_rules = []
+    for rule in str(pattern).split(","):
+        regex, sep, target = rule.strip().rpartition("=")
+        if not sep or not regex:
+            continue
+        if not target.strip().upper().startswith("CPU"):
+            return None  # a rule pinning tensors to some GPU: not modelled
+        try:
+            cpu_rules.append(re.compile(regex))
+        except re.error:
+            return None
+    if not cpu_rules:
+        return None
+    covered = [
+        any(
+            rule.search(f"blk.{layer}.ffn_{kind}_exps.weight")
+            for rule in cpu_rules
+            for kind in ("up", "down", "gate")
+        )
+        for layer in range(total_layers)
+    ]
+    n = 0
+    while n < total_layers and covered[n]:
+        n += 1
+    return n if n > 0 and not any(covered[n:]) else None
 
 
 def plan_llama_cpp_vram_mb(
@@ -723,7 +841,13 @@ def plan_llama_cpp_vram_mb(
     if offloaded <= 0:
         return 0
     frac = offloaded / total_layers
-    moe_cpu_mb = moe_cpu_weights_mb(file_size_mb, total_layers, offloaded, n_cpu_moe)
+    moe_cpu_mb = moe_cpu_weights_mb(
+        file_size_mb,
+        total_layers,
+        offloaded,
+        n_cpu_moe,
+        expert_mb_by_layer=arch.expert_mb_by_layer,
+    )
     weights_mb = max(0.0, file_size_mb * frac - moe_cpu_mb)
     kv_arch = (
         arch

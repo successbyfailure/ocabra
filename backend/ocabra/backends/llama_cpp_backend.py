@@ -163,6 +163,9 @@ class LlamaCppBackend(BackendInterface):
     def __init__(self, gpu_manager: Any | None = None) -> None:
         self._processes: dict[str, _LlamaCppWorker] = {}
         self._model_configs: dict[str, dict[str, Any]] = {}
+        # The extra_config each worker was started with, so the VRAM reported
+        # after the load comes from the same estimator as the one before it.
+        self._load_extra_configs: dict[str, dict[str, Any]] = {}
         self._vision_active: set[str] = set()
         self._vision_locks: dict[str, asyncio.Lock] = {}
         self._gpu_manager = gpu_manager
@@ -227,6 +230,7 @@ class LlamaCppBackend(BackendInterface):
             model_id, gpu_indices, port, extra_config
         )
         self._model_configs[model_id] = options
+        self._load_extra_configs[model_id] = extra_config
 
         # No LD_LIBRARY_PATH of our own: llama-server is compiled in this image,
         # against the CUDA toolkit whose runtime the image registers with the
@@ -512,6 +516,7 @@ class LlamaCppBackend(BackendInterface):
     async def unload(self, model_id: str) -> None:
         await self._kill_process(model_id, graceful=True)
         self._model_configs.pop(model_id, None)
+        self._load_extra_configs.pop(model_id, None)
         self._vision_active.discard(model_id)
         self._vision_locks.pop(model_id, None)
 
@@ -650,43 +655,76 @@ class LlamaCppBackend(BackendInterface):
         )
 
     async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
-        options = self._model_configs.get(model_id, {})
-        if options:
-            # Already loaded at least once — reflects the actually resolved
-            # config, the most accurate source available.
-            gpu_layers = int(options.get("gpu_layers", settings.llama_cpp_gpu_layers))
-            if gpu_layers <= 0:
-                return 0
+        """VRAM the worker needs: weights on the GPU + KV + overhead.
 
-            total_layers = max(1, int(options.get("total_layers", _DEFAULT_TOTAL_LAYERS)))
-            model_file = options.get("model_file")
-            if model_file:
-                size_bytes = await asyncio.to_thread(lambda: Path(model_file).stat().st_size)
-                total_mb = max(1, int(size_bytes / (1024 * 1024)))
-            else:
-                total_mb = max(1, int(options.get("model_vram_mb", 4096)))
-            return max(1, int(total_mb * min(gpu_layers, total_layers) / total_layers))
+        Same estimator before and after the load
+        (``estimate_llama_cpp_vram_from_config``: KV for the configured
+        ``ctx_size``/``cache_type``/slots, ``n_cpu_moe`` and expert
+        ``override_tensor`` rules, an explicit ``vram_estimate_mb``). After the
+        load it uses the config the worker was started with; ``extra_config``,
+        when given, wins (the config may have changed since).
 
-        # Never loaded yet: this used to ignore `extra_config` entirely and
-        # fall back to settings.llama_cpp_gpu_layers, so a never-loaded model
-        # always looked free to the scheduler regardless of what the caller
-        # configured. Reuse the same extra_config-aware resolution
-        # model_manager.py's pre-load path uses (estimate_llama_cpp_vram_from_config)
-        # via a minimal state-shaped shim — it only reads
-        # .model_id/.backend_model_id/.extra_config.
+        Until 2026-11-16 the after-load figure was the file size times
+        ``gpu_layers / total_layers`` instead: a MoE with ``gpu_layers: 99`` and
+        its experts in RAM (``n_cpu_moe``) reported the whole file (~18 GB on a
+        6 GB card), and since the load keeps the larger of both figures, that
+        is what the scheduler, the stats and the PIN autoload saw.
+        """
         from types import SimpleNamespace
 
         from ocabra.core.model_manager_helpers import estimate_llama_cpp_vram_from_config
 
-        shim_state = SimpleNamespace(
-            model_id=model_id, backend_model_id=model_id, extra_config=extra_config or {}
+        options = self._model_configs.get(model_id) or {}
+        config = dict(
+            extra_config
+            if extra_config is not None
+            else self._load_extra_configs.get(model_id) or {}
         )
-        return estimate_llama_cpp_vram_from_config(
+        shim_state = SimpleNamespace(
+            model_id=model_id, backend_model_id=model_id, extra_config=config
+        )
+        # What the worker was actually launched with fills what the config
+        # leaves to defaults or lookups: the file a model found by id resolved
+        # to, and the gpu_layers that were applied.
+        nested = config.get("llama_cpp") if isinstance(config.get("llama_cpp"), dict) else {}
+
+        def _given(*keys: str) -> bool:
+            return any(key in config or key in nested for key in keys)
+
+        if options.get("model_file") and not _given(
+            "model_path", "modelPath", "model_file", "modelFile"
+        ):
+            config["model_file"] = options["model_file"]
+        if options.get("gpu_layers") is not None and not _given("gpu_layers", "gpuLayers"):
+            config["gpu_layers"] = options["gpu_layers"]
+        estimate = await asyncio.to_thread(
+            estimate_llama_cpp_vram_from_config,
             shim_state,
             default_gpu_layers=settings.llama_cpp_gpu_layers,
             default_ctx_size=settings.llama_cpp_ctx_size,
             default_total_layers=_DEFAULT_TOTAL_LAYERS,
         )
+        if estimate > 0 or not options:
+            return estimate
+        return await self._weights_share_estimate_mb(options)
+
+    async def _weights_share_estimate_mb(self, options: dict[str, Any]) -> int:
+        """Last resort when the GGUF cannot be planned: file size × offloaded share.
+
+        Weights only, and blind to ``n_cpu_moe``: used only when the planner
+        returns nothing (unreadable file).
+        """
+        gpu_layers = int(options.get("gpu_layers", settings.llama_cpp_gpu_layers))
+        if gpu_layers <= 0:
+            return 0
+        total_layers = max(1, int(options.get("total_layers", _DEFAULT_TOTAL_LAYERS)))
+        model_file = options.get("model_file")
+        if model_file:
+            size_bytes = await asyncio.to_thread(lambda: Path(model_file).stat().st_size)
+            total_mb = max(1, int(size_bytes / (1024 * 1024)))
+        else:
+            total_mb = max(1, int(options.get("model_vram_mb", 4096)))
+        return max(1, int(total_mb * min(gpu_layers, total_layers) / total_layers))
 
     async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
         entry = self._processes.get(model_id)

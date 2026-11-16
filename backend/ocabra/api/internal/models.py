@@ -2538,7 +2538,16 @@ def _estimate_llama_cpp_memory(
     total_layers = max(1, arch.layers)
     offloaded = max(0, min(gpu_layers, total_layers))
     frac = offloaded / total_layers
-    moe_cpu_mb = vp.moe_cpu_weights_mb(file_size_mb, total_layers, offloaded, load_config.n_cpu_moe)
+    n_cpu_moe = load_config.n_cpu_moe
+    if n_cpu_moe is None:
+        n_cpu_moe = vp.n_cpu_moe_from_override_tensor(load_config.override_tensor, total_layers)
+    moe_cpu_mb = vp.moe_cpu_weights_mb(
+        file_size_mb,
+        total_layers,
+        offloaded,
+        n_cpu_moe,
+        expert_mb_by_layer=arch.expert_mb_by_layer,
+    )
     weights_mb = max(0.0, file_size_mb * frac - moe_cpu_mb)
     kv_arch = (
         arch
@@ -2595,8 +2604,12 @@ def _estimate_llama_cpp_memory(
     ]
     if moe_cpu_mb:
         notes.append(
-            f"Expertos MoE de {load_config.n_cpu_moe} capas en RAM (~{int(moe_cpu_mb)} MB fuera "
-            "de la GPU): estimación aproximada."
+            f"Expertos MoE de {n_cpu_moe} capas en RAM (~{int(moe_cpu_mb)} MB fuera "
+            + (
+                "de la GPU), medidos en el GGUF."
+                if arch.expert_mb_by_layer
+                else "de la GPU): estimación aproximada."
+            )
         )
     if load_config.cache_type_k or load_config.cache_type_v:
         notes.append(
