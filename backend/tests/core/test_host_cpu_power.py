@@ -10,6 +10,8 @@ from ocabra.api.internal import host
 @pytest.mark.parametrize(
     ("model", "expected"),
     [
+        ("AMD Ryzen 7 3800X 8-Core Processor", (105.0, "tdp")),
+        ("AMD Ryzen 7 3800XT 8-Core Processor", (105.0, "tdp")),
         ("AMD Ryzen Threadripper 3960X 24-Core Processor", (280.0, "tdp")),
         ("AMD Ryzen Threadripper PRO 3975WX 32-Cores", (280.0, "tdp")),
         ("AMD Ryzen Threadripper 7980X 64-Cores", (350.0, "tdp")),

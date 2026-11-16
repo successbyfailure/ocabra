@@ -16,6 +16,10 @@ router = APIRouter(tags=["host"])
 # límite (el RAPL de AMD no expone constraint_*). Clave: regex sobre el
 # "model name" de /proc/cpuinfo. Ampliar aquí o fijar CPU_POWER_MAX_W.
 _KNOWN_TDP_W: list[tuple[str, float]] = [
+    # Ryzen 7 3800X y 3800XT: ambos tienen un TDP nominal de 105 W. AMD no
+    # publica el límite de paquete por RAPL en estos Zen 2, así que sin este
+    # fallback la gráfica federada escala contra un pico observado arbitrario.
+    (r"Ryzen 7 3800(?:X|XT)\b", 105.0),
     # Threadripper 3000 (3960X/3970X/3990X, PRO 39x5WX) y PRO 5000 WX: 280 W.
     (r"Threadripper (PRO )?3\d{3}W?X", 280.0),
     (r"Threadripper (PRO )?5\d{3}WX", 280.0),
