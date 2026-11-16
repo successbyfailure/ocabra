@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { AlertCircle, Mic, Square, Wifi, WifiOff } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { getRemoteNode } from "@/lib/remoteNode"
 import type { ModelState, ServerConfig } from "@/types"
 
 interface RealtimeInterfaceProps {
@@ -361,6 +362,13 @@ export function RealtimeInterface({ models }: RealtimeInterfaceProps) {
       return
     }
     if (wsRef.current) return
+    const remote = getRemoteNode()
+    if (remote) {
+      // The panel proxy only carries HTTP: a WebSocket would reach this
+      // server's model, not the node's.
+      setError(`Realtime no funciona desde el panel remoto de ${remote.name}: usa su modelo desde el Playground de este nodo (la federación lo enruta) o abre su propia web.`)
+      return
+    }
     setError(null)
     setConn("connecting")
     try {
