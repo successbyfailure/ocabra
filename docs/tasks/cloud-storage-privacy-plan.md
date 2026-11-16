@@ -120,11 +120,39 @@ pide sepa a qué atenerse y no mande lo que se le va a rechazar.
 | **Franja horaria** | Ofrecer la GPU de noche, por ejemplo |
 | **Privacidad exigida** | Servir a ese peer solo en 0 data, o exigir que el peer sea 0 data para mandarle tráfico |
 
-### Decisiones abiertas
+### Decisiones (usuario, 2026-11-16)
 
-1. ¿Reglas **por peer** (cada vecino las suyas) o **globales** con excepciones?
-   Propuesta: unas por defecto del nodo y ajustes por peer.
-2. ¿El modo enjambre sigue siendo «sin reglas», o es «mis reglas» con todo
-   permitido? Propuesta: lo segundo; un solo mecanismo.
-3. ¿Qué pasa con las peticiones que no se sirven por una regla: 429/503 y el
-   peer decide (lo actual), o el hub reintenta en otro nodo?
+1. **Reglas por defecto del nodo + ajustes por peer.**
+2. **El enjambre es «mis reglas» con todo permitido**: un solo mecanismo.
+3. **Petición rechazada por una regla: como hasta ahora** (429/503 y el peer
+   que la mandó decide; hoy cae a sí mismo). Las estrategias de reparto y de
+   error se verán más adelante.
+
+## 4. Esquinas para cuando se aborden las estrategias de reparto y error
+
+Apuntadas según aparecen; no se tocan hasta entonces.
+
+- **Coste de expulsar**: hoy una carga fría se hace aquí aunque eche un modelo
+  en uso y haya un pod ocioso con sitio (ornith expulsado el 16/11). El
+  reparto debería pesar «qué rompo aquí» frente a «qué pago allí».
+- **Ping-pong entre clientes** (nemotron ↔ gemma4 + embedding, 16/11): dos
+  clientes que no caben juntos se expulsan en bucle; candidato natural a
+  mandar uno de los dos a otro nodo.
+- **Reintento en otro nodo** cuando un peer rechaza por una regla (429
+  «cuota», 503 «no caliente»): hoy cae a local; podría probar el siguiente
+  peer que lo tenga caliente.
+- **Respaldo local caro**: el respaldo local tras un fallo del peer puede
+  disparar una carga fría que expulse algo; quizá mejor devolver el error.
+- **Routers federados**: eligen el primer destino caliente en cualquier nodo;
+  no pesan latencia de red ni coste del pod.
+- **Nodos de pago**: preferir el pod (ya pagado) frente a cargar aquí, o al
+  revés (no gastar si hay sitio local) — política del usuario.
+- **Privacidad como restricción de reparto**: claves o grupos que solo pueden
+  ir a nodos 0 data.
+- **Latencia del túnel** frente a cola local: con una cola larga aquí puede
+  compensar el nodo remoto aunque el modelo esté caliente en los dos.
+- **Heartbeat atrasado**: el reparto usa lo cargado en el último heartbeat
+  (hasta 30 s); un peer que acaba de expulsar el modelo recibe la petición y
+  tiene que cargarlo.
+- **Errores a mitad de stream**: si el peer muere a mitad, hoy el cliente
+  recibe un corte; no hay reintento posible tras empezar a emitir.
