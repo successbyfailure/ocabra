@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { Network } from "lucide-react"
 import { api } from "@/api/client"
+import { getRemoteNode } from "@/lib/remoteNode"
 import type { FederationPeer } from "@/types"
 import { Section } from "./Section"
 
@@ -11,8 +12,14 @@ import { Section } from "./Section"
  */
 export function FederationSection() {
   const [peers, setPeers] = useState<FederationPeer[] | null>(null)
+  // In the remote panel federation calls stay on *this* server (a node's
+  // federation isn't managed from outside), so this list would be ours, not
+  // the remote node's: it showed Mapache and the pod itself on a pod's
+  // dashboard (2026-11-16). Hidden there.
+  const remote = getRemoteNode()
 
   useEffect(() => {
+    if (remote) return
     let active = true
     const load = async () => {
       try {
@@ -28,10 +35,10 @@ export function FederationSection() {
       active = false
       window.clearInterval(id)
     }
-  }, [])
+  }, [remote])
 
   const enabled = (peers ?? []).filter((p) => p.enabled)
-  if (enabled.length === 0) return null
+  if (remote || enabled.length === 0) return null
 
   return (
     <Section title="Federación" badge={<span className="ml-1 text-xs text-muted-foreground">{enabled.filter((p) => p.online).length}/{enabled.length} online</span>}>
