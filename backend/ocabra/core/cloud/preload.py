@@ -515,6 +515,16 @@ async def replicable_models(
         return out_
 
     plans = await asyncio.to_thread(_plans)
+    # ModelState carries no size: the Models API works it out per model.
+    sizes: dict[str, int | None] = {}
+    try:
+        from ocabra.api.internal.models import _resolve_disk_size_bytes
+
+        for mid, st in states.items():
+            if str(getattr(st, "backend_type", "")) in LLAMA_CPP_FAMILY:
+                sizes[mid] = await _resolve_disk_size_bytes(st, {})
+    except Exception:  # noqa: BLE001 — sizes are a nicety
+        pass
     out = []
     for row, (plan, reason) in zip(rows, plans, strict=True):
         st = states.get(row.model_id)
@@ -529,8 +539,7 @@ async def replicable_models(
                 "backend_type": str(row.backend_type),
                 # What the node will download (diffusers: only the files we
                 # use, not the whole repo), else what it takes on our disk.
-                "size_bytes": (plan or {}).get("size_bytes")
-                or getattr(st, "disk_size_bytes", None),
+                "size_bytes": (plan or {}).get("size_bytes") or sizes.get(row.model_id),
                 "loaded": status == "loaded",
                 "replicable": replicable,
                 "reason": reason,

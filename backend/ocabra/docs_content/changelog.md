@@ -16,6 +16,16 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.87.1 — 2026-11-16
+
+### Correcciones
+
+- `GET /ocabra/cloud/replicable-models` devolvía `size_bytes: null` en todos
+  los modelos llama.cpp; ahora trae lo que ocupan en disco (lo mismo que
+  `disk_size_bytes` en `GET /ocabra/models`).
+
+---
+
 ## 0.87.0 — 2026-11-16
 
 ### Novedades
