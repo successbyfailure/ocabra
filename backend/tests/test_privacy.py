@@ -148,16 +148,23 @@ async def test_zero_data_writes_no_request_row(mode, rows, monkeypatch):
 
 
 @requires_db
-async def test_retention_purges_finished_batches_and_old_uploads(tmp_path):
+async def test_retention_purges_finished_batches_and_old_uploads(tmp_path, monkeypatch):
+    import os
+
     from ocabra.core.files_retention import purge_expired
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import User
     from ocabra.db.openai_batches import OpenAIBatch, OpenAIFile
 
+    monkeypatch.setattr(settings, "openai_files_dir", str(tmp_path))
     now = datetime.now(UTC)
     old = now - timedelta(days=10)
     recent = now - timedelta(hours=2)
     uid = uuid.uuid4()
+    # On disk with no row: an old one goes, a fresh one stays.
+    (tmp_path / "orphan_old").write_text("x")
+    os.utime(tmp_path / "orphan_old", (old.timestamp(), old.timestamp()))
+    (tmp_path / "orphan_new").write_text("x")
 
     def mkfile(name, created):
         path = tmp_path / name
@@ -220,12 +227,17 @@ async def test_retention_purges_finished_batches_and_old_uploads(tmp_path):
                     await s.execute(sa.select(OpenAIBatch.status).where(OpenAIBatch.user_id == uid))
                 ).scalars()
             )
-        assert out == {"batches": 1, "files": 3}
+        assert out == {"batches": 1, "files": 3, "orphans": 1}
+        assert not (tmp_path / "orphan_old").exists() and (tmp_path / "orphan_new").exists()
         assert left == {"live_in", "recent_in", "loose_new"}
         assert statuses == ["completed", "in_progress"]  # the recent one and the running one
         assert not (tmp_path / "done_out").exists() and not (tmp_path / "loose_old").exists()
         assert (tmp_path / "live_in").exists()
-        assert await purge_expired(AsyncSessionLocal, 0, now=now) == {"batches": 0, "files": 0}
+        assert await purge_expired(AsyncSessionLocal, 0, now=now) == {
+            "batches": 0,
+            "files": 0,
+            "orphans": 0,
+        }
     finally:
         async with AsyncSessionLocal() as s:
             await s.execute(sa.delete(OpenAIBatch).where(OpenAIBatch.user_id == uid))

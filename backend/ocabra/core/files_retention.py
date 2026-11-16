@@ -12,7 +12,9 @@ Rule, with ``openai_files_retention_hours`` (0 = keep everything):
   ``ON DELETE RESTRICT``;
 * a file **no batch refers to**, uploaded longer ago than the retention, is
   deleted;
-* batches still running, and their files, are never touched.
+* batches still running, and their files, are never touched;
+* files on disk that no row points to (a crash between writing and
+  recording) go too, once older than the retention.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ async def purge_expired(
     from ocabra.db.openai_batches import OpenAIBatch, OpenAIFile
 
     if retention_hours <= 0:
-        return {"batches": 0, "files": 0}
+        return {"batches": 0, "files": 0, "orphans": 0}
     now = now or datetime.now(UTC)
     cutoff = now - timedelta(hours=retention_hours)
     ended_at = sa.func.coalesce(
@@ -101,9 +103,51 @@ async def purge_expired(
         await session.commit()
     for path in to_unlink:
         await asyncio.to_thread(_unlink, path)
-    if deleted_batches or to_unlink:
-        logger.info("files_retention_purged", batches=deleted_batches, files=len(to_unlink))
-    return {"batches": deleted_batches, "files": len(to_unlink)}
+    orphans = await _purge_orphans(session_factory, cutoff)
+    if deleted_batches or to_unlink or orphans:
+        logger.info(
+            "files_retention_purged",
+            batches=deleted_batches,
+            files=len(to_unlink),
+            orphans=orphans,
+        )
+    return {"batches": deleted_batches, "files": len(to_unlink), "orphans": orphans}
+
+
+async def _purge_orphans(session_factory: Any, cutoff: datetime) -> int:
+    """Files in ``openai_files_dir`` no row points to, older than *cutoff*.
+
+    Left behind by a crash between writing a file and recording it (about 50
+    of them in production when this was written); nothing else ever saw them.
+    """
+    from ocabra.config import settings
+    from ocabra.db.openai_batches import OpenAIFile
+
+    root = Path(settings.openai_files_dir)
+    async with session_factory() as session:
+        stored = [
+            p for p in (await session.execute(sa.select(OpenAIFile.storage_path))).scalars() if p
+        ]
+
+    def _sweep() -> int:
+        if not root.is_dir():
+            return 0
+        known = {str(Path(p).resolve()) for p in stored}
+        removed = 0
+        for path in root.iterdir():
+            try:
+                if (
+                    path.is_file()
+                    and str(path.resolve()) not in known
+                    and datetime.fromtimestamp(path.stat().st_mtime, UTC) < cutoff
+                ):
+                    path.unlink(missing_ok=True)
+                    removed += 1
+            except OSError as exc:
+                logger.warning("files_retention_orphan_failed", path=str(path), error=str(exc))
+        return removed
+
+    return await asyncio.to_thread(_sweep)
 
 
 async def retention_loop(stop_event: asyncio.Event, session_factory: Any) -> None:
