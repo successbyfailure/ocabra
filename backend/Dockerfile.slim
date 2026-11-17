@@ -105,13 +105,15 @@ RUN chmod +x /usr/libexec/docker/cli-plugins/docker-compose
 
 # Install only the core oCabra runtime (no backends, no venvs). Dev extras
 # (pytest/ruff) go in the dev stage below.
-COPY pyproject.toml .
+COPY pyproject.toml constraints.txt ./
+# constraints.txt pins every installed package (see its header): rebuilding the
+# same commit must not pull different versions.
 RUN pip install --upgrade pip setuptools wheel \
-    && pip install -e "."
+    && pip install -c constraints.txt -e "."
 
 # --- dev target (slim + pytest/ruff, no AI backends) ---
 FROM base AS dev
-RUN pip install -e ".[dev]"
+RUN pip install -c constraints.txt -e ".[dev]"
 COPY . .
 RUN chmod +x /app/docker-entrypoint.sh
 

@@ -24,9 +24,11 @@ export interface MCPServer {
   url: string | null
   command: string | null
   args: string[] | null
-  env: Record<string, string> | null
+  // The API never returns the env values or the auth value (they are stored
+  // encrypted); these flags say whether there are any saved.
+  hasEnv: boolean
+  hasAuth: boolean
   authType: MCPAuthType
-  // We never return auth_value back; the form sends it on create/update only.
   allowedTools: string[] | null
   groupId: string | null
   groupName: string | null
@@ -53,7 +55,7 @@ export interface MCPServerCreate {
   groupId?: string | null
 }
 
-export interface MCPServerUpdate extends Partial<MCPServerCreate> {}
+export type MCPServerUpdate = Partial<MCPServerCreate>
 
 export interface MCPServerTestResult {
   healthy: boolean
@@ -105,7 +107,7 @@ export interface AgentCreate {
   mcpServers: AgentMCPBinding[]
 }
 
-export interface AgentUpdate extends Partial<AgentCreate> {}
+export type AgentUpdate = Partial<AgentCreate>
 
 export interface AgentTestServerResult {
   mcpServerId: string

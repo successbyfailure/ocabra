@@ -16,6 +16,30 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.105.1 — 2026-11-17
+
+### Correcciones
+
+- **Cancelar la carga de un modelo de imagen, vídeo o escalado** (diffusers,
+  Mage-Flow, FlashVSR, upscaler) dejaba el proceso cargando en la GPU, sin
+  que oCabra lo tuviera registrado: hasta 20 GB de VRAM ocupados que no
+  liberaba nada. Ahora el proceso se para al cancelar.
+- **Un worker colgado** (dejaba de responder a `/health` pero seguía vivo) no
+  se paraba antes del reinicio automático. Según el backend, se arrancaba un
+  segundo worker al lado del primero o se recibía de vuelta el mismo colgado.
+  Ahora se para primero.
+- Si Redis fallaba durante la carga o la descarga, el modelo podía quedarse
+  atascado en `loading` o `unloading` con el worker vivo, y la siguiente
+  petición arrancaba otro. Ya no pasa.
+- Una carga que fallaba o se cancelaba después de reservar la VRAM dejaba esa
+  reserva puesta: la GPU parecía más llena de lo que estaba hasta que el
+  modelo volvía a cargarse en ella o se reiniciaba el servidor.
+- Editar un servidor MCP de tipo stdio (por ejemplo, solo cambiarle el
+  nombre) borraba sus variables de entorno cifradas. Ahora se conservan; para
+  borrarlas hay una casilla explícita.
+
+---
+
 ## 0.105.0 — 2026-11-17
 
 ### Cambios

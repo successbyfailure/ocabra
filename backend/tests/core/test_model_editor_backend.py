@@ -501,8 +501,9 @@ def test_no_model_subroute_is_shadowed_app_wide():
     (``GET /ocabra/models/{id}/profiles``) answered 404 because the models
     router, included first, matched it with its catch-all."""
     from ocabra.main import app
+    from tests._app_routes import effective_routes
 
-    gets = [r.path for r in app.routes if "GET" in getattr(r, "methods", set())]
+    gets = [path for path, methods in effective_routes(app) if "GET" in methods]
     catch_all = gets.index("/ocabra/models/{model_id:path}")
     late = [p for p in gets[catch_all + 1 :] if p.startswith("/ocabra/models/{model_id:path}/")]
     assert not late, f"shadowed by the catch-all: {late}"

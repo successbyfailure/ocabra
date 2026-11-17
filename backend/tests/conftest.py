@@ -134,6 +134,14 @@ def _provision_test_database(url: str) -> None:
 
 
 def _db_reachable() -> bool:
+    """Whether the Postgres host resolves. Only a DNS lookup: writes nothing.
+
+    Until 2026-11-17 this also created and migrated ``<db>_test`` — and it ran
+    while *importing* this file (``requires_db`` is evaluated at collection),
+    so even ``pytest --collect-only`` or a single unit test opened connections
+    and ran Alembic on the production server. Provisioning now happens in
+    :func:`_provisioned_test_db`, the first time a ``requires_db`` test runs.
+    """
     global _DB_REACHABLE
     if _DB_REACHABLE is None:
         import socket
@@ -146,15 +154,40 @@ def _db_reachable() -> bool:
             _DB_REACHABLE = True
         except Exception:
             _DB_REACHABLE = False
-        if _DB_REACHABLE:
-            _provision_test_database(settings.database_url)
     return _DB_REACHABLE
 
 
-requires_db = pytest.mark.skipif(
-    not _db_reachable(),
-    reason="necesita Postgres (no publica puerto al host; correr dentro de Docker)",
+#: Marks a test that needs the real test database. Skipped when Postgres is
+#: unreachable; otherwise the database is provisioned once, lazily.
+requires_db = pytest.mark.requires_db
+
+_REQUIRES_DB_SKIP = pytest.mark.skip(
+    reason="necesita Postgres (no publica puerto al host; correr dentro de Docker)"
 )
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "requires_db: needs the real <db>_test Postgres database")
+
+
+def pytest_collection_modifyitems(config, items):
+    if any(item.get_closest_marker("requires_db") for item in items) and not _db_reachable():
+        for item in items:
+            if item.get_closest_marker("requires_db"):
+                item.add_marker(_REQUIRES_DB_SKIP)
+
+
+@pytest.fixture(scope="session")
+def _provisioned_test_db() -> None:
+    from ocabra.config import settings
+
+    _provision_test_database(settings.database_url)
+
+
+@pytest.fixture(autouse=True)
+def _test_db_for_marked_tests(request):
+    if request.node.get_closest_marker("requires_db"):
+        request.getfixturevalue("_provisioned_test_db")
 
 
 @pytest_asyncio.fixture(autouse=True)

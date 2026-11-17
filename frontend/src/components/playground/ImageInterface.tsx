@@ -328,7 +328,7 @@ export function ImageInterface({
     }
   }
 
-  const useAsEditBase = async (result: ImageResult) => {
+  const loadAsEditBase = async (result: ImageResult) => {
     if (canEdit) {
       try {
         const file = await fileFromUrl(result.url, `input-${result.id}.png`)
@@ -622,7 +622,7 @@ export function ImageInterface({
                 {(canEdit || onSendToEdit) && (
                   <button
                     type="button"
-                    onClick={() => void useAsEditBase(item)}
+                    onClick={() => void loadAsEditBase(item)}
                     className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
                     title="Cargar esta imagen como base de edicion"
                   >

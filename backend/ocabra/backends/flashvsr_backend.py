@@ -137,9 +137,16 @@ class FlashVSRBackend(BackendInterface):
             env=env,
         )
 
+        # Registered before the health wait so unload() can find it while it is
+        # still loading, and BaseException so a cancelled load (CancelledError is
+        # not an Exception) also kills it. Before, cancelling left the worker
+        # loading the model on the GPU with nobody tracking it.
+        self._processes[model_id] = process
         try:
             await self._wait_until_healthy(port=port, process=process, timeout_s=600)
-        except Exception:
+        except BaseException:
+            if self._processes.get(model_id) is process:
+                self._processes.pop(model_id, None)
             await self._terminate_process(process)
             raise
 

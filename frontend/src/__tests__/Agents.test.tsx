@@ -58,8 +58,8 @@ import { useMCPStore } from "@/stores/mcpStore"
 
 describe("Agents page", () => {
   beforeEach(() => {
-    useAgentsStore.setState({ agents: [], loading: false, usingMock: false, error: null })
-    useMCPStore.setState({ servers: [], loading: false, usingMock: false, error: null })
+    useAgentsStore.setState({ agents: [], loading: false, error: null })
+    useMCPStore.setState({ servers: [], loading: false, error: null })
 
     listAgents.mockResolvedValue([
       {
@@ -102,7 +102,9 @@ describe("Agents page", () => {
     expect(screen.getByText(/agent\/research-bot/)).toBeTruthy()
   })
 
-  it("falls back to mock when the API returns 404", async () => {
+  // BUG-47: a 404 (e.g. an older node in the remote panel) used to swap in
+  // made-up agents whose edits lived only in memory.
+  it("shows a 404 as an error, without made-up agents", async () => {
     const notFound = Object.assign(new Error("Not Found"), { status: 404 })
     listAgents.mockRejectedValueOnce(notFound)
     render(
@@ -111,8 +113,9 @@ describe("Agents page", () => {
       </MemoryRouter>,
     )
     await waitFor(() => {
-      // Mock fixture contains "research-bot" as well — assert the mock banner shows up.
-      expect(screen.getByText(/Modo mock/)).toBeTruthy()
+      expect(screen.getByText(/Not Found/)).toBeTruthy()
     })
+    expect(screen.queryByText(/Modo mock/)).toBeNull()
+    expect(screen.queryByText(/Research bot/)).toBeNull()
   })
 })

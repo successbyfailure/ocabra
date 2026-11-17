@@ -645,7 +645,6 @@ function AgentFormModal({ open, onClose, initial, models, servers, groups, agent
 export function Agents() {
   const agents = useAgentsStore((s) => s.agents)
   const loading = useAgentsStore((s) => s.loading)
-  const usingMock = useAgentsStore((s) => s.usingMock)
   const error = useAgentsStore((s) => s.error)
   const fetchAll = useAgentsStore((s) => s.fetchAll)
   const remove = useAgentsStore((s) => s.remove)
@@ -686,17 +685,12 @@ export function Agents() {
   const handleTest = async (agent: Agent) => {
     setPendingTestSlug(agent.slug)
     try {
-      if (usingMock) {
-        await new Promise((r) => window.setTimeout(r, 300))
-        toast.success(`${agent.slug}: healthy (mock) · ${agent.mcpServers.length} servers`)
+      const res = await agentsApi.test(agent.slug)
+      if (res.healthy) {
+        toast.success(`${agent.slug}: healthy · ${res.toolsCount} tools`)
       } else {
-        const res = await agentsApi.test(agent.slug)
-        if (res.healthy) {
-          toast.success(`${agent.slug}: healthy · ${res.toolsCount} tools`)
-        } else {
-          const firstErr = res.errors[0] ?? res.servers.find((s) => !s.healthy)?.error ?? "unhealthy"
-          toast.error(`${agent.slug}: ${firstErr}`)
-        }
+        const firstErr = res.errors[0] ?? res.servers.find((s) => !s.healthy)?.error ?? "unhealthy"
+        toast.error(`${agent.slug}: ${firstErr}`)
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Test fallido")
@@ -750,18 +744,7 @@ export function Agents() {
         </div>
       </div>
 
-      {usingMock && (
-        <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-100">
-          <AlertCircle size={16} className="mt-0.5 shrink-0" />
-          <div>
-            <span className="font-semibold">Modo mock:</span> la API{" "}
-            <code className="font-mono">/ocabra/agents</code> todavía no existe. Se muestran datos
-            de ejemplo hasta que Stream A mergee.
-          </div>
-        </div>
-      )}
-
-      {error && !usingMock && (
+      {error && (
         <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-100">
           <AlertCircle size={16} className="mt-0.5 shrink-0" />
           <div>

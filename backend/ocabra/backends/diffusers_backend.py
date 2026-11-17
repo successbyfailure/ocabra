@@ -221,13 +221,20 @@ class DiffusersBackend(BackendInterface):
             env=env,
         )
 
+        # Registered before the health wait so unload() can find it while it is
+        # still loading, and BaseException so a cancelled load (CancelledError is
+        # not an Exception) also kills it. Before, cancelling left the worker
+        # loading the model on the GPU with nobody tracking it.
+        self._processes[model_id] = process
         try:
             # 180s is fine for 10-12 GB fp16 pipelines, but the Qwen-Image
             # family with GGUF Q5_K_M + NF4 loads sequentially and can take
             # 3-5 min on the first cold read (weights come from ZFS, then
             # bitsandbytes converts NF4 blocks on GPU). Give it 600s.
             await self._wait_until_healthy(port=port, process=process, timeout_s=600)
-        except Exception:
+        except BaseException:
+            if self._processes.get(model_id) is process:
+                self._processes.pop(model_id, None)
             await self._terminate_process(process)
             raise
 

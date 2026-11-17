@@ -54,6 +54,7 @@ function ServerFormModal({ open, onClose, initial, groups, isAdmin }: ServerForm
   const [command, setCommand] = useState("")
   const [argsText, setArgsText] = useState("")
   const [envText, setEnvText] = useState("")
+  const [clearEnv, setClearEnv] = useState(false)
   const [authType, setAuthType] = useState<MCPAuthType>("none")
   const [authValue, setAuthValue] = useState("")
   const [allowedToolsText, setAllowedToolsText] = useState("")
@@ -72,13 +73,10 @@ function ServerFormModal({ open, onClose, initial, groups, isAdmin }: ServerForm
       setUrl(initial.url ?? "")
       setCommand(initial.command ?? "")
       setArgsText((initial.args ?? []).join(" "))
-      setEnvText(
-        initial.env
-          ? Object.entries(initial.env)
-              .map(([k, v]) => `${k}=${v}`)
-              .join("\n")
-          : "",
-      )
+      // The saved values never come back from the API: the field starts empty
+      // and, left empty, keeps them (see buildPayload).
+      setEnvText("")
+      setClearEnv(false)
       setAuthType(initial.authType)
       setAuthValue("")
       const allowed = initial.allowedTools ?? []
@@ -94,6 +92,7 @@ function ServerFormModal({ open, onClose, initial, groups, isAdmin }: ServerForm
       setCommand("")
       setArgsText("")
       setEnvText("")
+      setClearEnv(false)
       setAuthType("none")
       setAuthValue("")
       setAllowedToolsText("")
@@ -164,7 +163,6 @@ function ServerFormModal({ open, onClose, initial, groups, isAdmin }: ServerForm
       url: transport === "stdio" ? null : url.trim() || null,
       command: transport === "stdio" ? command.trim() || null : null,
       args: argsList,
-      env: envObj,
       authType,
       allowedTools,
       groupId: groupId || null,
@@ -175,6 +173,15 @@ function ServerFormModal({ open, onClose, initial, groups, isAdmin }: ServerForm
       payload.authValue = authValue
     }
     // else: edit mode with empty input → leave authValue undefined (omitted)
+
+    // Same rule for env. Editing used to send ``env: null`` whenever the box
+    // was empty — and it always was, because the API never returns the values
+    // — so renaming a stdio server deleted its encrypted variables.
+    if (envObj) {
+      payload.env = envObj
+    } else if (!initial || clearEnv || transport !== "stdio") {
+      payload.env = null
+    }
     return payload
   }
 
@@ -381,8 +388,20 @@ function ServerFormModal({ open, onClose, initial, groups, isAdmin }: ServerForm
                     value={envText}
                     onChange={(e) => setEnvText(e.target.value)}
                     rows={3}
+                    disabled={clearEnv}
+                    placeholder={initial?.hasEnv ? "Variables guardadas: déjalo vacío para conservarlas" : ""}
                     className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
                   />
+                  {initial?.hasEnv && (
+                    <label className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={clearEnv}
+                        onChange={(e) => setClearEnv(e.target.checked)}
+                      />
+                      Borrar las variables guardadas (están cifradas y no se muestran)
+                    </label>
+                  )}
                 </div>
               </div>
             )}
@@ -514,7 +533,6 @@ function ServerFormModal({ open, onClose, initial, groups, isAdmin }: ServerForm
 export function MCPServers() {
   const servers = useMCPStore((s) => s.servers)
   const loading = useMCPStore((s) => s.loading)
-  const usingMock = useMCPStore((s) => s.usingMock)
   const error = useMCPStore((s) => s.error)
   const fetchAll = useMCPStore((s) => s.fetchAll)
   const refresh = useMCPStore((s) => s.refresh)
@@ -548,16 +566,11 @@ export function MCPServers() {
   const handleTest = async (server: MCPServer) => {
     setPendingTestId(server.id)
     try {
-      if (usingMock) {
-        await new Promise((r) => window.setTimeout(r, 300))
-        toast.success(`${server.alias}: healthy (mock) · ${server.toolsCache?.length ?? 0} tools`)
+      const res = await mcpApi.test(server.id)
+      if (res.healthy) {
+        toast.success(`${server.alias}: healthy · ${res.toolsCount} tools`)
       } else {
-        const res = await mcpApi.test(server.id)
-        if (res.healthy) {
-          toast.success(`${server.alias}: healthy · ${res.toolsCount} tools`)
-        } else {
-          toast.error(`${server.alias}: ${res.error ?? "unhealthy"}`)
-        }
+        toast.error(`${server.alias}: ${res.error ?? "unhealthy"}`)
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Test fallido")
@@ -618,18 +631,7 @@ export function MCPServers() {
         </div>
       </div>
 
-      {usingMock && (
-        <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-100">
-          <AlertCircle size={16} className="mt-0.5 shrink-0" />
-          <div>
-            <span className="font-semibold">Modo mock:</span> la API{" "}
-            <code className="font-mono">/ocabra/mcp-servers</code> todavía no existe. Se muestran
-            datos de ejemplo hasta que Stream A mergee.
-          </div>
-        </div>
-      )}
-
-      {error && !usingMock && (
+      {error && (
         <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-100">
           <AlertCircle size={16} className="mt-0.5 shrink-0" />
           <div>

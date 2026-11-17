@@ -1912,9 +1912,40 @@ class ModelManager:
         except Exception as exc:  # noqa: BLE001 — housekeeping must never block startup
             logger.warning("orphan_model_states_purge_failed", error=str(exc))
 
+    async def stop_worker_process(self, state: ModelState) -> None:
+        """Stop the backend process (or daemon-side model) serving ``state``.
+
+        The one place that knows how each backend is told to stop: Ollama
+        models live in a shared daemon and are unloaded through its endpoint;
+        every other backend kills its own worker. Used by :meth:`unload` and by
+        the process monitor when a worker dies or hangs.
+        """
+        backend = await self._worker_pool.get_backend(state.backend_type)
+        if (
+            state.backend_type == "ollama"
+            and state.worker_info is not None
+            and state.worker_info.endpoint_url
+        ):
+            await backend.unload(
+                state.backend_model_id,
+                endpoint_url=state.worker_info.endpoint_url,
+            )
+        else:
+            await backend.unload(state.backend_model_id)
+
     async def _publish_event(self, model_id: str, event: str) -> None:
+        """Tell the dashboard a model changed. Never raises (except cancellation).
+
+        It is a notification, not part of the state machine, but it runs in
+        the middle of it: load() and unload() set LOADING/UNLOADING and publish
+        before their ``try``. A Redis error there used to escape and leave the
+        model stuck in that state with its worker alive; the next request then
+        started a second worker next to it.
+        """
         state = self._states.get(model_id)
-        if state:
+        if not state:
+            return
+        try:
             await publish(
                 "model:events",
                 {
@@ -1924,7 +1955,11 @@ class ModelManager:
                     "new_status": state.status.value,
                 },
             )
-            await self._persist_state(model_id)
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            logger.warning(
+                "model_event_publish_failed", model_id=model_id, model_event=event, error=str(exc)
+            )
+        await self._persist_state(model_id)
 
     async def _persist_state(self, model_id: str) -> None:
         state = self._states.get(model_id)
@@ -2619,6 +2654,7 @@ class ModelManager:
                 self._worker_pool.remove_worker(model_id)
                 if "assigned_port" in locals() and assigned_port:
                     self._worker_pool.release_port(assigned_port)
+                await self._release_failed_load_residency(state, model_id)
                 state.status = ModelStatus.UNLOADED
                 state.live_context = None
                 self._live_context_unsupported.discard(state.model_id)
@@ -2641,6 +2677,7 @@ class ModelManager:
                 self._worker_pool.remove_worker(model_id)
                 if "assigned_port" in locals() and assigned_port:
                     self._worker_pool.release_port(assigned_port)
+                await self._release_failed_load_residency(state, model_id)
                 await self._publish_event(model_id, "load_failed")
                 # ``str(e)`` returns empty for ``asyncio.TimeoutError`` and
                 # some bare exception classes, which used to hide the real
@@ -2668,6 +2705,24 @@ class ModelManager:
                     self._load_tasks.pop(model_id, None)
 
         return state
+
+    async def _release_failed_load_residency(self, state: ModelState, model_id: str) -> None:
+        """Undo the residency a load that failed or was cancelled had recorded.
+
+        The VRAM lock is taken once the worker is up, and awaits that can still
+        fail or be cancelled come after it (load stats, events). Neither error
+        path released it: the reservation stayed in ``GPUManager`` and made the
+        GPU look fuller until the same model loaded there again or the API
+        restarted. Same fields :meth:`unload` clears.
+        """
+        if self._gpu_manager is not None:
+            for gpu_idx in self._gpu_manager.locked_gpu_indices(model_id):
+                await self._gpu_manager.unlock_vram(gpu_idx, model_id)
+        state.current_gpu = []
+        state.vram_used_mb = 0
+        state.ram_used_mb = 0
+        state.worker_info = None
+        state.loaded_at = None
 
     async def _log_cuda_oom_snapshot(self, model_id: str) -> None:
         """Record what every GPU held when admission said a load fit but CUDA
@@ -5037,18 +5092,7 @@ class ModelManager:
         await self._publish_event(model_id, "status_changed")
 
         try:
-            backend = await self._worker_pool.get_backend(state.backend_type)
-            if (
-                state.backend_type == "ollama"
-                and state.worker_info is not None
-                and state.worker_info.endpoint_url
-            ):
-                await backend.unload(
-                    state.backend_model_id,
-                    endpoint_url=state.worker_info.endpoint_url,
-                )
-            else:
-                await backend.unload(state.backend_model_id)
+            await self.stop_worker_process(state)
 
             if self._gpu_manager:
                 for gpu_idx in released_gpu_indices:

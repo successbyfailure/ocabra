@@ -63,6 +63,7 @@ def make_fixtures(**settings_overrides):
     model_manager._gpu_manager = MagicMock()
     model_manager._gpu_manager.unlock_vram = AsyncMock()
     model_manager._wait_for_vram_released = AsyncMock()
+    model_manager.stop_worker_process = AsyncMock()
 
     worker_pool = MagicMock()
     worker_pool._workers = {}
@@ -326,3 +327,36 @@ async def test_un_modelo_que_ya_no_esta_cargado_no_es_una_muerte():
     with patch.object(BackendProcessManager, "_is_pid_alive", return_value=False):
         await bpm._check_worker("vllm/test-model", worker)
     worker_pool.remove_worker.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_hung_worker_is_stopped_before_the_restart():
+    """BUG-03: a worker that stops answering /health is often still alive with
+    its VRAM. The restart launched a second one next to it, or got the same
+    hung worker back from load()."""
+    bpm, model_manager, _worker_pool, _ = make_fixtures()
+    state = FakeModelState()
+    model_manager.get_state.return_value = state
+    order: list[str] = []
+    model_manager.stop_worker_process.side_effect = lambda _s: order.append("stop")
+    model_manager._gpu_manager.unlock_vram.side_effect = lambda *_a: order.append("unlock")
+    model_manager.load.side_effect = lambda _m: order.append("load")
+
+    with patch("ocabra.redis_client.publish_system_alert", new=AsyncMock()):
+        await bpm._handle_worker_death("vllm/test-model", reason="health_check_failed")
+
+    model_manager.stop_worker_process.assert_awaited_once_with(state)
+    assert order == ["stop", "unlock", "load"]
+
+
+@pytest.mark.asyncio
+async def test_a_failure_to_stop_still_frees_and_restarts():
+    bpm, model_manager, _worker_pool, _ = make_fixtures()
+    model_manager.get_state.return_value = FakeModelState()
+    model_manager.stop_worker_process.side_effect = RuntimeError("backend gone")
+
+    with patch("ocabra.redis_client.publish_system_alert", new=AsyncMock()):
+        await bpm._handle_worker_death("vllm/test-model", reason="pid_dead")
+
+    model_manager._gpu_manager.unlock_vram.assert_awaited()
+    model_manager.load.assert_awaited_once_with("vllm/test-model")

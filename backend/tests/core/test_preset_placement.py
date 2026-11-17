@@ -804,10 +804,12 @@ async def test_smoke_test_unknown_model_is_404():
 
 def test_smoke_test_is_registered_as_post_with_model_manager_role():
     from ocabra.main import app
+    from tests._app_routes import effective_routes
 
-    routes = [r for r in app.routes if getattr(r, "path", "") ==
-              "/ocabra/models/{model_id:path}/smoke-test"]
-    assert routes and "POST" in routes[0].methods
+    methods = [
+        m for path, m in effective_routes(app) if path == "/ocabra/models/{model_id:path}/smoke-test"
+    ]
+    assert methods and "POST" in methods[0]
 
 
 def test_silence_wav_is_one_second_of_16k_mono():

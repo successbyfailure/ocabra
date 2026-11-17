@@ -59,7 +59,8 @@ function toMCPServer(raw: unknown): MCPServer {
     url: (d.url ?? null) as string | null,
     command: (d.command ?? null) as string | null,
     args: Array.isArray(d.args) ? (d.args as unknown[]).map(String) : null,
-    env: isRecord(d.env) ? (d.env as Record<string, string>) : null,
+    hasEnv: Boolean(d.has_env ?? d.hasEnv ?? false),
+    hasAuth: Boolean(d.has_auth ?? d.hasAuth ?? false),
     authType: (d.auth_type ?? d.authType ?? "none") as MCPServer["authType"],
     allowedTools: Array.isArray(d.allowed_tools ?? d.allowedTools)
       ? ((d.allowed_tools ?? d.allowedTools) as unknown[]).map(String)

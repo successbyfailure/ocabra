@@ -1,0 +1,73 @@
+# Checks on every push to main and every pull request. Until 2026-11-17 nothing
+# ran by itself: the tests that CLAUDE.md says "will fail if you skip it" only
+# failed when someone remembered to run them.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      # The requires_db tests run against <db>_test on this server; conftest
+      # creates and migrates it the first time one of them runs.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ocabra
+          POSTGRES_PASSWORD: ocabra
+          POSTGRES_DB: ocabra
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ocabra"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://ocabra:ocabra@localhost:5432/ocabra
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/pyproject.toml
+            backend/constraints.txt
+      # Same versions as the api image (constraints.txt).
+      - run: pip install -c constraints.txt -e ".[dev]"
+      - run: ruff check .
+      - run: python -m pytest tests -q -p no:cacheprovider
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20" # same as frontend/Dockerfile
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit -p .
+      - run: npm test

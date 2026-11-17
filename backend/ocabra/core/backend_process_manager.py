@@ -174,7 +174,7 @@ class BackendProcessManager:
 
         Steps:
         1. Log the death
-        2. Mark model as ERROR
+        2. Mark model as ERROR, and stop the process if it is still there
         3. Clean up worker from worker_pool
         4. Release VRAM lock in gpu_manager
         5. Reset GPU/VRAM state on model
@@ -195,6 +195,18 @@ class BackendProcessManager:
         if state:
             state.status = ModelStatus.ERROR
             state.error_message = f"Worker died: {reason}"
+            # A worker that stops answering /health is often still alive,
+            # holding its VRAM. Until 2026-11-17 nothing stopped it: the
+            # restart below either launched a second worker next to it
+            # (llama.cpp, vLLM, …) or got the same hung one back from load(),
+            # which reuses a live process (whisper, TTS, Piper, …). Stopping
+            # an already-dead worker is a no-op for every backend.
+            try:
+                await self._model_manager.stop_worker_process(state)
+            except Exception as exc:  # noqa: BLE001 - still free and restart
+                logger.warning(
+                    "worker_death_stop_failed", model_id=model_id, reason=reason, error=str(exc)
+                )
 
         # 3. Clean up worker from worker_pool
         self._worker_pool.remove_worker(model_id)
