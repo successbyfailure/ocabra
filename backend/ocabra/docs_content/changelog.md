@@ -16,6 +16,25 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.105.2 — 2026-11-17
+
+### Cambios
+
+- Backends de este servidor actualizados a sus últimas versiones y probados
+  con peticiones reales:
+  - **Whisper:** transformers 5.23, NeMo 3.0, pyannote 4.0.7 y torch 2.15.
+    La transcripción y la diarización (`*-diarized`) funcionan igual.
+  - **diffusers:** su rama principal de hoy (0.44.dev), transformers 5.23 y
+    torch 2.15.
+  - **vLLM** 0.34.0, **Piper** con dependencias renovadas y **upscaler** con
+    torch 2.15.
+  - **llama.cpp** (upstream) y **whisper.cpp:** sus últimos commits.
+  - **ACE-Step:** último `main` de upstream.
+- Los nodos en la nube que instalan estos backends desde GHCR reciben las
+  mismas versiones.
+
+---
+
 ## 0.105.1 — 2026-11-17
 
 ### Correcciones
