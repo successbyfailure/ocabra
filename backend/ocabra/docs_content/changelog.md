@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.105.0 — 2026-11-17
+
+### Cambios
+
+- Backends a sus últimas versiones:
+  - **vLLM** 0.32.0 → **0.34.0** (torch 2.14). Afecta a los modelos que sirve
+    vLLM, hoy el reranker bge.
+  - Fuera de este servidor (no instalados aquí, sin probar en ejecución):
+    **SGLang** 0.5.9 → 0.5.23, **Voxtral** (vllm-omni) 0.18 → 0.32 y
+    **Mage-Flow** a diffusers 0.43, transformers 5.23 y torch 2.14.
+
+---
+
 ## 0.104.0 — 2026-11-17
 
 ### Nuevo

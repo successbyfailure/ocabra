@@ -66,8 +66,10 @@ class VoxtralBackend(BackendInterface):
                 # pulled the latest vllm and the worker crashed on import.
                 # Pin both to the 0.18 line to keep them in sync (Deuda D13,
                 # validated 2026-04-25).
-                "vllm==0.18.0",
-                "vllm-omni==0.18.0",
+                # 0.32 line (2026-10-28, latest vllm-omni): same reasoning,
+                # both pinned together. Not installed here; untested.
+                "vllm==0.32.0",
+                "vllm-omni==0.32.0",
             ],
             pip_extra_index_urls=[
                 "https://download.pytorch.org/whl/cu124",

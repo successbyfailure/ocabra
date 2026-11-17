@@ -55,15 +55,17 @@ class MageFlowBackend(BackendInterface):
         # added) builds against a CUDA major matching the host toolkit.
         return BackendInstallSpec(
             pip_packages=[
-                "torch==2.13.0",
-                "torchvision==0.28.0",
-                "diffusers==0.38.0",
-                "transformers==5.5.0",
-                "accelerate==1.13.0",
+                # Latest as of 2026-11-17 (torch 2.14 is the newest with a
+                # matching torchvision). Not installed here; untested.
+                "torch==2.14.0",
+                "torchvision==0.29.0",
+                "diffusers==0.43.0",
+                "transformers==5.23.0",
+                "accelerate==1.16.0",
                 "safetensors==0.8.0",
                 "einops==0.8.2",
-                "pillow==12.3.0",
-                "loguru==0.7.3",
+                "pillow==13.0.0",
+                "loguru==0.8.0",
                 "numpy",
             ],
             pip_extra_index_urls=[

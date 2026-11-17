@@ -80,7 +80,12 @@ class SGLangBackend(BackendInterface):
                 "ninja-build",
             ],
             pip_packages=[
-                "sglang==0.5.9",
+                # 0.5.23 (2026-10-30), latest. It is a CUDA 13 build (torch
+                # 2.14.1, flashinfer cu13) while the toolkit wheels below are
+                # CUDA 12: its JIT may need the CUDA 13 set (and
+                # venv_cuda_home() learning the cu13 wheel layout). Not run on
+                # this server (no SGLang model); revisit on its first install.
+                "sglang==0.5.23",
                 # CUDA toolkit wheels — provide nvcc + headers + libs that
                 # tvm_ffi looks for under CUDA_HOME (Deuda D12, validated
                 # 2026-04-25). venv_cuda_home() in core.backend_installer
