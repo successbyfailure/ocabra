@@ -1,0 +1,26 @@
+# Line endings: LF in every checkout, Windows included.
+# A clone with Windows git (core.autocrlf=true) turned the scripts into CRLF and
+# setup.sh failed in WSL with «env: 'bash\r': No such file or directory»; the
+# scripts copied into the images (docker-entrypoint.sh…) broke the same way.
+* text=auto eol=lf
+
+# Binaries, explicitly (no conversion, no diff).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.wav binary
+*.mp3 binary
+*.ogg binary
+*.flac binary
+*.mp4 binary
+*.gguf binary
+*.safetensors binary
+*.onnx binary
+*.bin binary
+*.pt binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
