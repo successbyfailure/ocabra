@@ -699,8 +699,13 @@ async def test_install_clones_git_repo_into_src_dir(
 
     monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
 
-    async for _ in installer.install("mock", method="source"):
-        pass
+    last = None
+    async for state in installer.install("mock", method="source"):
+        last = state
+
+    # El estado final ya dice la rama, sin esperar a un reinicio.
+    assert last is not None and last.git_ref == "v1.2.3"
+    assert installer.get_state("mock").git_ref == "v1.2.3"
 
     git_call = next(c for c in calls if c and c[0] == "git")
     assert "clone" in git_call and "--depth" in git_call and "--recursive" in git_call

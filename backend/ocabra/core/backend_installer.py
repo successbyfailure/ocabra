@@ -835,6 +835,9 @@ class BackendInstaller:
             fresh = await self._installed_state(backend_type, spec, metadata)
             state.installed_version = fresh.installed_version
             state.packages = fresh.packages
+            # Sin esto la tarjeta se quedaba sin rama/commit hasta el
+            # siguiente reinicio (whisper_cpp el 17/11: ni versión ni rama).
+            state.git_ref = fresh.git_ref
             state.installed_at = _parse_iso(metadata["installed_at"])
             state.install_source = "source"
             state.actual_size_mb = size_mb
