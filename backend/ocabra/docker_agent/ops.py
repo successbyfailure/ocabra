@@ -288,9 +288,6 @@ async def _updater_launch(args: dict[str, Any]) -> dict[str, Any]:
     dep = await _deployment()
     if not dep.can_apply:
         raise OpError(dep.reason or "this deployment does not update itself")
-    if os.environ.get(AGENT_ENV) == "1":
-        # The new release's compose has the agent too: recreate it with the rest.
-        dep.services = [*dep.services, "docker-agent"]
     return await _exec(updater_launch_argv(dep, target, current), timeout=60)
 
 

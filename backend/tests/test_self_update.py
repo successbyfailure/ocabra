@@ -92,7 +92,7 @@ def test_the_updater_script_is_valid_shell_and_does_the_steps():
     assert "OCABRA_API_IMAGE ghcr.io/successbyfailure/ocabra-api:0.96.0" in script
     assert "OCABRA_FRONTEND_IMAGE ghcr.io/successbyfailure/ocabra-frontend:0.96.0" in script
     assert (
-        "docker compose -p ocabra -f /docker/ocabra/docker-compose.yml pull api frontend" in script
+        "docker compose -p ocabra -f /docker/ocabra/docker-compose.yml pull $services" in script
     )
     assert '"0.96.0"' in script  # waits for /health to report the new version
     assert "rollback" in script
@@ -224,3 +224,43 @@ async def test_auto_does_not_retry_a_release_that_failed(monkeypatch):
     clock[0] += 120
     await upd.tick()
     assert applied == ["99.0.1"]
+
+
+def _run_with_agent(tmp_path, compose_services: str) -> str:
+    """Run the updater script's ``with_agent`` with a fake ``docker``."""
+    import re
+    import stat
+
+    dep = su.Deployment(
+        "compose",
+        project="ocabra",
+        working_dir="/docker/ocabra",
+        config_files=["/docker/ocabra/docker-compose.yml"],
+        api_image="ghcr.io/successbyfailure/ocabra-api:0.106.0",
+    )
+    script = su.updater_script(dep, "0.107.0", "0.106.0")
+    function = re.search(r"^with_agent\(\) \{\n.*?^\}\n", script, re.S | re.M).group(0)
+    fake = tmp_path / "docker"
+    fake.write_text(f"#!/bin/sh\nprintf '{compose_services}'\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    out = subprocess.run(
+        ["sh", "-c", function + "with_agent"],
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
+def test_the_updater_also_recreates_the_docker_agent_when_the_compose_has_it(tmp_path):
+    """The agent uses the api image and launches the next updater: left on the
+    old image after an update, it would keep the old code for good."""
+    assert _run_with_agent(tmp_path, "api\\nfrontend\\ndocker-agent\\n") == (
+        "api frontend docker-agent"
+    )
+
+
+def test_the_updater_leaves_the_agent_out_when_the_compose_does_not_define_it(tmp_path):
+    """A rollback to a version without the agent must not ask compose for it."""
+    assert _run_with_agent(tmp_path, "api\\nfrontend\\n") == "api frontend"

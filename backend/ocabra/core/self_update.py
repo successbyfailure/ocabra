@@ -215,7 +215,7 @@ def updater_script(dep: Deployment, version: str, current: str, health_tries: in
     front_new = image_for("frontend", version)
     files = " ".join(f"-f {shlex.quote(f)}" for f in dep.config_files)
     compose = f"docker compose -p {shlex.quote(dep.project or 'ocabra')} {files}".strip()
-    services = " ".join(shlex.quote(s) for s in dep.services)
+    services = shlex.quote(" ".join(dep.services))
     tag = f"v{version}"
     return f"""
 set -u
@@ -246,17 +246,30 @@ fi
 cp -p .env .env.before-update 2>/dev/null || true
 set_env OCABRA_API_IMAGE {shlex.quote(api_new)}
 set_env OCABRA_FRONTEND_IMAGE {shlex.quote(front_new)}
+# docker-agent (the container that holds the Docker socket and launched this
+# updater) uses the api image too, so it is pulled and recreated with it when
+# the checked-out docker-compose.yml defines it. Asked of the compose file in
+# use at each step: the release may add it, and a rollback to a version
+# without it must not ask for it.
+with_agent() {{
+  svc={services}
+  if {compose} config --services 2>/dev/null | grep -qx docker-agent; then
+    case " $svc " in *" docker-agent "*) ;; *) svc="$svc docker-agent" ;; esac
+  fi
+  echo "$svc"
+}}
 rollback() {{
   log "ROLLBACK a {current}: $1"
   [ -f .env.before-update ] && mv -f .env.before-update .env
   [ -n "$prev_commit" ] && as_owner git reset --quiet --hard "$prev_commit"
-  {compose} up -d --no-build {services}
+  {compose} up -d --no-build $(with_agent)
   exit 4
 }}
+services=$(with_agent)
 log "pull {api_new} {front_new}"
-{compose} pull {services} || rollback "pull falló"
-log "recreando {services}"
-{compose} up -d --no-build {services} || rollback "up falló"
+{compose} pull $services || rollback "pull falló"
+log "recreando $services"
+{compose} up -d --no-build $services || rollback "up falló"
 for i in $(seq 1 {int(health_tries)}); do
   sleep 4
   got=$({compose} exec -T api curl -sf localhost:8000/health 2>/dev/null || true)
