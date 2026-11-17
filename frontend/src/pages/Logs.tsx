@@ -2,7 +2,8 @@ import { Fragment, useEffect, useMemo, useState } from "react"
 import { ChevronDown, ChevronRight, Loader2, Search, X } from "lucide-react"
 import { api } from "@/api/client"
 import { useIsModelManager } from "@/hooks/useAuth"
-import type { RecentRequest } from "@/types"
+import type { RecentRequest, ZeroDataSummary } from "@/types"
+import { ZeroDataNotice } from "@/components/common/ZeroDataNotice"
 import { CacheCell, cacheInfo, fmtSpan, prefillSpeedText, requestPhases, TimingBreakdown } from "@/components/dashboard/RequestBreakdown"
 import { fmtClock, fmtContext, fmtRealtime, fmtTps } from "@/components/dashboard/format"
 
@@ -144,6 +145,7 @@ function ExpandedRow({ request, isManager }: { request: RecentRequest; isManager
 export function Logs() {
   const isManager = useIsModelManager()
   const [requests, setRequests] = useState<RecentRequest[]>([])
+  const [zeroData, setZeroData] = useState<ZeroDataSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [limit, setLimit] = useState(100)
   const [autoRefresh, setAutoRefresh] = useState(true)
@@ -156,6 +158,7 @@ export function Logs() {
         ? await api.stats.recent(limit)
         : await api.stats.myRecent(limit)
       setRequests(data.requests ?? [])
+      setZeroData(data.zeroData ?? null)
     } catch {
       // silently fail
     } finally {
@@ -198,6 +201,7 @@ export function Logs() {
         <h1 className="text-xl font-semibold">Logs</h1>
         <p className="text-sm text-muted-foreground">Historial de peticiones al servidor.</p>
       </div>
+      {zeroData && <ZeroDataNotice summary={zeroData} />}
 
       {/* Filter bar */}
       <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-card p-3">

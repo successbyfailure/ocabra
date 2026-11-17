@@ -1736,7 +1736,46 @@ async def _record_stat(
             pass
 
         if privacy.zero_data():
-            # Nothing about this request is stored (core/privacy.py).
+            # Nothing about this request is stored (core/privacy.py): only
+            # its metrics, in memory, for the last 10 (stats/recent_memory.py).
+            try:
+                import uuid as _uuid
+
+                from ocabra.stats import recent_memory
+
+                recent_memory.record(
+                    {
+                        "id": str(_uuid.uuid4()),
+                        "modelId": stat_model_id,
+                        "requestedModel": requested_model,
+                        "backendType": backend_type,
+                        "requestKind": request_kind,
+                        "endpointPath": endpoint_path,
+                        "statusCode": status_code,
+                        "startedAt": started_at.isoformat() if started_at else None,
+                        "durationMs": int(duration_ms),
+                        "inputTokens": input_tokens,
+                        "outputTokens": output_tokens,
+                        "cachedTokens": cached_tokens,
+                        "promptTokensPerSecond": prompt_tokens_per_second,
+                        "predictedTokensPerSecond": predicted_tokens_per_second,
+                        "node": remote_node_name,
+                        "inboundFrom": inbound_from,
+                        "route": federation_route,
+                        "viaRouter": via_router_profile_id,
+                        "runtimeTelemetry": (
+                            telemetry.as_dict()
+                            if isinstance(
+                                (telemetry := getattr(request.state, "runtime_telemetry", None)),
+                                RequestRuntimeTelemetry,
+                            )
+                            else None
+                        ),
+                        "inFlight": False,
+                    }
+                )
+            except Exception:  # noqa: BLE001 — never break the request for this
+                pass
             return
 
         async with AsyncSessionLocal() as session:

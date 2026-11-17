@@ -148,7 +148,11 @@ async def overview_stats(
 @router.get(
     "/stats/recent",
     summary="Recent requests log",
-    description="Return the most recent inference requests with user, group, and timing details.",
+    description=(
+        "Return the most recent inference requests with user, group, and timing details. "
+        "On a «0 data» node only the last 10, kept in memory without who asked or the "
+        "error text, plus `zeroData` with a summary of them."
+    ),
 )
 async def recent_requests(
     request: Request,
@@ -173,8 +177,18 @@ async def recent_requests(
         In-flight rows have statusCode/durationMs/error = null and inFlight = true;
         completed rows have inFlight = false and no elapsed/estimate fields.
     """
-    from ocabra.stats.aggregator import get_recent_requests
-    result = await get_recent_requests(limit)
+    from ocabra.core import privacy
+
+    if privacy.zero_data():
+        # Nothing reaches the database: the last 10, from memory, without
+        # who asked (stats/recent_memory.py).
+        from ocabra.stats import recent_memory
+
+        result = {"requests": recent_memory.recent(limit), "zeroData": recent_memory.summary()}
+    else:
+        from ocabra.stats.aggregator import get_recent_requests
+
+        result = await get_recent_requests(limit)
 
     mm = getattr(request.app.state, "model_manager", None)
     estimator = getattr(request.app.state, "duration_estimator", None)
@@ -370,7 +384,17 @@ async def my_recent_requests(
     limit: int = Query(20, ge=1, le=200),
     user: UserContext = Depends(require_role("user")),
 ) -> dict:
-    """Return the current user's most recent requests."""
+    """Return the current user's most recent requests.
+
+    In «0 data» nothing records who asked, so there is no «mine»: empty, with
+    the summary of the last requests kept in memory.
+    """
+    from ocabra.core import privacy
+
+    if privacy.zero_data():
+        from ocabra.stats import recent_memory
+
+        return {"requests": [], "zeroData": recent_memory.summary()}
     if user.is_anonymous or not user.user_id:
         return {"requests": []}
     from ocabra.stats.aggregator import get_recent_requests_for_user

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
@@ -296,3 +297,84 @@ def test_zero_data_temp_files_go_to_memory(monkeypatch):
 
         shutil.rmtree(privacy.MEMORY_TEMP_DIR, ignore_errors=True)
     assert not status["in_memory"]
+
+
+async def test_zero_data_keeps_the_last_10_requests_in_memory_without_identity(monkeypatch):
+    """«0 data»: nothing reaches the database, but the last 10 requests'
+    metrics are shown — never who asked or the error text."""
+    from ocabra.api.internal import stats as stats_api
+    from ocabra.stats import recent_memory
+
+    recent_memory.clear()
+    for i in range(12):
+        recent_memory.record(
+            {
+                "id": str(i),
+                "modelId": "m",
+                "statusCode": 500 if i == 11 else 200,
+                "durationMs": 100 * (i + 1),
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "predictedTokensPerSecond": 50.0,
+                "username": "javi",
+                "apiKeyName": "clave",
+                "error": "el prompt decía…",
+                "clientAddr": "10.0.0.1",
+            }
+        )
+    rows = recent_memory.recent()
+    assert [r["id"] for r in rows] == [str(i) for i in range(11, 1, -1)]  # newest first, 10 kept
+    assert all(r["username"] is None and r["apiKeyName"] is None for r in rows)
+    assert all(r["error"] is None and r["clientAddr"] is None for r in rows)
+    summary = recent_memory.summary()
+    assert summary["requests"] == 10 and summary["errors"] == 1
+    assert summary["inputTokens"] == 100 and summary["avgPredictedTokensPerSecond"] == 50.0
+
+    monkeypatch.setattr(settings, "privacy_mode", "zero_data")
+    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=None)))
+    out = await stats_api.recent_requests(req, limit=3, user=SimpleNamespace(is_admin=True))
+    assert [r["id"] for r in out["requests"]] == ["11", "10", "9"]
+    assert out["zeroData"]["kept"] == 10
+    recent_memory.clear()
+
+
+async def test_record_stat_in_zero_data_fills_the_memory_buffer(monkeypatch):
+    """The real path: ``_record_stat`` in zero data keeps the metrics (no DB)."""
+    from ocabra.api._deps_auth import UserContext
+    from ocabra.stats import collector, recent_memory
+
+    monkeypatch.setattr(settings, "privacy_mode", "zero_data")
+    recent_memory.clear()
+    user = UserContext(
+        user_id=None,
+        username="alice",
+        role="user",
+        group_ids=[],
+        accessible_model_ids=set(),
+        is_anonymous=False,
+        api_key_name="k",
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(auth_user=user),
+        headers={},
+        client=SimpleNamespace(host="1.2.3.4"),
+        app=SimpleNamespace(state=SimpleNamespace()),
+    )
+    await collector._record_stat(
+        request=request,
+        model_id="gemma4:26b",
+        started_at=datetime.now(UTC),
+        duration_ms=1234,
+        error_message="input echoed: my secret",
+        status_code=200,
+        endpoint_path="/v1/chat/completions",
+        request_kind="chat",
+        input_tokens=40,
+        output_tokens=12,
+        predicted_tokens_per_second=61.5,
+    )
+    (row,) = recent_memory.recent()
+    assert row["requestedModel"] == "gemma4:26b" and row["durationMs"] == 1234
+    assert row["outputTokens"] == 12 and row["predictedTokensPerSecond"] == 61.5
+    assert row["username"] is None and row["apiKeyName"] is None and row["error"] is None
+    recent_memory.clear()

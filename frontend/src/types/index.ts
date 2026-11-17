@@ -1142,6 +1142,19 @@ export interface RecentRequest {
 
 export interface RecentRequestsData {
   requests: RecentRequest[];
+  /** Only on a «0 data» node: the last requests are kept in memory. */
+  zeroData?: ZeroDataSummary;
+}
+
+/** What the last requests of a «0 data» node add up to (kept in memory). */
+export interface ZeroDataSummary {
+  kept: number;
+  requests: number;
+  errors: number;
+  avgDurationMs: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  avgPredictedTokensPerSecond: number | null;
 }
 
 export interface UserStatRow {

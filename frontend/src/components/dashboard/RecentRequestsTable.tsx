@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react"
 import { api } from "@/api/client"
 import { EmptyState } from "@/components/common/EmptyState"
-import type { RecentRequest } from "@/types"
+import type { RecentRequest, ZeroDataSummary } from "@/types"
+import { ZeroDataNotice } from "@/components/common/ZeroDataNotice"
 import { BackendIcon } from "./BackendIcon"
 import { fmtClock, fmtContext, fmtDuration, fmtRealtime, fmtTokens, fmtTps } from "./format"
 import { useGpuStore } from "@/stores/gpuStore"
@@ -24,11 +25,13 @@ export function RecentRequestsTable() {
   const [rows, setRows] = useState<RecentRequest[]>([])
   const [loading, setLoading] = useState(true)
   const [onlyErrors, setOnlyErrors] = useState(false)
+  const [zeroData, setZeroData] = useState<ZeroDataSummary | null>(null)
 
   const load = useCallback(async () => {
     try {
       const result = await api.stats.recent(40)
       setRows(result.requests.filter((r) => !r.inFlight))
+      setZeroData(result.zeroData ?? null)
     } catch {
       /* se conserva lo último */
     } finally {
@@ -49,11 +52,16 @@ export function RecentRequestsTable() {
     return <p className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground">Cargando…</p>
   }
   if (rows.length === 0) {
-    return <EmptyState title="Sin peticiones recientes" description="Aparecerán aquí cuando terminen." />
+    return zeroData ? (
+      <ZeroDataNotice summary={zeroData} />
+    ) : (
+      <EmptyState title="Sin peticiones recientes" description="Aparecerán aquí cuando terminen." />
+    )
   }
 
   return (
     <div className="space-y-2">
+      {zeroData && <ZeroDataNotice summary={zeroData} />}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <label className="flex items-center gap-2 text-xs text-muted-foreground">
           <input type="checkbox" checked={onlyErrors} onChange={(e) => setOnlyErrors(e.target.checked)} />

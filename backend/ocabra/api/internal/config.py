@@ -692,6 +692,9 @@ async def patch_config(
         from ocabra.core.privacy import apply_temp_dir
 
         apply_temp_dir()  # temporary files to RAM (zero data) or back
+        from ocabra.stats import recent_memory
+
+        recent_memory.clear()  # the last 10 of zero data never outlive it
 
     if payload.get("openai_files_retention_hours") is not None:
         settings.openai_files_retention_hours = int(payload["openai_files_retention_hours"])

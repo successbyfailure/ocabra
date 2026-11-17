@@ -16,6 +16,21 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.99.0 — 2026-11-17
+
+### Nuevo
+
+- En un nodo en modo **0 data**, `GET /ocabra/stats/recent` ya no sale vacío:
+  devuelve las **últimas 10 peticiones**, guardadas solo en memoria y sin
+  quién las hizo (usuario, clave, grupo, IP, user agent) ni el texto del error.
+  Trae además un campo `zeroData` con su resumen: cuántas, errores, duración
+  media, tokens y velocidad de generación. Se pierden al reiniciar y al
+  cambiar el modo de privacidad. `GET /ocabra/stats/my-recent` devuelve la
+  lista vacía con ese resumen, porque en 0 data no se sabe de quién es cada
+  petición.
+
+---
+
 ## 0.98.6 — 2026-11-17
 
 ### Errores corregidos

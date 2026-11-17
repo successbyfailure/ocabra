@@ -19,6 +19,7 @@ import { FederationPanel } from "@/components/stats/FederationPanel"
 import { AgentsPanel } from "@/components/stats/AgentsPanel"
 import { RoutingPanel } from "@/components/stats/RoutingPanel"
 import { BatchPriorityPanel } from "@/components/stats/BatchPriorityPanel"
+import { ZeroDataNotice } from "@/components/common/ZeroDataNotice"
 import type {
   ByApiKeyStats,
   ByGroupStats,
@@ -554,6 +555,7 @@ export function Stats() {
         <h1 className="text-2xl font-semibold">Stats</h1>
         <p className="text-muted-foreground">Requests, tokens, latencia, energia, costes y rendimiento.</p>
       </div>
+      {recent.zeroData && <ZeroDataNotice summary={recent.zeroData} />}
 
       {/* Filter bar */}
       <div className="flex flex-wrap items-end gap-3 rounded-lg border border-border bg-card p-3">
