@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { Link as RouterLink } from "react-router-dom"
 import * as Tabs from "@radix-ui/react-tabs"
 import {
   Settings as SettingsIcon,
@@ -15,7 +16,6 @@ import { api } from "@/api/client"
 import { PrivacySettings } from "@/components/settings/PrivacySettings"
 import { ApiAccessSettings } from "@/components/settings/ApiAccessSettings"
 import { BackendRuntimeSettings } from "@/components/settings/BackendRuntimeSettings"
-import { OllamaServerSettings } from "@/components/settings/OllamaServerSettings"
 import { GenerationServicesSettings } from "@/components/settings/GenerationServicesSettings"
 import { GeneralSettings } from "@/components/settings/GeneralSettings"
 import { GlobalSchedules } from "@/components/settings/GlobalSchedules"
@@ -238,7 +238,14 @@ export function Settings() {
 
           <Tabs.Content value="backends">
             <div className="grid gap-4">
-              <OllamaServerSettings config={config} onSave={savePatch} />
+              <p className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground" data-testid="ollama-moved">
+                Los ajustes del servidor Ollama (peticiones simultáneas, contexto máximo y actualización del daemon) están ahora en su
+                tarjeta de{" "}
+                <RouterLink to="/backends" className="text-primary underline">
+                  Backends
+                </RouterLink>
+                .
+              </p>
               <BackendRuntimeSettings config={config} onSave={savePatch} />
             </div>
           </Tabs.Content>

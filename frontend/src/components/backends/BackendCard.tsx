@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ReactNode } from "react"
+import { Link } from "react-router-dom"
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu"
 import {
   ChevronDown,
   Download,
   FileText,
+  Cpu,
   Hammer,
   Package,
   RefreshCw,
@@ -11,6 +13,7 @@ import {
   X,
 } from "lucide-react"
 import { BackendStatusBadge } from "@/components/backends/BackendStatusBadge"
+import { BackendGlyph } from "@/components/dashboard/BackendIcon"
 import { InstallProgressBar } from "@/components/backends/InstallProgressBar"
 import { api } from "@/api/client"
 import type { BackendInstallMethod, BackendModuleState, BackendPublishedInfo } from "@/types"
@@ -22,6 +25,8 @@ interface BackendCardProps {
   onUninstall: (backend: BackendModuleState) => void
   onUpdate?: (backend: BackendModuleState) => void
   onViewLogs: (backend: BackendModuleState) => void
+  /** Controles propios del backend (p. ej. el daemon y los ajustes de Ollama). */
+  extra?: ReactNode
 }
 
 function formatSize(mb: number | null | undefined): string {
@@ -38,32 +43,51 @@ function PackageVersions({
   installed: Record<string, string>
   published: Record<string, string> | null
 }) {
+  const [open, setOpen] = useState(false)
   const names = Array.from(new Set([...Object.keys(installed), ...Object.keys(published ?? {})])).sort()
   if (names.length === 0) return null
+  const differing = published ? names.filter((n) => installed[n] !== published[n]).length : 0
   return (
-    <table className="mt-3 w-full text-[11px]">
-      <thead>
-        <tr className="text-left text-muted-foreground">
-          <th className="font-normal">Paquete</th>
-          <th className="font-normal">Instalado</th>
-          {published && <th className="font-normal">Publicado</th>}
-        </tr>
-      </thead>
-      <tbody className="font-mono">
-        {names.map((n) => {
-          const a = installed[n]
-          const b = published?.[n]
-          const differs = published != null && a !== b
-          return (
-            <tr key={n} className={differs ? "text-amber-600 dark:text-amber-300" : ""}>
-              <td className="pr-2">{n}</td>
-              <td className="truncate pr-2">{a ?? "—"}</td>
-              {published && <td className="truncate">{b ?? "—"}</td>}
-            </tr>
-          )
-        })}
-      </tbody>
-    </table>
+    <div className="mt-3">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+        aria-expanded={open}
+        data-testid="packages-toggle"
+      >
+        <ChevronDown size={12} className={open ? "" : "-rotate-90"} />
+        Paquetes ({names.length})
+        {differing > 0 && <span className="text-amber-600 dark:text-amber-300"> · {differing} distintos del precompilado</span>}
+      </button>
+      {open && (
+        <div className="mt-1.5 overflow-x-auto">
+          <table className="w-full table-fixed text-[11px]">
+            <thead>
+              <tr className="text-left text-muted-foreground">
+                <th className="w-[38%] font-normal">Paquete</th>
+                <th className="font-normal">Instalado</th>
+                {published && <th className="font-normal">Publicado</th>}
+              </tr>
+            </thead>
+            <tbody className="font-mono">
+              {names.map((n) => {
+                const a = installed[n]
+                const b = published?.[n]
+                const differs = published != null && a !== b
+                return (
+                  <tr key={n} className={differs ? "text-amber-600 dark:text-amber-300" : ""}>
+                    <td className="truncate pr-2" title={n}>{n}</td>
+                    <td className="truncate pr-2" title={a}>{a ?? "—"}</td>
+                    {published && <td className="truncate" title={b}>{b ?? "—"}</td>}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -76,6 +100,20 @@ function formatDate(iso: string | null): string {
   }
 }
 
+/** Icono grande del backend en un recuadro: el logo de marca si lo tiene
+ *  (Ollama, vLLM, NVIDIA, Hugging Face) o el de su familia. */
+export function BackendTile({ backendType, size = 44 }: { backendType: string; size?: number }) {
+  return (
+    <div
+      className="flex shrink-0 items-center justify-center rounded-xl border border-border bg-muted/50 text-foreground/85"
+      style={{ width: size, height: size }}
+      data-backend-icon={backendType}
+    >
+      <BackendGlyph backendType={backendType} size={Math.round(size * 0.5)} />
+    </div>
+  )
+}
+
 export function BackendCard({
   backend,
   onInstall,
@@ -83,6 +121,7 @@ export function BackendCard({
   onUninstall,
   onUpdate,
   onViewLogs,
+  extra,
 }: BackendCardProps) {
   const [installMenuOpen, setInstallMenuOpen] = useState(false)
   const [offer, setOffer] = useState<BackendPublishedInfo | null>(null)
@@ -108,14 +147,15 @@ export function BackendCard({
       : `~${formatSize(backend.estimatedSizeMb)}`
 
   return (
-    <div className="flex h-full flex-col rounded-lg border border-border bg-card p-5">
+    <div className="flex h-full flex-col rounded-lg border border-border bg-card p-5" data-backend-card={backend.backendType}>
       {/* Header */}
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <h3 className="truncate text-lg font-semibold text-foreground">
-            {backend.displayName}
-          </h3>
-          <p className="mt-0.5 text-xs text-muted-foreground">{backend.backendType}</p>
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <BackendTile backendType={backend.backendType} />
+          <div className="min-w-0">
+            <h3 className="truncate text-lg font-semibold text-foreground">{backend.displayName}</h3>
+            <p className="mt-0.5 font-mono text-xs text-muted-foreground">{backend.backendType}</p>
+          </div>
         </div>
         <BackendStatusBadge
           status={status}
@@ -221,6 +261,8 @@ export function BackendCard({
         </div>
       )}
 
+      {extra && <div className="mt-4 border-t border-border pt-4">{extra}</div>}
+
       <div className="flex-1" />
 
       {/* Action buttons */}
@@ -292,6 +334,16 @@ export function BackendCard({
               <FileText size={14} />
               Ver logs
             </button>
+            {backend.backendType === "tensorrt_llm" && (
+              <Link
+                to="/engines"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                data-testid="trt-engines-link"
+              >
+                <Cpu size={14} />
+                Engines compilados
+              </Link>
+            )}
             {(offer?.updateAvailable || backend.hasUpdate) && onUpdate && (
               <button
                 type="button"

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react"
 import { ArrowUpCircle, RefreshCw, Loader2, AlertCircle, CheckCircle2 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { OllamaServerSettings } from "@/components/settings/OllamaServerSettings"
+import type { ServerConfig } from "@/types"
 
 type VersionInfo = {
   current: string | null
@@ -20,7 +22,14 @@ type UpdateStatus = {
 
 const POLL_MS = 3000
 
-export function OllamaServerCard() {
+/** Los controles de Ollama, dentro de su tarjeta en Backends: versión y
+ *  actualización del daemon, re-pull de todos sus modelos y los ajustes del
+ *  servidor (peticiones simultáneas y contexto máximo, globales). */
+export function OllamaControls() {
+  const [config, setConfig] = useState<ServerConfig | null>(null)
+  useEffect(() => {
+    api.config.get().then(setConfig).catch(() => setConfig(null))
+  }, [])
   const [version, setVersion] = useState<VersionInfo | null>(null)
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -103,12 +112,12 @@ export function OllamaServerCard() {
   }
 
   if (loading) {
-    return <div className="h-32 animate-pulse rounded-lg border border-border bg-muted/30" />
+    return <div className="h-24 animate-pulse rounded-md bg-muted/30" />
   }
 
   if (error) {
     return (
-      <div className="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-100">
+      <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-100">
         <AlertCircle size={16} className="mt-0.5 shrink-0" />
         <div>
           <span className="font-semibold">Ollama:</span> {error}
@@ -124,26 +133,20 @@ export function OllamaServerCard() {
   const inProgress = status === "pulling" || status === "restarting"
 
   return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold">Servidor Ollama</h2>
-          <p className="text-sm text-muted-foreground">
-            Daemon que gestiona los modelos GGUF de Ollama y los pulls compartidos con llama.cpp.
-          </p>
-        </div>
+    <div className="space-y-4" data-testid="ollama-controls">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-xs font-medium">Daemon</p>
         <button
           type="button"
           onClick={() => void fetchAll()}
-          className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
           title="Recargar"
         >
-          <RefreshCw size={12} />
+          <RefreshCw size={11} />
           Recargar
         </button>
       </div>
-
-      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <div className="-mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <div>
           <div className="text-xs uppercase text-muted-foreground">Instalada</div>
           <div className="mt-1 font-mono text-sm">{current}</div>
@@ -185,7 +188,7 @@ export function OllamaServerCard() {
         </div>
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2">
         <button
           type="button"
           onClick={() => void handleUpdateServer()}
@@ -205,6 +208,18 @@ export function OllamaServerCard() {
           Actualizar todos los modelos
         </button>
       </div>
+      {config && (
+        <div className="border-t border-border pt-4">
+          <OllamaServerSettings
+            embedded
+            config={config}
+            onSave={async (patch) => {
+              setConfig(await api.config.patch(patch))
+              toast.success("Ajustes de Ollama guardados")
+            }}
+          />
+        </div>
+      )}
     </div>
   )
 }

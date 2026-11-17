@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
-import { Cpu, Play, Square, Trash2, RefreshCw } from "lucide-react"
+import { ArrowLeft, Cpu, Play, Square, Trash2, RefreshCw } from "lucide-react"
+import { Link } from "react-router-dom"
+import { useIsAdmin } from "@/hooks/useAuth"
 import { api } from "@/api/client"
 import { useModelStore } from "@/stores/modelStore"
 import type { CompileJob } from "@/types"
@@ -30,6 +32,7 @@ export function TrtllmEngines() {
   const [loading, setLoading] = useState(true)
   const [busyEngine, setBusyEngine] = useState<string | null>(null)
 
+  const isAdmin = useIsAdmin()
   const models = useModelStore((s) => s.models)
   const loadModel = useModelStore((s) => s.loadModel)
   const unloadModel = useModelStore((s) => s.unloadModel)
@@ -88,6 +91,12 @@ export function TrtllmEngines() {
 
   return (
     <div className="space-y-5">
+      {/* Ya no está en el menú: se llega desde la tarjeta de TensorRT-LLM en Backends. */}
+      {isAdmin && (
+        <Link to="/backends" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
+          <ArrowLeft size={14} /> Backends
+        </Link>
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold flex items-center gap-2">

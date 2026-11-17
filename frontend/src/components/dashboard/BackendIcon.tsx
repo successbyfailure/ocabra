@@ -27,9 +27,25 @@ const FAMILY: Record<string, LucideIcon> = {
   piper: AudioLines,
   chatterbox: AudioLines,
   mageflow: ImageIcon,
+  mage: ImageIcon,
   upscaler: ImageIcon,
   flashvsr: ImageIcon,
   acestep: Music,
+}
+
+/** Solo el icono de un backend (logo de marca o icono de familia), a
+ *  cualquier tamaño: lo usan la insignia de abajo y las tarjetas de Backends. */
+export function BackendGlyph({ backendType, size = 12 }: { backendType: string; size?: number }) {
+  const brand = BRAND[backendType]
+  if (brand) {
+    return (
+      <svg role="img" aria-hidden viewBox="0 0 24 24" width={size} height={size} fill="currentColor">
+        <path d={brand.path} />
+      </svg>
+    )
+  }
+  const Family = FAMILY[backendType] ?? Boxes
+  return <Family size={size} aria-hidden />
 }
 
 /** Icono + nombre corto del backend de un modelo. */
@@ -42,8 +58,6 @@ export function BackendIcon({
   showLabel?: boolean
   className?: string
 }) {
-  const brand = BRAND[backendType]
-  const Family = FAMILY[backendType] ?? Boxes
   const label = backendLabel(backendType)
   return (
     <span
@@ -51,13 +65,7 @@ export function BackendIcon({
       title={`Backend: ${label}`}
       data-backend={backendType}
     >
-      {brand ? (
-        <svg role="img" aria-hidden viewBox="0 0 24 24" width={12} height={12} fill="currentColor">
-          <path d={brand.path} />
-        </svg>
-      ) : (
-        <Family size={12} aria-hidden />
-      )}
+      <BackendGlyph backendType={backendType} />
       {showLabel && <span>{label}</span>}
     </span>
   )

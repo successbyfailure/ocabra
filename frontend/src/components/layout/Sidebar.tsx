@@ -2,7 +2,6 @@ import { NavLink } from "react-router-dom"
 import {
   LayoutDashboard,
   Boxes,
-  Cpu,
   Search,
   MessageSquare,
   BarChart2,
@@ -60,7 +59,6 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/profiles",  label: "Profiles",    icon: Layers3,        minRole: "model_manager" },
   { to: "/routers",   label: "Routers",    icon: GitBranch,      minRole: "model_manager" },
   { to: "/openai-compat", label: "OpenAI Compat", icon: ArrowRightLeft, minRole: "model_manager" },
-  { to: "/engines",   label: "Engines",    icon: Cpu,            minRole: "model_manager" },
   { to: "/explore",   label: "Explore",    icon: Search,         minRole: "model_manager" },
   { to: "/playground",label: "Playground", icon: MessageSquare },
   { to: "/batches",   label: "Lotes",      icon: ListChecks,     minRole: "model_manager" },

@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
-import { RefreshCw, AlertCircle } from "lucide-react"
+import { AlertCircle, Plus, RefreshCw } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { AddBackendDialog } from "@/components/backends/AddBackendDialog"
 import { BackendCard } from "@/components/backends/BackendCard"
 import { ConfirmUninstallDialog } from "@/components/backends/ConfirmUninstallDialog"
-import { OllamaServerCard } from "@/components/backends/OllamaServerCard"
+import { OllamaControls } from "@/components/backends/OllamaServerCard"
 import { useBackendsStore } from "@/stores/backendsStore"
+import { useModelStore } from "@/stores/modelStore"
 import type { BackendInstallMethod, BackendModuleState } from "@/types"
 
 export function Backends() {
@@ -20,6 +22,22 @@ export function Backends() {
   const uninstall = useBackendsStore((s) => s.uninstall)
 
   const [uninstallTarget, setUninstallTarget] = useState<BackendModuleState | null>(null)
+  const [adding, setAdding] = useState(false)
+  // La API de backends no dice cuántos modelos tiene cargados cada uno
+  // (siempre salía 0): se cuentan de la lista de modelos.
+  const models = useModelStore((s) => s.models)
+  const setModels = useModelStore((s) => s.setModels)
+  useEffect(() => {
+    api.models.list().then(setModels).catch(() => {})
+  }, [setModels])
+  const loadedBy = new Map<string, number>()
+  for (const m of Object.values(models)) {
+    if (m.status === "loaded") loadedBy.set(m.backendType, (loadedBy.get(m.backendType) ?? 0) + 1)
+  }
+  // En la página solo lo que está (o está entrando o saliendo, o falló al
+  // instalarse); el resto se añade desde el catálogo.
+  const present = backends.filter((b) => b.installStatus !== "not_installed")
+  const available = backends.filter((b) => b.installStatus === "not_installed")
   const [logsTarget, setLogsTarget] = useState<BackendModuleState | null>(null)
   const [logsContent, setLogsContent] = useState<string>("")
   const [logsLoading, setLogsLoading] = useState(false)
@@ -82,18 +100,29 @@ export function Backends() {
         <div>
           <h1 className="text-2xl font-semibold">Backends</h1>
           <p className="text-muted-foreground">
-            Instala, actualiza y desinstala los backends de inferencia.
+            Los motores de inferencia instalados en este servidor. Añade más desde el catálogo.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void fetchAll()}
-          className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="Recargar"
-        >
-          <RefreshCw size={14} />
-          Recargar
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void fetchAll()}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+            title="Recargar"
+          >
+            <RefreshCw size={14} />
+            Recargar
+          </button>
+          <button
+            type="button"
+            onClick={() => setAdding(true)}
+            disabled={loading && backends.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+          >
+            <Plus size={14} />
+            Añadir backend{available.length ? ` (${available.length})` : ""}
+          </button>
+        </div>
       </div>
 
       {usingMock && (
@@ -106,8 +135,6 @@ export function Backends() {
           </div>
         </div>
       )}
-
-      <OllamaServerCard />
 
       {error && !usingMock && (
         <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-100">
@@ -127,25 +154,33 @@ export function Backends() {
             />
           ))}
         </div>
-      ) : backends.length === 0 ? (
+      ) : present.length === 0 ? (
         <div className="rounded-md border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
-          No hay backends disponibles.
+          No hay ningún backend instalado.{" "}
+          {available.length > 0 && (
+            <button type="button" className="text-primary underline" onClick={() => setAdding(true)}>
+              Añade uno
+            </button>
+          )}
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {backends.map((backend) => (
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,380px),1fr))] gap-4">
+          {present.map((backend) => (
             <BackendCard
               key={backend.backendType}
-              backend={backend}
+              backend={{ ...backend, modelsLoaded: loadedBy.get(backend.backendType) ?? 0 }}
               onInstall={handleInstall}
               onCancelInstall={handleCancel}
               onUninstall={handleRequestUninstall}
               onUpdate={(b) => handleInstall(b.backendType, "oci")}
               onViewLogs={handleViewLogs}
+              extra={backend.backendType === "ollama" && backend.installStatus === "installed" ? <OllamaControls /> : undefined}
             />
           ))}
         </div>
       )}
+
+      <AddBackendDialog open={adding} onOpenChange={setAdding} available={available} onInstall={handleInstall} />
 
       <ConfirmUninstallDialog
         open={uninstallTarget !== null}

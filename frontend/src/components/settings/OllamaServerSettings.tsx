@@ -17,9 +17,12 @@ const CONTEXTS = [16384, 32768, 65536, 131072, 262144]
 export function OllamaServerSettings({
   config,
   onSave,
+  embedded = false,
 }: {
   config: ServerConfig
   onSave: (patch: Partial<ServerConfig>) => Promise<void>
+  /** Dentro de la tarjeta de Ollama en Backends: sin marco ni título propios. */
+  embedded?: boolean
 }) {
   const [parallel, setParallel] = useState(config.ollamaNumParallel ?? 2)
   const [maxContext, setMaxContext] = useState(config.ollamaMaxContext ?? 65536)
@@ -66,10 +69,14 @@ export function OllamaServerSettings({
   }
 
   return (
-    <section className="space-y-3 rounded-lg border border-border bg-card p-4" data-testid="ollama-server-settings">
+    <section className={embedded ? "space-y-3" : "space-y-3 rounded-lg border border-border bg-card p-4"} data-testid="ollama-server-settings">
       <div>
-        <h2 className="text-base font-semibold">Servidor Ollama</h2>
-        <p className="text-sm text-muted-foreground">
+        {embedded ? (
+          <p className="text-xs font-medium">Servidor (todos los modelos de Ollama)</p>
+        ) : (
+          <h2 className="text-base font-semibold">Servidor Ollama</h2>
+        )}
+        <p className={embedded ? "text-xs text-muted-foreground" : "text-sm text-muted-foreground"}>
           Un único servidor para todos los modelos de Ollama. Cada modelo cargado reserva KV para el contexto × las peticiones
           simultáneas, así que subir cualquiera de los dos sube la memoria de todos.
         </p>
