@@ -16,7 +16,13 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -41,26 +47,33 @@ class _TensorRTLLMWorker:
 class TensorRTLLMBackend(BackendInterface):
     """TensorRT-LLM backend.
 
-    NOTE on modular install (Bloque 15 Fase 2): this backend deliberately
-    does NOT expose an :pyattr:`install_spec`. The TensorRT-LLM distribution
-    path is NVIDIA's NGC container (``nvcr.io/nvidia/tritonserver``) which
-    is too large and too vendor-specific to install via the source/pip path
-    used by the other backends. Source-from-PyPI paths exist
-    (``pypi.nvidia.com``) but pin to specific CUDA/driver versions and
-    drag in tensorrt + cuda-cudnn wheels that are not portable across hosts.
-
-    Tracked under Fase 3 OCI: when the OCI install path lands in
-    BackendInstaller, this backend can declare an OCI image that simply
-    repackages the relevant pieces of the NGC container. Until then the
-    backend stays "built-in" — it relies on the docker-compose stack having
-    docker-in-docker access to spawn the NGC container as a sibling service.
+    Installable like the other backends. In the ``docker`` launch mode (the
+    one used here) the runtime is NVIDIA's NGC image, started as a sibling
+    container per model, so installing it = ``docker pull`` of
+    ``TENSORRT_LLM_DOCKER_IMAGE`` (``backend/scripts/install_tensorrt_llm.sh``).
+    Needs the docker CLI and socket: the ocabra-node image cannot install it.
+    Engines are compiled per model and GPU from the TRT-LLM Engines page.
     """
 
     @classmethod
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.TEXT_GENERATION}
 
-    # install_spec deliberately omitted — see class docstring.
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        return BackendInstallSpec(
+            post_install_script="backend/scripts/install_tensorrt_llm.sh",
+            extra_bins={"serve": "bin/trtllm-serve"},
+            include_core_runtime=False,
+            estimated_size_mb=30000,
+            display_name="TensorRT-LLM",
+            description=(
+                "NVIDIA TensorRT-LLM through its NGC container: engines compiled "
+                "per model and GPU. Installing pulls the image (tens of GB, in "
+                "Docker's storage)."
+            ),
+            tags=["LLM", "GPU", "CUDA", "NVIDIA"],
+        )
 
     def __init__(self) -> None:
         self._processes: dict[str, _TensorRTLLMWorker] = {}
@@ -82,16 +95,77 @@ class TensorRTLLMBackend(BackendInterface):
         engine_dir = self._resolve_engine_dir(model_id, extra_config)
         tokenizer_path = self._resolve_tokenizer_path(model_id, extra_config, engine_dir)
 
-        launch_mode = str(self._get_option(extra_config, "launch_mode", settings.tensorrt_llm_launch_mode)).strip().lower() or "binary"
-        python_bin = str(self._get_option(extra_config, "python_bin", settings.tensorrt_llm_python_bin)).strip() or sys.executable
-        serve_bin = str(self._get_option(extra_config, "serve_bin", settings.tensorrt_llm_serve_bin)).strip() or settings.tensorrt_llm_serve_bin
-        serve_module = str(self._get_option(extra_config, "serve_module", settings.tensorrt_llm_serve_module)).strip() or settings.tensorrt_llm_serve_module
-        docker_bin = str(self._get_option(extra_config, "docker_bin", settings.tensorrt_llm_docker_bin)).strip() or settings.tensorrt_llm_docker_bin
-        docker_image = str(self._get_option(extra_config, "docker_image", settings.tensorrt_llm_docker_image)).strip() or settings.tensorrt_llm_docker_image
-        docker_models_mount_host = str(self._get_option(extra_config, "docker_models_mount_host", settings.tensorrt_llm_docker_models_mount_host)).strip() or settings.tensorrt_llm_docker_models_mount_host
-        docker_models_mount_container = str(self._get_option(extra_config, "docker_models_mount_container", settings.tensorrt_llm_docker_models_mount_container)).strip() or settings.tensorrt_llm_docker_models_mount_container
-        docker_hf_cache_mount_host = self._get_option(extra_config, "docker_hf_cache_mount_host", settings.tensorrt_llm_docker_hf_cache_mount_host)
-        docker_hf_cache_mount_container = str(self._get_option(extra_config, "docker_hf_cache_mount_container", settings.tensorrt_llm_docker_hf_cache_mount_container)).strip() or settings.tensorrt_llm_docker_hf_cache_mount_container
+        launch_mode = (
+            str(self._get_option(extra_config, "launch_mode", settings.tensorrt_llm_launch_mode))
+            .strip()
+            .lower()
+            or "binary"
+        )
+        python_bin = (
+            str(
+                self._get_option(extra_config, "python_bin", settings.tensorrt_llm_python_bin)
+            ).strip()
+            or sys.executable
+        )
+        serve_bin = (
+            str(
+                self._get_option(extra_config, "serve_bin", settings.tensorrt_llm_serve_bin)
+            ).strip()
+            or settings.tensorrt_llm_serve_bin
+        )
+        serve_module = (
+            str(
+                self._get_option(extra_config, "serve_module", settings.tensorrt_llm_serve_module)
+            ).strip()
+            or settings.tensorrt_llm_serve_module
+        )
+        docker_bin = (
+            str(
+                self._get_option(extra_config, "docker_bin", settings.tensorrt_llm_docker_bin)
+            ).strip()
+            or settings.tensorrt_llm_docker_bin
+        )
+        docker_image = (
+            str(
+                self._get_option(extra_config, "docker_image", settings.tensorrt_llm_docker_image)
+            ).strip()
+            or settings.tensorrt_llm_docker_image
+        )
+        docker_models_mount_host = (
+            str(
+                self._get_option(
+                    extra_config,
+                    "docker_models_mount_host",
+                    settings.tensorrt_llm_docker_models_mount_host,
+                )
+            ).strip()
+            or settings.tensorrt_llm_docker_models_mount_host
+        )
+        docker_models_mount_container = (
+            str(
+                self._get_option(
+                    extra_config,
+                    "docker_models_mount_container",
+                    settings.tensorrt_llm_docker_models_mount_container,
+                )
+            ).strip()
+            or settings.tensorrt_llm_docker_models_mount_container
+        )
+        docker_hf_cache_mount_host = self._get_option(
+            extra_config,
+            "docker_hf_cache_mount_host",
+            settings.tensorrt_llm_docker_hf_cache_mount_host,
+        )
+        docker_hf_cache_mount_container = (
+            str(
+                self._get_option(
+                    extra_config,
+                    "docker_hf_cache_mount_container",
+                    settings.tensorrt_llm_docker_hf_cache_mount_container,
+                )
+            ).strip()
+            or settings.tensorrt_llm_docker_hf_cache_mount_container
+        )
 
         cmd = [
             sys.executable,
@@ -182,7 +256,9 @@ class TensorRTLLMBackend(BackendInterface):
             stderr=log_file,
             start_new_session=True,
         )
-        self._processes[model_id] = _TensorRTLLMWorker(process=process, port=port, log_file=log_file)
+        self._processes[model_id] = _TensorRTLLMWorker(
+            process=process, port=port, log_file=log_file
+        )
 
         try:
             await self._wait_for_startup(
@@ -204,7 +280,11 @@ class TensorRTLLMBackend(BackendInterface):
         # only assigned one GPU (because total VRAM fit on one), override with
         # all available GPUs up to tp_size so UI shows correct GPU list.
         engine_dir_loaded = self._resolve_engine_dir(model_id, extra_config)
-        scan_dir_loaded = engine_dir_loaded / "engine" if (engine_dir_loaded / "engine").is_dir() else engine_dir_loaded
+        scan_dir_loaded = (
+            engine_dir_loaded / "engine"
+            if (engine_dir_loaded / "engine").is_dir()
+            else engine_dir_loaded
+        )
         tp_size = self._read_engine_tp_size(scan_dir_loaded)
         actual_gpu_indices = gpu_indices if len(gpu_indices) >= tp_size else list(range(tp_size))
 
@@ -335,7 +415,9 @@ class TensorRTLLMBackend(BackendInterface):
             raise KeyError(f"No TensorRT-LLM worker for model '{model_id}'")
         port = entry.port
         async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("POST", f"http://127.0.0.1:{port}{path}", json=body) as response:
+            async with client.stream(
+                "POST", f"http://127.0.0.1:{port}{path}", json=body
+            ) as response:
                 response.raise_for_status()
                 async for chunk in response.aiter_bytes():
                     yield chunk
@@ -349,27 +431,36 @@ class TensorRTLLMBackend(BackendInterface):
             return f"unsupported launch mode: {launch_mode}"
 
         if launch_mode == "binary":
-            if not shutil.which(settings.tensorrt_llm_serve_bin) and not Path(
-                settings.tensorrt_llm_serve_bin
-            ).exists():
+            if (
+                not shutil.which(settings.tensorrt_llm_serve_bin)
+                and not Path(settings.tensorrt_llm_serve_bin).exists()
+            ):
                 return f"serve binary not found: {settings.tensorrt_llm_serve_bin}"
             return None
 
         if launch_mode == "module":
-            python_bin = settings.tensorrt_llm_python_bin.strip() if settings.tensorrt_llm_python_bin else ""
+            python_bin = (
+                settings.tensorrt_llm_python_bin.strip() if settings.tensorrt_llm_python_bin else ""
+            )
             if not python_bin:
                 return "python launcher not configured for module mode"
             if not shutil.which(python_bin) and not Path(python_bin).exists():
                 return f"python launcher not found: {python_bin}"
 
-            module_name = settings.tensorrt_llm_serve_module.strip() if settings.tensorrt_llm_serve_module else ""
+            module_name = (
+                settings.tensorrt_llm_serve_module.strip()
+                if settings.tensorrt_llm_serve_module
+                else ""
+            )
             if not module_name:
                 return "serve module not configured for module mode"
             if not self._module_available(python_bin, module_name):
                 return f"serve module not available: {module_name}"
             return None
 
-        docker_bin = settings.tensorrt_llm_docker_bin.strip() if settings.tensorrt_llm_docker_bin else ""
+        docker_bin = (
+            settings.tensorrt_llm_docker_bin.strip() if settings.tensorrt_llm_docker_bin else ""
+        )
         if not docker_bin:
             return "docker launcher not configured for docker mode"
         if not shutil.which(docker_bin) and not Path(docker_bin).exists():
@@ -429,7 +520,10 @@ class TensorRTLLMBackend(BackendInterface):
         extra_config: dict[str, Any],
         engine_dir: Path,
     ) -> Path | None:
-        explicit = self._get_option(extra_config, "tokenizer_path", None) or settings.tensorrt_llm_tokenizer_path
+        explicit = (
+            self._get_option(extra_config, "tokenizer_path", None)
+            or settings.tensorrt_llm_tokenizer_path
+        )
         if explicit:
             path = Path(str(explicit))
             if path.exists():
@@ -543,9 +637,7 @@ class TensorRTLLMBackend(BackendInterface):
         await self._run_host_helper("sh", "-lc", script)
 
     async def _run_host_helper(self, entrypoint: str, *args: str) -> str:
-        helper_image = (
-            str(settings.tensorrt_llm_host_helper_image).strip() or "ocabra-api:slim"
-        )
+        helper_image = str(settings.tensorrt_llm_host_helper_image).strip() or "ocabra-api:slim"
         docker_bin = str(settings.tensorrt_llm_docker_bin).strip() or "docker"
         process = await asyncio.create_subprocess_exec(
             docker_bin,
@@ -563,7 +655,10 @@ class TensorRTLLMBackend(BackendInterface):
         if (process.returncode or 0) != 0:
             raise RuntimeError(
                 "host helper failed: "
-                + (stderr.decode("utf-8", errors="ignore").strip() or f"exit_code={process.returncode}")
+                + (
+                    stderr.decode("utf-8", errors="ignore").strip()
+                    or f"exit_code={process.returncode}"
+                )
             )
         return stdout.decode("utf-8", errors="ignore")
 
@@ -586,7 +681,9 @@ class TensorRTLLMBackend(BackendInterface):
             return False
 
         models_host = str(settings.tensorrt_llm_docker_models_mount_host or "").rstrip("/")
-        models_container = str(settings.tensorrt_llm_docker_models_mount_container or "").rstrip("/")
+        models_container = str(settings.tensorrt_llm_docker_models_mount_container or "").rstrip(
+            "/"
+        )
         engine_markers = [
             f"{models_host}/tensorrt_llm/" if models_host else "",
             f"{models_container}/tensorrt_llm/" if models_container else "",

@@ -16,6 +16,21 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.100.0 — 2026-11-17
+
+### Cambios
+
+- `strata` y `tensorrt_llm` se instalan como el resto de backends
+  (`POST /ocabra/backends/{tipo}/install`); antes figuraban como integrados.
+  Strata instala su Terminal 0.1.59.1 fijado y verificado por SHA-256 (el motor
+  y los pesos siguen llegando con la configuración de cada modelo).
+  TensorRT-LLM descarga su imagen NGC (`TENSORRT_LLM_DOCKER_IMAGE`) y necesita
+  Docker, así que no se puede instalar en la imagen `ocabra-node`. **Acción**
+  para un nodo que ya los usaba: instalarlos una vez desde Ajustes → Backends;
+  hasta entonces aparecen como no instalados y sus modelos no cargan.
+
+---
+
 ## 0.99.0 — 2026-11-17
 
 ### Nuevo

@@ -16,7 +16,13 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.base import (
+    BackendCapabilities,
+    BackendInstallSpec,
+    BackendInterface,
+    ModalityType,
+    WorkerInfo,
+)
 
 logger = structlog.get_logger(__name__)
 _STARTUP_TIMEOUT_S = 300
@@ -54,6 +60,38 @@ class StrataBackend(BackendInterface):
     def supported_modalities(cls) -> set[ModalityType]:
         return {ModalityType.TEXT_GENERATION}
 
+    @property
+    def install_spec(self) -> BackendInstallSpec:
+        """Strata Terminal's control bundle (own Python 3.12 + ``serve/``),
+        pinned and checked by SHA-256 (``backend/scripts/install_strata.sh``).
+        Engines and weights come with each model's run config."""
+        return BackendInstallSpec(
+            post_install_script="backend/scripts/install_strata.sh",
+            extra_bins={
+                "python": "terminal/python/bin/python3.12",
+                "server": "terminal/serve/server.py",
+            },
+            include_core_runtime=False,
+            estimated_size_mb=400,
+            display_name="Strata Terminal",
+            description=(
+                "Strata's OpenAI-compatible server for models prepared with "
+                "`strata launch` (a run config per model, engine and weights "
+                "included). oCabra owns its lifecycle."
+            ),
+            tags=["LLM", "GPU", "CUDA"],
+        )
+
+    @staticmethod
+    def _installed_runtime_dir() -> Path | None:
+        """``<backends_dir>/strata/terminal`` when the backend is installed."""
+        from ocabra.config import settings
+        from ocabra.core.backend_installer import read_backend_metadata
+
+        meta = read_backend_metadata(settings.backends_dir, "strata") or {}
+        server = (meta.get("extra_bins") or {}).get("server")
+        return Path(server).parent.parent if server else None
+
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs: Any) -> WorkerInfo:
         port = int(kwargs.get("port") or 0)
         if not port:
@@ -84,7 +122,15 @@ class StrataBackend(BackendInterface):
             )
         self._check_available_ram(int(options.get("min_available_ram_mb") or 0))
 
-        runtime_dir = Path(str(options.get("runtime_dir") or config.get("cwd") or ""))
+        # A model may pin its own Strata runtime; otherwise the installed one.
+        runtime_dir = Path(
+            str(
+                options.get("runtime_dir")
+                or config.get("cwd")
+                or self._installed_runtime_dir()
+                or ""
+            )
+        )
         python_bin = Path(
             str(options.get("python_bin") or runtime_dir / "python" / "bin" / "python3.12")
         )
