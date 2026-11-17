@@ -3,14 +3,20 @@ import { MemoryRouter } from "react-router-dom"
 import { describe, expect, it, vi } from "vitest"
 import type { BackendModuleState } from "@/types"
 
-const b = (backendType: string, installStatus: BackendModuleState["installStatus"], displayName = backendType): BackendModuleState => ({
-  backendType, displayName, description: `desc ${backendType}`, tags: [], installStatus, installedVersion: null, installedAt: null,
-  installSource: null, estimatedSizeMb: 1200, actualSizeMb: null, modelsLoaded: 0, hasUpdate: false, installProgress: null,
+const b = (backendType: string, installStatus: BackendModuleState["installStatus"], displayName = backendType, tags: string[] = [], modelsLoaded = 0): BackendModuleState => ({
+  backendType, displayName, description: `desc ${backendType}`, tags, installStatus, installedVersion: null, installedAt: null,
+  installSource: null, estimatedSizeMb: 1200, actualSizeMb: 2048, modelsLoaded, hasUpdate: false, installProgress: null,
   installDetail: null, error: null, alwaysAvailable: false, ociRef: null, ociDigest: null, packages: {}, declaredPackages: [], gitRef: null,
 })
 
 const state = {
-  backends: [b("ollama", "installed", "Ollama"), b("tensorrt_llm", "installed", "TensorRT-LLM"), b("vllm", "not_installed", "vLLM"), b("piper", "not_installed", "Piper")],
+  backends: [
+    b("ollama", "installed", "Ollama", ["LLM"], 2),
+    b("tensorrt_llm", "installed", "TensorRT-LLM", ["LLM"]),
+    b("whisper", "installed", "Whisper", ["STT"], 1),
+    b("vllm", "not_installed", "vLLM", ["LLM"]),
+    b("piper", "not_installed", "Piper", ["TTS"]),
+  ],
   loading: false, usingMock: false, error: null,
   fetchAll: vi.fn(), install: vi.fn(), cancelInstall: vi.fn(), uninstall: vi.fn(),
 }
@@ -23,15 +29,11 @@ vi.mock("@/api/client", () => ({
       serverUpdateStatus: vi.fn().mockResolvedValue({ status: "idle", detail: null, startedAt: null, finishedAt: null, fromVersion: null, toVersion: null }),
       startServerUpdate: vi.fn(),
     },
-    models: {
-      updateAll: vi.fn(),
-      list: vi.fn().mockResolvedValue([
-        { modelId: "ollama/a", backendType: "ollama", status: "loaded" },
-        { modelId: "ollama/b", backendType: "ollama", status: "loaded" },
-        { modelId: "ollama/c", backendType: "ollama", status: "configured" },
-      ]),
+    models: { updateAll: vi.fn() },
+    config: {
+      get: vi.fn().mockResolvedValue({ ollamaNumParallel: 2, ollamaMaxContext: 65536, whisperStartupTimeoutSeconds: 120, openaiAudioMaxPartSizeMb: 24 }),
+      patch: vi.fn(async (p: object) => ({ ollamaNumParallel: 2, ollamaMaxContext: 65536, whisperStartupTimeoutSeconds: 120, openaiAudioMaxPartSizeMb: 24, ...p })),
     },
-    config: { get: vi.fn().mockResolvedValue({ ollamaNumParallel: 2, ollamaMaxContext: 65536 }), patch: vi.fn() },
   },
 }))
 vi.mock("@/api/modelEditor", () => ({
@@ -63,11 +65,31 @@ describe("Backends", () => {
   it("TensorRT-LLM enlaza a sus engines y Ollama lleva sus controles dentro", async () => {
     await renderPage()
     expect(screen.getByTestId("trt-engines-link").getAttribute("href")).toBe("/engines")
-    // Los modelos cargados se cuentan de la lista de modelos (la API de backends no lo da).
+    // «Modelos cargados» viene de la API (models_loaded).
     const ollamaCard = (await screen.findByTestId("ollama-controls")).closest("[data-backend-card]") as HTMLElement
     await within(ollamaCard).findByText("2")
     const controls = await screen.findByTestId("ollama-controls")
     expect(within(controls).getByText("Actualizar daemon")).toBeTruthy()
     expect(await within(controls).findByTestId("ollama-server-settings")).toBeTruthy()
+  })
+  it("filtra por uso y resume disco, modelos cargados y nada que actualizar", async () => {
+    const { container } = await renderPage()
+    const summary = screen.getByTestId("backends-summary")
+    expect(summary.textContent).toContain("6.0 GB en disco · 3 modelos cargados")
+    fireEvent.click(within(summary).getByText("Audio (1)"))
+    expect(container.querySelector('[data-backend-card="whisper"]')).toBeTruthy()
+    expect(container.querySelector('[data-backend-card="ollama"]')).toBeNull()
+    expect(screen.queryByTestId("backends-updates")).toBeNull()
+  })
+
+  it("cada backend lleva sus valores por defecto en su tarjeta y se guardan solo los suyos", async () => {
+    const { api } = await import("@/api/client")
+    await renderPage()
+    const defaults = await screen.findByTestId("backend-defaults-whisper")
+    fireEvent.click(within(defaults).getByText(/Valores por defecto \(2\)/))
+    const timeout = within(defaults).getByLabelText(/Tiempo máximo de arranque/) as HTMLInputElement
+    fireEvent.change(timeout, { target: { value: "300" } })
+    fireEvent.click(within(defaults).getByRole("button", { name: "Guardar" }))
+    await vi.waitFor(() => expect(api.config.patch).toHaveBeenCalledWith({ whisperStartupTimeoutSeconds: 300, openaiAudioMaxPartSizeMb: 24 }))
   })
 })

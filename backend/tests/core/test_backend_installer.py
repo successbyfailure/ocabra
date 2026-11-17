@@ -1070,3 +1070,47 @@ async def test_install_refused_at_http_layer_while_models_use_it(
         )
 
     assert resp.status_code == 409
+
+
+# ── Versión que se enseña y modelos cargados por backend ─────────────────────
+
+
+def test_display_version_uses_the_main_installed_package_not_a_requirement():
+    from ocabra.core.backend_installer import display_version
+
+    # Antes se enseñaba "torch>=2.5" o "source".
+    assert display_version("vllm", ["vllm==0.32.0"], {"vllm": "0.32.0"}, "0.32.0") == "0.32.0"
+    assert (
+        display_version("whisper", ["torch>=2.5", "faster-whisper>=1.1"], {"faster-whisper": "1.2.1"}, "torch>=2.5")
+        == "faster-whisper 1.2.1"
+    )
+    assert display_version("piper", ["piper-tts>=1.8.0"], {"piper-tts": "1.8.0"}, "piper-tts>=1.8.0") == "piper-tts 1.8.0"
+    assert display_version("diffusers", ["diffusers @ git+https://x"], {"diffusers": "0.41.0"}, "torch>=2.5") == "0.41.0"
+    # Sin versión de verdad (nativos, clonados de git): nada; la rama va aparte.
+    assert display_version("llama_cpp", [], {}, "source") is None
+    assert display_version("acestep", ["torch>=2.5"], {"torch": "2.10"}, "torch>=2.5") is None
+
+
+@pytest.mark.asyncio
+async def test_backends_api_counts_loaded_models_once_per_canonical_id():
+    from types import SimpleNamespace
+
+    from ocabra.api.internal.backends import _loaded_by_backend
+
+    def st(model_id, backend, status):
+        return SimpleNamespace(model_id=model_id, backend_type=backend, status=status)
+
+    states = [
+        st("llamacpp_mks/gemma4:26b", "llamacpp_mks", "configured"),
+        st("llamacpp_mks/gemma4:26b::abc", "llamacpp_mks", "loaded"),
+        st("llamacpp_mks/gemma4:26b::def", "llamacpp_mks", "loaded"),
+        st("llamacpp_mks/qwen3-embedding:4b", "llamacpp_mks", "loaded"),
+        st("piper/glados", "piper", "loaded"),
+        st("vllm/x", "vllm", "unloaded"),
+    ]
+
+    async def list_states(include_derived=False):
+        return states
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=SimpleNamespace(list_states=list_states))))
+    assert await _loaded_by_backend(request) == {"llamacpp_mks": 2, "piper": 1}

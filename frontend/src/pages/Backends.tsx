@@ -7,9 +7,27 @@ import { AddBackendDialog } from "@/components/backends/AddBackendDialog"
 import { BackendCard } from "@/components/backends/BackendCard"
 import { ConfirmUninstallDialog } from "@/components/backends/ConfirmUninstallDialog"
 import { OllamaControls } from "@/components/backends/OllamaServerCard"
+import { BackendDefaults, hasBackendDefaults } from "@/components/backends/BackendDefaults"
 import { useBackendsStore } from "@/stores/backendsStore"
-import { useModelStore } from "@/stores/modelStore"
-import type { BackendInstallMethod, BackendModuleState } from "@/types"
+import { cn } from "@/lib/cn"
+import type { BackendInstallMethod, BackendModuleState, BackendPublishedInfo, ServerConfig } from "@/types"
+
+/** Para qué sirve cada backend, a partir de sus etiquetas. */
+const USES: { key: string; label: string; tags: string[] }[] = [
+  { key: "llm", label: "LLM", tags: ["llm"] },
+  { key: "audio", label: "Audio", tags: ["tts", "stt"] },
+  { key: "image", label: "Imagen", tags: ["image"] },
+  { key: "video", label: "Vídeo", tags: ["video"] },
+  { key: "music", label: "Música", tags: ["music"] },
+]
+const usesOf = (b: BackendModuleState) => {
+  const tags = b.tags.map((t) => t.toLowerCase())
+  return USES.filter((u) => u.tags.some((t) => tags.includes(t))).map((u) => u.key)
+}
+
+function fmtSize(mb: number): string {
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`
+}
 
 export function Backends() {
   const backends = useBackendsStore((s) => s.backends)
@@ -22,25 +40,33 @@ export function Backends() {
   const uninstall = useBackendsStore((s) => s.uninstall)
 
   const [uninstallTarget, setUninstallTarget] = useState<BackendModuleState | null>(null)
+  const [logsTarget, setLogsTarget] = useState<BackendModuleState | null>(null)
+  const [logsContent, setLogsContent] = useState<string>("")
+  const [logsLoading, setLogsLoading] = useState(false)
   const [adding, setAdding] = useState(false)
-  // La API de backends no dice cuántos modelos tiene cargados cada uno
-  // (siempre salía 0): se cuentan de la lista de modelos.
-  const models = useModelStore((s) => s.models)
-  const setModels = useModelStore((s) => s.setModels)
-  useEffect(() => {
-    api.models.list().then(setModels).catch(() => {})
-  }, [setModels])
-  const loadedBy = new Map<string, number>()
-  for (const m of Object.values(models)) {
-    if (m.status === "loaded") loadedBy.set(m.backendType, (loadedBy.get(m.backendType) ?? 0) + 1)
-  }
   // En la página solo lo que está (o está entrando o saliendo, o falló al
   // instalarse); el resto se añade desde el catálogo.
   const present = backends.filter((b) => b.installStatus !== "not_installed")
   const available = backends.filter((b) => b.installStatus === "not_installed")
-  const [logsTarget, setLogsTarget] = useState<BackendModuleState | null>(null)
-  const [logsContent, setLogsContent] = useState<string>("")
-  const [logsLoading, setLogsLoading] = useState(false)
+  const [use, setUse] = useState<string | null>(null)
+  // La configuración del servidor la cargan una vez la página y la comparten
+  // las tarjetas (valores por defecto de cada backend, ajustes de Ollama).
+  const [config, setConfig] = useState<ServerConfig | null>(null)
+  useEffect(() => {
+    api.config.get().then(setConfig).catch(() => setConfig(null))
+  }, [])
+  const saveConfig = async (patch: Partial<ServerConfig>) => {
+    setConfig(await api.config.patch(patch))
+  }
+  const [offers, setOffers] = useState<Record<string, BackendPublishedInfo | null>>({})
+  const onOffer = (backendType: string, info: BackendPublishedInfo | null) =>
+    setOffers((prev) => (prev[backendType] === info ? prev : { ...prev, [backendType]: info }))
+  const shown = use ? present.filter((b) => usesOf(b).includes(use)) : present
+  const diskMb = present.reduce((a, b) => a + (b.installStatus === "installed" ? (b.actualSizeMb ?? 0) : 0), 0)
+  const loadedTotal = present.reduce((a, b) => a + (b.modelsLoaded ?? 0), 0)
+  const updates = present.filter(
+    (b) => b.installStatus === "installed" && (offers[b.backendType]?.updateAvailable || b.hasUpdate),
+  )
 
   useEffect(() => {
     void fetchAll()
@@ -145,6 +171,51 @@ export function Backends() {
         </div>
       )}
 
+      {present.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3" data-testid="backends-summary">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setUse(null)}
+              className={cn("rounded-full border px-3 py-1 text-xs", use === null ? "border-primary bg-primary/15 text-foreground" : "border-border text-muted-foreground hover:bg-muted")}
+            >
+              Todos ({present.length})
+            </button>
+            {USES.map((u) => {
+              const n = present.filter((b) => usesOf(b).includes(u.key)).length
+              if (!n) return null
+              return (
+                <button
+                  key={u.key}
+                  type="button"
+                  onClick={() => setUse(use === u.key ? null : u.key)}
+                  className={cn("rounded-full border px-3 py-1 text-xs", use === u.key ? "border-primary bg-primary/15 text-foreground" : "border-border text-muted-foreground hover:bg-muted")}
+                  data-use={u.key}
+                >
+                  {u.label} ({n})
+                </button>
+              )
+            })}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {fmtSize(diskMb)} en disco · {loadedTotal} {loadedTotal === 1 ? "modelo cargado" : "modelos cargados"}
+          </p>
+        </div>
+      )}
+
+      {updates.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100" data-testid="backends-updates">
+          <span className="font-medium">
+            {updates.length === 1 ? "Hay una actualización disponible:" : `Hay ${updates.length} actualizaciones disponibles:`}
+          </span>
+          {updates.map((b) => (
+            <a key={b.backendType} href={`#backend-${b.backendType}`} className="rounded border border-emerald-500/40 px-2 py-0.5 text-xs hover:bg-emerald-500/20">
+              {b.displayName}
+            </a>
+          ))}
+        </div>
+      )}
+
       {loading && backends.length === 0 ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {Array.from({ length: 4 }).map((_, idx) => (
@@ -165,16 +236,23 @@ export function Backends() {
         </div>
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,380px),1fr))] gap-4">
-          {present.map((backend) => (
+          {shown.map((backend) => (
             <BackendCard
               key={backend.backendType}
-              backend={{ ...backend, modelsLoaded: loadedBy.get(backend.backendType) ?? 0 }}
+              backend={backend}
+              onOffer={onOffer}
               onInstall={handleInstall}
               onCancelInstall={handleCancel}
               onUninstall={handleRequestUninstall}
               onUpdate={(b) => handleInstall(b.backendType, "oci")}
               onViewLogs={handleViewLogs}
-              extra={backend.backendType === "ollama" && backend.installStatus === "installed" ? <OllamaControls /> : undefined}
+              extra={
+                backend.installStatus !== "installed" || !config ? undefined : backend.backendType === "ollama" ? (
+                  <OllamaControls config={config} onSave={saveConfig} />
+                ) : hasBackendDefaults(backend.backendType) ? (
+                  <BackendDefaults backendType={backend.backendType} config={config} onSave={saveConfig} />
+                ) : undefined
+              }
             />
           ))}
         </div>

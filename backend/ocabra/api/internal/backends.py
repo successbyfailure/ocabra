@@ -75,6 +75,11 @@ class BackendStateResponse(BaseModel):
     error: str | None = None
     install_progress: float | None = None
     install_detail: str | None = None
+    models_loaded: int = Field(
+        default=0,
+        description="Modelos de este backend cargados ahora mismo (cada modelo cuenta una vez "
+        "aunque tenga varios workers de peldaño cargados).",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +98,25 @@ def _get_installer(request: Request) -> BackendInstaller:
             headers={"Retry-After": "5"},
         )
     return installer
+
+
+async def _loaded_by_backend(request: Request) -> dict[str, int]:
+    """Modelos cargados por backend. Cuenta los ids canónicos: un modelo con
+    presets se carga como worker derivado (``<id>::<hash>``) y no debe contar
+    dos veces ni dejar de contar."""
+    mm = getattr(request.app.state, "model_manager", None)
+    if mm is None:
+        return {}
+    try:
+        states = await mm.list_states(include_derived=True)
+    except Exception:  # noqa: BLE001 — el listado de backends no debe romperse por esto
+        return {}
+    seen: dict[str, set[str]] = {}
+    for st in states:
+        if getattr(st.status, "value", st.status) != "loaded":
+            continue
+        seen.setdefault(st.backend_type, set()).add(str(st.model_id).split("::", 1)[0])
+    return {backend: len(ids) for backend, ids in seen.items()}
 
 
 def _state_to_dict(state: BackendModuleState) -> dict[str, Any]:
@@ -126,7 +150,11 @@ async def list_backends(
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[dict[str, Any]]:
     installer = _get_installer(request)
-    return [_state_to_dict(s) for s in installer.list_states()]
+    loaded = await _loaded_by_backend(request)
+    return [
+        {**_state_to_dict(s), "models_loaded": loaded.get(s.backend_type, 0)}
+        for s in installer.list_states()
+    ]
 
 
 @router.get(
@@ -148,7 +176,8 @@ async def get_backend(
         raise HTTPException(
             status_code=404, detail=f"Backend '{backend_type}' not registered"
         ) from exc
-    return _state_to_dict(state)
+    loaded = await _loaded_by_backend(request)
+    return {**_state_to_dict(state), "models_loaded": loaded.get(backend_type, 0)}
 
 
 @router.post(

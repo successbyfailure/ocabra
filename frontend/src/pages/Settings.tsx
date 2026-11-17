@@ -15,7 +15,6 @@ import { SkeletonList } from "@/components/common/Skeleton"
 import { api } from "@/api/client"
 import { PrivacySettings } from "@/components/settings/PrivacySettings"
 import { ApiAccessSettings } from "@/components/settings/ApiAccessSettings"
-import { BackendRuntimeSettings } from "@/components/settings/BackendRuntimeSettings"
 import { GenerationServicesSettings } from "@/components/settings/GenerationServicesSettings"
 import { GeneralSettings } from "@/components/settings/GeneralSettings"
 import { GlobalSchedules } from "@/components/settings/GlobalSchedules"
@@ -238,15 +237,14 @@ export function Settings() {
 
           <Tabs.Content value="backends">
             <div className="grid gap-4">
-              <p className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground" data-testid="ollama-moved">
-                Los ajustes del servidor Ollama (peticiones simultáneas, contexto máximo y actualización del daemon) están ahora en su
-                tarjeta de{" "}
+              <p className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground" data-testid="backends-moved">
+                La configuración de cada backend (valores por defecto de vLLM, SGLang, llama.cpp, Diffusers, Whisper y TensorRT-LLM, y el
+                servidor Ollama) está ahora en su tarjeta de{" "}
                 <RouterLink to="/backends" className="text-primary underline">
                   Backends
                 </RouterLink>
                 .
               </p>
-              <BackendRuntimeSettings config={config} onSave={savePatch} />
             </div>
           </Tabs.Content>
 

@@ -27,6 +27,8 @@ interface BackendCardProps {
   onViewLogs: (backend: BackendModuleState) => void
   /** Controles propios del backend (p. ej. el daemon y los ajustes de Ollama). */
   extra?: ReactNode
+  /** Avisa a la página de lo que hay publicado (para el resumen de arriba). */
+  onOffer?: (backendType: string, info: BackendPublishedInfo | null) => void
 }
 
 function formatSize(mb: number | null | undefined): string {
@@ -122,6 +124,7 @@ export function BackendCard({
   onUpdate,
   onViewLogs,
   extra,
+  onOffer,
 }: BackendCardProps) {
   const [installMenuOpen, setInstallMenuOpen] = useState(false)
   const [offer, setOffer] = useState<BackendPublishedInfo | null>(null)
@@ -134,11 +137,16 @@ export function BackendCard({
     let cancelled = false
     api.backends
       .published(backend.backendType)
-      .then((info) => !cancelled && setOffer(info))
+      .then((info) => {
+        if (cancelled) return
+        setOffer(info)
+        onOffer?.(backend.backendType, info)
+      })
       .catch(() => !cancelled && setOffer(null))
     return () => {
       cancelled = true
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backend.backendType, status, backend.ociDigest])
 
   const displaySize =
@@ -147,7 +155,7 @@ export function BackendCard({
       : `~${formatSize(backend.estimatedSizeMb)}`
 
   return (
-    <div className="flex h-full flex-col rounded-lg border border-border bg-card p-5" data-backend-card={backend.backendType}>
+    <div className="flex h-full flex-col rounded-lg border border-border bg-card p-5" data-backend-card={backend.backendType} id={`backend-${backend.backendType}`}>
       {/* Header */}
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -261,7 +269,7 @@ export function BackendCard({
         </div>
       )}
 
-      {extra && <div className="mt-4 border-t border-border pt-4">{extra}</div>}
+      {extra && <div className="mt-4 space-y-4 border-t border-border pt-4">{extra}</div>}
 
       <div className="flex-1" />
 

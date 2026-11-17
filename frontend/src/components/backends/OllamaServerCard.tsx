@@ -25,11 +25,14 @@ const POLL_MS = 3000
 /** Los controles de Ollama, dentro de su tarjeta en Backends: versión y
  *  actualización del daemon, re-pull de todos sus modelos y los ajustes del
  *  servidor (peticiones simultáneas y contexto máximo, globales). */
-export function OllamaControls() {
-  const [config, setConfig] = useState<ServerConfig | null>(null)
-  useEffect(() => {
-    api.config.get().then(setConfig).catch(() => setConfig(null))
-  }, [])
+export function OllamaControls({
+  config,
+  onSave,
+}: {
+  /** Configuración del servidor (la carga la página, la comparten todas las tarjetas). */
+  config: ServerConfig | null
+  onSave: (patch: Partial<ServerConfig>) => Promise<void>
+}) {
   const [version, setVersion] = useState<VersionInfo | null>(null)
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -214,7 +217,7 @@ export function OllamaControls() {
             embedded
             config={config}
             onSave={async (patch) => {
-              setConfig(await api.config.patch(patch))
+              await onSave(patch)
               toast.success("Ajustes de Ollama guardados")
             }}
           />

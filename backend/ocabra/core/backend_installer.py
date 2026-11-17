@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 from collections.abc import AsyncIterator
@@ -201,11 +202,12 @@ class BackendInstaller:
 
             if spec is None:
                 # Backend is always available (e.g. ollama) — mark as built-in.
+                builtin = _BUILTIN_INFO.get(backend_type, {})
                 self._states[backend_type] = BackendModuleState(
                     backend_type=backend_type,
-                    display_name=backend_type,
-                    description="External or always-available backend.",
-                    tags=[],
+                    display_name=builtin.get("display_name", backend_type),
+                    description=builtin.get("description", "External or always-available backend."),
+                    tags=list(builtin.get("tags", [])),
                     install_status=BackendInstallStatus.INSTALLED,
                     install_source="built-in",
                     installed_at=None,
@@ -265,7 +267,9 @@ class BackendInstaller:
             description=spec.description,
             tags=list(spec.tags),
             install_status=BackendInstallStatus.INSTALLED,
-            installed_version=meta.get("version"),
+            installed_version=display_version(
+                backend_type, list(spec.pip_packages), dict(packages), meta.get("version")
+            ),
             installed_at=_parse_iso(meta.get("installed_at")),
             install_source=meta.get("install_source"),
             estimated_size_mb=spec.estimated_size_mb,
@@ -808,7 +812,11 @@ class BackendInstaller:
             state.install_status = BackendInstallStatus.INSTALLED
             state.install_progress = 1.0
             state.install_detail = "Installed"
-            state.installed_version = metadata["version"]
+            # La versión que se enseña sale de los paquetes instalados de
+            # verdad (display_version), igual que al arrancar.
+            fresh = await self._installed_state(backend_type, spec, metadata)
+            state.installed_version = fresh.installed_version
+            state.packages = fresh.packages
             state.installed_at = _parse_iso(metadata["installed_at"])
             state.install_source = "source"
             state.actual_size_mb = size_mb
@@ -1269,6 +1277,62 @@ def _req_name(req: str) -> str:
             head = head[:idx]
     return head.strip().lower()
 
+
+
+# Backends sin instalación propia (corren aparte): qué enseñar de ellos.
+_BUILTIN_INFO: dict[str, dict[str, Any]] = {
+    "ollama": {
+        "display_name": "Ollama",
+        "description": (
+            "Servidor Ollama en su propio contenedor: modelos GGUF de su registro, chat y "
+            "embeddings. Un único daemon para todos sus modelos, con paralelismo y contexto "
+            "máximo globales."
+        ),
+        "tags": ["LLM", "GGUF", "CUDA"],
+    },
+}
+
+# Paquete que da la versión de cada backend cuando no se llama como él.
+_MAIN_PACKAGE = {
+    "whisper": "faster-whisper",
+    "piper": "piper-tts",
+    "upscaler": "spandrel",
+    "chatterbox": "chatterbox-tts",
+}
+
+_PLAIN_VERSION = re.compile(r"^[0-9][0-9A-Za-z.+_-]*$")
+
+
+def display_version(
+    backend_type: str,
+    declared: list[str],
+    packages: dict[str, str],
+    stored: str | None,
+) -> str | None:
+    """Versión que enseñar de un backend instalado.
+
+    Antes se mostraba lo que ``_derive_version`` guardó al instalar, que en
+    muchos backends era un requisito (``"torch>=2.5"``) o ``"source"``. Ahora:
+    la versión instalada de su paquete principal (el que se llama como el
+    backend, o el de ``_MAIN_PACKAGE``), con el nombre delante si no es el del
+    backend; si no, lo guardado solo si es un número de versión de verdad; y si
+    tampoco, ``None`` (los nativos y los clonados de git ya enseñan su rama o
+    commit aparte).
+    """
+    def norm(name: str) -> str:
+        return name.lower().replace("_", "-")
+
+    bt = norm(backend_type)
+    wanted = norm(_MAIN_PACKAGE.get(backend_type, backend_type))
+    installed = {norm(k): v for k, v in (packages or {}).items()}
+    candidates = [wanted, bt] + [norm(_req_name(r)) for r in declared if norm(_req_name(r)).startswith(bt)]
+    for name in candidates:
+        version = installed.get(name)
+        if version:
+            return version if name == bt else f"{name} {version}"
+    if stored and _PLAIN_VERSION.match(stored):
+        return stored
+    return None
 
 def _derive_version(
     pip_packages: list[str], backend_type: str | None = None

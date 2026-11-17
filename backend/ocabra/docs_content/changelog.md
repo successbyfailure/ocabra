@@ -16,6 +16,30 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.102.0 — 2026-11-17
+
+### Nuevo
+
+- **`GET /ocabra/backends` y `GET /ocabra/backends/{backend_type}` dicen cuántos
+  modelos tiene cargados cada backend**, en el campo nuevo `models_loaded`.
+  Cada modelo cuenta una vez aunque tenga cargados varios workers de peldaño.
+
+### Cambios
+
+- **`installed_version` ya es una versión.** Antes muchos backends devolvían el
+  requisito con el que se instalaron (`"torch>=2.5"`, `"piper-tts>=1.8.0"`) o
+  `"source"`. Ahora es la versión instalada de su paquete principal (`"0.32.0"`
+  para vLLM; con el nombre delante cuando no es el del backend, como
+  `"faster-whisper 1.2.1"`), o `null` si no tiene una (los nativos y los que se
+  instalan desde git: su rama o commit siguen en `git_ref`).
+- **Ollama** aparece con nombre (`"Ollama"`), descripción y etiquetas propias en
+  vez de la descripción genérica de los backends integrados.
+
+**Acción:** si leías `installed_version` esperando un requisito de pip o
+`"source"`, usa `packages` o `git_ref`.
+
+---
+
 ## 0.101.0 — 2026-11-17
 
 ### Nuevo
