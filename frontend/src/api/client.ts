@@ -3728,6 +3728,10 @@ export const api = {
             }),
             ...(data.enabled !== undefined && { enabled: data.enabled }),
             ...(data.notes !== undefined && { notes: data.notes }),
+            // «Le sirvo como» and its rules: dropped here until 0.98.1, so
+            // the server got an empty PATCH and nothing changed.
+            ...(data.mode !== undefined && { mode: data.mode }),
+            ...(data.rules !== undefined && { rules: data.rules }),
           },
         ),
       ),

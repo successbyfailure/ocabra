@@ -15,6 +15,7 @@ import {
   Plus,
   RefreshCw,
   Send,
+  Settings2,
   Ticket,
   Trash2,
   Wifi,
@@ -690,33 +691,13 @@ function PeerCard({
         {(peer.mode === "swarm" || peer.mode === "rules") && peer.local_access_level && (
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-muted-foreground">Le sirvo como:</span>
-            {(["swarm", "rules"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                className={`${btnCls} ${peer.mode === m ? "border-primary bg-primary/10" : ""}`}
-                disabled={busy !== null || peer.mode === m}
-                onClick={() =>
-                  void run(
-                    "mode",
-                    () => api.federation.updatePeer(peer.peer_id, { mode: m }),
-                    m === "swarm" ? "Enjambre: puede hacerlo todo" : "Ahora se sirve con tus reglas",
-                  )
-                }
-              >
-                {m === "swarm" ? "Enjambre" : "Mis reglas"}
-              </button>
-            ))}
-            {peer.mode === "rules" && (
-              <>
-                <span className="text-muted-foreground" title="Lo que le aplicas">
-                  {rulesSummary(peer.effective_rules)}
-                </span>
-                <button type="button" className={btnCls} onClick={() => onEditRules(peer)}>
-                  Ajustar
-                </button>
-              </>
-            )}
+            <span className="font-medium">{peer.mode === "swarm" ? "Enjambre" : "Mis reglas"}</span>
+            <span className="text-muted-foreground" title="Lo que le aplicas">
+              {peer.mode === "swarm" ? "puede hacerlo todo" : rulesSummary(peer.effective_rules)}
+            </span>
+            <button type="button" className={`${btnCls} ml-auto`} onClick={() => onEditRules(peer)}>
+              <Settings2 size={12} /> Configurar
+            </button>
           </div>
         )}
         {peer.their_rules && (

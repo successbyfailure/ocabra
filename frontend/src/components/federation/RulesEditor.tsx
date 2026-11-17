@@ -264,7 +264,14 @@ export function NodeRulesCard() {
   )
 }
 
-/** Per-peer adjustments over the node rules, with what it has used. */
+/** Two ways of serving a peer (the swarm is «rules» with everything allowed). */
+type ServeMode = "swarm" | "rules"
+
+/**
+ * How this node serves *peer*: as part of the swarm (it may do everything) or
+ * under this node's rules, with the adjustments that only apply to it and what
+ * it has used. One save writes the mode and the rules together.
+ */
 export function PeerRulesDialog({
   peer,
   onOpenChange,
@@ -275,6 +282,7 @@ export function PeerRulesDialog({
   onSaved: () => void
 }) {
   const open = peer !== null
+  const [mode, setMode] = useState<ServeMode>("swarm")
   const [nodeRules, setNodeRules] = useState<FederationRules | null>(null)
   const [rules, setRules] = useState<FederationRules | null>(null)
   const [usage, setUsage] = useState<FederationRulesUsage | null>(null)
@@ -283,6 +291,7 @@ export function PeerRulesDialog({
 
   useEffect(() => {
     if (!peer) return
+    setMode(peer.mode === "rules" ? "rules" : "swarm")
     setRules(null)
     api.federation
       .getRules()
@@ -294,76 +303,101 @@ export function PeerRulesDialog({
     api.federation.rulesUsage(peer.peer_id).then(setUsage).catch(() => setUsage(null))
   }, [peer])
 
+  const save = async (resetRules: boolean) => {
+    if (!peer) return
+    if (mode === "rules" && !resetRules && (!rules || !nodeRules)) return
+    setBusy(true)
+    try {
+      const adjustments = !resetRules && rules && nodeRules ? diff(rules, nodeRules) : {}
+      await api.federation.updatePeer(peer.peer_id, {
+        mode,
+        ...(mode === "rules" && { rules: Object.keys(adjustments).length ? adjustments : null }),
+      })
+      toast.success(
+        mode === "swarm"
+          ? `${peer.name} es parte del enjambre: puede hacerlo todo`
+          : resetRules
+            ? `${peer.name} se sirve con las reglas del nodo`
+            : `${peer.name} se sirve con tus reglas`,
+      )
+      onOpenChange(false)
+      onSaved()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
         <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[95vw] max-w-2xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-card p-5">
-          <Dialog.Title className="text-lg font-semibold">Reglas para {peer?.name}</Dialog.Title>
+          <Dialog.Title className="text-lg font-semibold">Cómo le sirvo a {peer?.name}</Dialog.Title>
           <Dialog.Description className="mt-1 text-sm text-muted-foreground">
-            Parte de las reglas de este nodo; aquí cambias solo lo que sea distinto para {peer?.name}.
+            Lo que {peer?.name} puede hacer con este nodo cuando te pide algo.
           </Dialog.Description>
-          {usage && (
-            <p className="mt-2 text-xs text-muted-foreground">
-              Uso: {usage.requests_last_hour} peticiones en la última hora
-              {usage.max_requests_per_hour ? ` de ${usage.max_requests_per_hour}` : ""} · {usage.wh_this_month} Wh
-              este mes{usage.max_wh_per_month ? ` de ${usage.max_wh_per_month}` : ""}
-            </p>
-          )}
-          <div className="mt-4">
-            {rules ? (
-              <RulesForm value={rules} onChange={setRules} models={models} />
-            ) : (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Loader2 size={14} className="animate-spin" /> Cargando…
-              </div>
-            )}
+
+          <div className="mt-4 grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Le sirvo como">
+            {(
+              [
+                ["swarm", "Enjambre", "Puede hacerlo todo: usar, cargar y expulsar modelos, descargar y administrar."],
+                ["rules", "Mis reglas", "Se le sirve con las reglas de este nodo, ajustadas para él si quieres."],
+              ] as const
+            ).map(([value, label, help]) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={mode === value}
+                onClick={() => setMode(value)}
+                className={`rounded-md border p-3 text-left ${
+                  mode === value ? "border-primary bg-primary/10" : "border-border hover:bg-muted"
+                }`}
+              >
+                <div className="text-sm font-medium">{label}</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">{help}</div>
+              </button>
+            ))}
           </div>
+
+          {mode === "rules" && (
+            <div className="mt-4 space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Parte de las reglas de este nodo; aquí cambias solo lo que sea distinto para {peer?.name}.
+              </p>
+              {usage && (
+                <p className="text-xs text-muted-foreground">
+                  Uso: {usage.requests_last_hour} peticiones en la última hora
+                  {usage.max_requests_per_hour ? ` de ${usage.max_requests_per_hour}` : ""} · {usage.wh_this_month} Wh
+                  este mes{usage.max_wh_per_month ? ` de ${usage.max_wh_per_month}` : ""}
+                </p>
+              )}
+              {rules ? (
+                <RulesForm value={rules} onChange={setRules} models={models} />
+              ) : (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 size={14} className="animate-spin" /> Cargando…
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="mt-4 flex justify-end gap-2">
+            <Dialog.Close className={btnCls}>Cancelar</Dialog.Close>
+            {mode === "rules" && (
+              <button type="button" className={btnCls} disabled={busy || !peer} onClick={() => void save(true)}>
+                Usar las del nodo
+              </button>
+            )}
             <button
               type="button"
-              className={btnCls}
-              disabled={busy || !peer}
-              onClick={async () => {
-                if (!peer) return
-                setBusy(true)
-                try {
-                  await api.federation.updatePeer(peer.peer_id, { rules: null })
-                  toast.success("Vuelve a las reglas del nodo")
-                  onOpenChange(false)
-                  onSaved()
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : String(err))
-                } finally {
-                  setBusy(false)
-                }
-              }}
-            >
-              Usar las del nodo
-            </button>
-            <button
-              type="button"
-              disabled={busy || !rules || !nodeRules || !peer}
+              disabled={busy || !peer || (mode === "rules" && (!rules || !nodeRules))}
               className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
-              onClick={async () => {
-                if (!peer || !rules || !nodeRules) return
-                setBusy(true)
-                try {
-                  const adjustments = diff(rules, nodeRules)
-                  await api.federation.updatePeer(peer.peer_id, {
-                    rules: Object.keys(adjustments).length ? adjustments : null,
-                  })
-                  toast.success("Reglas guardadas")
-                  onOpenChange(false)
-                  onSaved()
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : String(err))
-                } finally {
-                  setBusy(false)
-                }
-              }}
+              onClick={() => void save(false)}
             >
-              Guardar
+              {busy ? <Loader2 size={14} className="animate-spin" /> : "Guardar"}
             </button>
           </div>
         </Dialog.Content>

@@ -9,6 +9,20 @@ describe("api client mappings", () => {
     vi.unstubAllGlobals()
   })
 
+  it("sends the serve mode and rules when updating a federation peer", async () => {
+    // «Le sirvo como: Mis reglas» said it applied it but nothing changed: the
+    // client dropped mode and rules and sent an empty PATCH.
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "p1", name: "Mapache", mode: "rules" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    )
+    await api.federation.updatePeer("p1", { mode: "rules", rules: { max_requests_per_hour: 100 } })
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(body).toEqual({ mode: "rules", rules: { max_requests_per_hour: 100 } })
+  })
+
   it("maps acetep capabilities and music generation fields", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
