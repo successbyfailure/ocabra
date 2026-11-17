@@ -114,8 +114,11 @@ PY
 # ── check + publish, in a Debian like the runtime images ─────────────────────
 FROM python:3.11-slim-bookworm AS publish
 ARG BACKEND
+ARG CUDA=ON
 ARG CUDA_ARCHS="75;80;86;89;90;100;120"
-ENV BACKEND=${BACKEND} CUDA_ARCHS=${CUDA_ARCHS}
+# A CPU-only build (whisper_cpp, the CPU fallback of recomendado-stt) is not
+# labelled with GPU architectures it was never compiled for.
+ENV BACKEND=${BACKEND} CUDA=${CUDA} CUDA_ARCHS=${CUDA_ARCHS}
 RUN pip install --no-cache-dir "httpx>=0.28"
 COPY --from=build /data/backends/${BACKEND} /data/backends/${BACKEND}
 COPY ocabra/core/oci_registry.py /publish/oci_registry.py
@@ -130,4 +133,5 @@ RUN set -eu; missing=""; \
     done; \
     if [ -n "$missing" ]; then printf "unresolved libraries:%b\n" "$missing"; exit 1; fi; \
     echo "all libraries resolve"
-CMD python /publish/oci_registry.py publish --dir /data/backends/${BACKEND} --type ${BACKEND} --gpu-archs "${CUDA_ARCHS}"
+CMD if [ "${CUDA}" = ON ]; then archs="--gpu-archs ${CUDA_ARCHS}"; else archs=""; fi; \
+    python /publish/oci_registry.py publish --dir /data/backends/${BACKEND} --type ${BACKEND} $archs
