@@ -218,13 +218,19 @@ class FederationManager:
         fall back to local even when a peer is ready.
         """
         await self.load_default_rules()
+        await self.load_policies()
+        if self.profile_registry is not None:
+            # A router may target a model only a peer has.
+            self.profile_registry.remote_target_lookup = self.remote_model_for
         self._started_at = time.monotonic()
         self._http_client = httpx.AsyncClient(
             verify=self._settings.federation_verify_ssl,
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
         self._local_client = httpx.AsyncClient(
-            base_url=str(getattr(self._settings, "federation_local_url", "") or "http://127.0.0.1:8000"),
+            base_url=str(
+                getattr(self._settings, "federation_local_url", "") or "http://127.0.0.1:8000"
+            ),
             timeout=httpx.Timeout(None, connect=10.0),
         )
         await self._ensure_persistent_node_id()
@@ -600,9 +606,7 @@ class FederationManager:
 
         async with self._session_factory() as session:
             result = await session.execute(
-                sa.update(FederationPeer)
-                .where(FederationPeer.id == parsed_id)
-                .values(**db_updates)
+                sa.update(FederationPeer).where(FederationPeer.id == parsed_id).values(**db_updates)
             )
             await session.commit()
             if result.rowcount == 0:
@@ -961,6 +965,48 @@ class FederationManager:
             await session.commit()
         return self.default_rules
 
+    # ── per-model strategies (core/federation_policy.py) ─────────
+
+    async def load_policies(self) -> None:
+        import json as _json
+
+        import sqlalchemy as sa
+
+        from ocabra.core import federation_policy as _fp
+        from ocabra.db.server_config import ServerConfigOverride
+
+        try:
+            async with self._session_factory() as session:
+                raw = (
+                    await session.execute(
+                        sa.select(ServerConfigOverride.value).where(
+                            ServerConfigOverride.key == _fp.POLICIES_KEY
+                        )
+                    )
+                ).scalar_one_or_none()
+            data = _json.loads(raw) if raw else {}
+            _fp.POLICIES.clear()
+            for model_id, policy in (data or {}).items():
+                _fp.POLICIES[str(model_id)] = _fp.FederationPolicy.from_dict(policy)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("federation_policies_load_failed", error=str(exc))
+
+    async def set_policy(self, model_id: str, policy: Any) -> Any:
+        """Store *policy* for *model_id* (``auto`` removes the entry)."""
+        from ocabra.core import federation_policy as _fp
+        from ocabra.db.server_config import save_override
+
+        if policy.is_default:
+            _fp.POLICIES.pop(model_id, None)
+        else:
+            _fp.POLICIES[model_id] = policy
+        async with self._session_factory() as session:
+            await save_override(
+                session, _fp.POLICIES_KEY, {k: v.to_dict() for k, v in _fp.POLICIES.items()}
+            )
+            await session.commit()
+        return policy
+
     def tunnel_hello(self, peer: PeerState) -> dict[str, Any]:
         """HELLO we send when dialing *peer* (token = stored api_key)."""
         return {
@@ -1044,6 +1090,45 @@ class FederationManager:
                 if model_id and status == "LOADED":
                     model_map.setdefault(model_id, []).append(peer)
         return model_map
+
+    def get_remote_catalog(self) -> dict[str, list[tuple[PeerState, dict[str, Any]]]]:
+        """Every model the online peers offer us, warm or cold.
+
+        model_id → ``[(peer, entry), ...]`` where *entry* is the peer's
+        heartbeat item (``status``, ``profiles``, ``capabilities``…). A peer
+        only lists cold models it would load for us (its «rules» say so), so
+        a cold entry here is servable: the peer loads it. Older peers only
+        advertise what is loaded; they show up here the same way.
+        """
+        if federation_hop.get() is not None:
+            return {}
+        catalog: dict[str, list[tuple[PeerState, dict[str, Any]]]] = {}
+        for peer in self.get_online_peers():
+            for model in peer.models:
+                model_id = model.get("model_id", "")
+                if model_id:
+                    catalog.setdefault(model_id, []).append((peer, model))
+        return catalog
+
+    def remote_model_for(self, name: str) -> str | None:
+        """Canonical id of a peer model named *name* (its id or a profile id)."""
+        catalog = self.get_remote_catalog()
+        if name in catalog:
+            return name
+        for model_id, entries in catalog.items():
+            if any(name in (entry.get("profiles") or []) for _peer, entry in entries):
+                return model_id
+        return None
+
+    def least_loaded(self, peers: list[PeerState]) -> PeerState | None:
+        if not peers:
+            return None
+        return min(
+            peers,
+            key=lambda p: (
+                p.load.get("active_requests", 0) * 10 + p.load.get("gpu_utilization_avg_pct", 0.0)
+            ),
+        )
 
     def find_best_peer(self, model_id: str) -> PeerState | None:
         """Find the peer with the lowest load that has the given model loaded.
@@ -1330,6 +1415,27 @@ def should_fallback_to_local(status_code: int) -> bool:
     return status_code in PEER_FALLBACK_STATUSES
 
 
+@dataclass
+class _RemoteTarget:
+    """A router target that only a peer has (no local profile)."""
+
+    profile_id: str
+    base_model_id: str
+    profile_kind: str = "execution"
+
+
+def _remote_capable(federation_manager: Any, model_id: str, capability: Any) -> bool:
+    """Whether a peer-only model can serve *capability* (unknown = keep)."""
+    wanted = (capability,) if isinstance(capability, str) else tuple(capability)
+    for _peer, entry in federation_manager.get_remote_catalog().get(model_id, []):
+        caps = entry.get("capabilities")
+        if not isinstance(caps, dict):
+            return True
+        if all(caps.get(c) for c in wanted):
+            return True
+    return False
+
+
 async def _profile_capable(model_manager: Any, profile: Any, capability: str) -> bool:
     """Same rule as ``RouterResolver._target_has_capabilities`` (unknown = keep)."""
     from ocabra.core.model_manager import resolve_display_capabilities
@@ -1372,9 +1478,7 @@ async def _user_may_use_model(user: Any, model_id: str, profile_registry: Any) -
             profile = alias_target[0] if alias_target is not None else None
     except Exception:  # noqa: BLE001 - unknown means not granted
         return False
-    return profile is not None and user.can_access_model(
-        profile.profile_id, profile.base_model_id
-    )
+    return profile is not None and user.can_access_model(profile.profile_id, profile.base_model_id)
 
 
 async def resolve_federated(
@@ -1463,6 +1567,18 @@ async def resolve_federated(
                         # deployment id target (``whisper_cpp/<model_key>``)
                         listed = await profile_registry.list_by_model(str(target_id))
                         candidate = listed[0] if listed else None
+                    if candidate is None and federation_manager is not None:
+                        # A model only a peer has (a pod with a big model in
+                        # ``recomendado-sota``): a target while that peer is
+                        # online, skipped otherwise.
+                        remote_id = federation_manager.remote_model_for(str(target_id))
+                        if remote_id is not None:
+                            if required_capability and not _remote_capable(
+                                federation_manager, remote_id, required_capability
+                            ):
+                                continue
+                            candidates.append(_RemoteTarget(str(target_id), remote_id))
+                        continue
                     if candidate is not None and candidate.base_model_id is not None:
                         if required_capability and not await _profile_capable(
                             model_manager, candidate, required_capability
@@ -1541,6 +1657,48 @@ async def resolve_federated(
                 return ("remote", peer)
         note_federation(forced_unavailable=str(forced)[:64])
 
+    # Per-model strategy (core/federation_policy.py).
+    from ocabra.core.federation_policy import LOCAL_NODE, node_matches, policy_for
+
+    # A request a peer sent us is served here: our strategy chose for our
+    # clients, not for theirs (and it must never bounce back).
+    policy = policy_for(model_id) if federation_hop.get() is None else policy_for(None)
+    catalog = federation_manager.get_remote_catalog() if federation_manager is not None else {}
+    offering = [peer for peer, _entry in catalog.get(model_id, [])]
+    if policy.strategy == "local_only":
+        if local_known:
+            _decide("local", "strategy_local_only", model_id)
+            return ("local", None)
+        raise HTTPException(status_code=404, detail=_model_not_found_detail(model_id))
+    if policy.strategy == "prefer":
+        for node in policy.nodes:
+            if node == LOCAL_NODE:
+                if local_known:
+                    _decide("local", "strategy_prefer", model_id)
+                    return ("local", None)
+                continue
+            peer = next((p for p in offering if node_matches(node, p)), None)
+            if peer is not None:
+                _decide("remote", "strategy_prefer", model_id, peer)
+                return ("remote", peer)
+        if not policy.fallback:
+            note_federation(decision="refused", reason="strategy_prefer_unavailable")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "message": (
+                            f"None of the nodes preferred for '{model_id}' "
+                            f"({', '.join(policy.nodes)}) can serve it right now"
+                        ),
+                        "type": "service_unavailable",
+                        "code": "preferred_nodes_unavailable",
+                    }
+                },
+                headers={"Retry-After": "30"},
+            )
+        note_federation(strategy_fallback="auto")
+
     # 1. Loaded locally → let the load balancer pick (it knows the local bias).
     if local_loaded:
         if federation_manager is not None:
@@ -1557,6 +1715,14 @@ async def resolve_federated(
         if best_peer is not None:
             _decide("remote", "local_cold_peer_warm", model_id, best_peer)
             return ("remote", best_peer)
+
+    # 2b. Only peers have it (cold there): the least busy one loads it. Not
+    # before a local load of a model we have — that order is the strategy's
+    # job (``prefer``), not auto's.
+    if not local_known and offering and federation_manager is not None:
+        peer = federation_manager.least_loaded(offering)
+        _decide("remote", "remote_only_cold", model_id, peer)
+        return ("remote", peer)
 
     # 3. Nobody has it loaded, but it's registered locally → load it locally.
     if local_known:

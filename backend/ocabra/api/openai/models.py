@@ -457,7 +457,11 @@ async def list_models(
     # ── Federation: merge remote models ─────────────────────────
     fm = _get_federation_manager(request)
     if fm is not None:
-        remote_models = fm.get_remote_models()
+        # Warm or cold: a peer loads a cold model when asked for it.
+        remote_models = {
+            mid: [peer for peer, _entry in entries]
+            for mid, entries in fm.get_remote_catalog().items()
+        }
         for model_id, peers in remote_models.items():
             if model_id in local_model_ids:
                 # Model exists locally — annotate with remote availability
@@ -474,6 +478,8 @@ async def list_models(
                     for m in peer.models:
                         if m.get("model_id") == model_id:
                             remote_profiles.update(m.get("profiles", []))
+                if not user.can_access_model(model_id, *remote_profiles):
+                    continue
                 if remote_profiles & local_profile_ids:
                     # Already listed under a local profile — skip
                     continue

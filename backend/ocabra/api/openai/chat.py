@@ -137,35 +137,25 @@ async def chat_completions(
         if _settings.federation_enabled:
             from ocabra.core.federation import resolve_federated
 
-            execution_policy = "auto"
-            fed_profile = await profile_registry.get(model_id)
-            if fed_profile is None:
-                alias_target = await profile_registry.resolve_alias(model_id)
-                fed_profile = alias_target[0] if alias_target is not None else None
-            if fed_profile is not None and getattr(fed_profile, "runtime_presets", []):
-                try:
-                    fed_plan = await resolve_profile_runtime_plan(fed_profile, model_manager, body)
-                    selected = next(
-                        preset
-                        for preset in getattr(fed_profile, "runtime_presets", [])
-                        if preset.preset_key == fed_plan.preset_key
-                    )
-                    execution_policy = selected.execution_policy
-                except Exception:  # noqa: BLE001 -- federation stays best effort
-                    pass
-            if execution_policy == "local":
-                target, peer = "local", None
-            else:
-                target, peer = await resolve_federated(
-                    model_id, model_manager, federation_manager, profile_registry, user=user
-                )
-                if execution_policy == "remote" and fed_profile is not None:
-                    forced_peer = federation_manager.find_best_peer(fed_profile.base_model_id)
-                    if forced_peer is not None:
-                        target, peer = "remote", forced_peer
-            if target == "remote":
+            from ._federation import body_for_peer
+
+            resolved: dict = {}
+            target, peer = await resolve_federated(
+                model_id,
+                model_manager,
+                federation_manager,
+                profile_registry,
+                resolved=resolved,
+                user=user,
+            )
+            if target == "remote" and peer is not None:
                 from ocabra.core.federation import should_fallback_to_local
 
+                # A router is sent as the target it chose: a node without
+                # that router (a pod) answered 404 to ``recomendado-*``.
+                body_out, _profile = await body_for_peer(
+                    peer, model_id, body, resolved, profile_registry
+                )
                 request.state.federation_remote_node_id = peer.peer_id
                 if stream:
                     # SSE: can't peek status before streaming starts, so we
@@ -175,7 +165,7 @@ async def chat_completions(
                         federation_manager.proxy_stream(
                             peer=peer,
                             path=request.url.path,
-                            body=body,
+                            body=body_out,
                             headers=dict(request.headers),
                         ),
                         media_type="text/event-stream",
@@ -185,7 +175,7 @@ async def chat_completions(
                     resp = await federation_manager.proxy_request(
                         peer=peer,
                         path=request.url.path,
-                        body=body,
+                        body=body_out,
                         headers=dict(request.headers),
                     )
                 except Exception as exc:

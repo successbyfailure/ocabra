@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -101,10 +101,12 @@ class PeerOut(BaseModel):
     )
     join_verification_code: str | None = None
     privacy_mode: str | None = Field(
-        default=None, description="The peer's privacy mode from its heartbeat: functional | zero_data"
+        default=None,
+        description="The peer's privacy mode from its heartbeat: functional | zero_data",
     )
     rules: dict[str, Any] | None = Field(
-        default=None, description="«rules» mode: our adjustments for this peer over the node defaults"
+        default=None,
+        description="«rules» mode: our adjustments for this peer over the node defaults",
     )
     effective_rules: dict[str, Any] | None = Field(
         default=None, description="What we apply to this peer (None = all allowed: swarm)"
@@ -155,6 +157,9 @@ class HeartbeatModel(BaseModel):
     runtime_preset: str | None = None
     effective_context: int | None = None
     parallelism: int | None = None
+    # What the model can do (``chat``, ``embeddings``, ``rerank``…): routers
+    # on the other node filter their peer-only targets with it.
+    capabilities: dict[str, bool] | None = None
 
 
 class HeartbeatLoad(BaseModel):
@@ -209,8 +214,12 @@ class RemoteLoadRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    preferred_gpu: int | None = Field(default=None, description="GPU index on the peer to load onto")
-    extra_config: dict[str, Any] | None = Field(default=None, description="Extra backend-specific configuration")
+    preferred_gpu: int | None = Field(
+        default=None, description="GPU index on the peer to load onto"
+    )
+    extra_config: dict[str, Any] | None = Field(
+        default=None, description="Extra backend-specific configuration"
+    )
 
 
 class RemoteDownloadRequest(BaseModel):
@@ -221,10 +230,14 @@ class RemoteDownloadRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    source: str = Field(..., pattern=r"^(huggingface|ollama|bitnet)$", description="Download source")
+    source: str = Field(
+        ..., pattern=r"^(huggingface|ollama|bitnet)$", description="Download source"
+    )
     model_ref: str = Field(..., min_length=1, description="Model reference (e.g. 'org/model-name')")
     artifact: str | None = Field(default=None, description="Specific artifact/file to download")
-    register_config: dict[str, Any] | None = Field(default=None, description="Auto-register config after download")
+    register_config: dict[str, Any] | None = Field(
+        default=None, description="Auto-register config after download"
+    )
 
 
 # ── Join requests / invites ─────────────────────────────────────
@@ -274,3 +287,12 @@ class InviteCreate(BaseModel):
     mode: str = Field(default="swarm", pattern=r"^(swarm)$")
     max_uses: int = Field(default=1, ge=1, le=100)
     expires_in_hours: float | None = Field(default=24, gt=0, le=24 * 365)
+
+
+class FederationStrategyIn(BaseModel):
+    """A model's federation strategy (core/federation_policy.py)."""
+
+    model_id: str = Field(min_length=1, max_length=512)
+    strategy: Literal["auto", "local_only", "prefer"] = "auto"
+    nodes: list[str] = Field(default_factory=list, max_length=16)
+    fallback: bool = True

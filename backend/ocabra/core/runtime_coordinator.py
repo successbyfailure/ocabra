@@ -743,7 +743,6 @@ async def plan_profile_runtime(
                 kv_cache_dtype=preset.kv_cache_dtype,
                 placement_policy=preset.placement_policy,
                 gpu_indices=tuple(row.get("target_gpus") or ()),
-                execution_policy=preset.execution_policy,
                 enabled=preset.enabled,
                 is_default=preset.is_default,
                 priority=preset.priority,
@@ -934,7 +933,6 @@ async def plan_profile_runtime(
             "parallelism": candidate.parallelism,
             "kv_cache_dtype": candidate_preset.kv_cache_dtype,
             "placement_policy": candidate_preset.placement_policy,
-            "execution_policy": candidate_preset.execution_policy,
             # Multi-GPU hint para los backends con pool shared (Ollama). El
             # coordinator no sabe pools, pero sí sabe que este preset pide >1 GPU.
             # ``_select_pool`` del backend usa esta lista para elegir un pool que

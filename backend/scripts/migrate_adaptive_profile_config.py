@@ -161,13 +161,13 @@ async def migrate(apply: bool) -> None:
                     INSERT INTO profile_runtime_presets (
                         id, profile_id, preset_key, label, context_mode,
                         context_tokens, parallelism, kv_cache_dtype,
-                        placement_policy, preferred_gpus, execution_policy,
+                        placement_policy, preferred_gpus,
                         load_policy, enabled, is_default, priority
                     ) VALUES
-                        (gen_random_uuid(), 'qwen3.8:27b-abliterated', '32k', '32K', 'fixed', 32768, 1, 'q8', 'forced', '[1]'::jsonb, 'auto', 'on_demand', TRUE, FALSE, 10),
-                        (gen_random_uuid(), 'qwen3.8:27b-abliterated', '64k', '64K', 'fixed', 65536, 1, 'q8', 'forced', '[1]'::jsonb, 'auto', 'warm', TRUE, TRUE, 20),
-                        (gen_random_uuid(), 'qwen3.8:27b-abliterated', '128k', '128K', 'fixed', 131072, 1, 'q8', 'forced', '[1]'::jsonb, 'auto', 'on_demand', TRUE, FALSE, 30),
-                        (gen_random_uuid(), 'qwen3.8:27b-abliterated', 'max', 'MAX', 'max', NULL, 1, 'q8', 'forced', '[1]'::jsonb, 'auto', 'on_demand', TRUE, FALSE, 40)
+                        (gen_random_uuid(), 'qwen3.8:27b-abliterated', '32k', '32K', 'fixed', 32768, 1, 'q8', 'forced', '[1]'::jsonb, 'on_demand', TRUE, FALSE, 10),
+                        (gen_random_uuid(), 'qwen3.8:27b-abliterated', '64k', '64K', 'fixed', 65536, 1, 'q8', 'forced', '[1]'::jsonb, 'warm', TRUE, TRUE, 20),
+                        (gen_random_uuid(), 'qwen3.8:27b-abliterated', '128k', '128K', 'fixed', 131072, 1, 'q8', 'forced', '[1]'::jsonb, 'on_demand', TRUE, FALSE, 30),
+                        (gen_random_uuid(), 'qwen3.8:27b-abliterated', 'max', 'MAX', 'max', NULL, 1, 'q8', 'forced', '[1]'::jsonb, 'on_demand', TRUE, FALSE, 40)
                     ON CONFLICT (profile_id, preset_key) DO NOTHING
                     """
                 )

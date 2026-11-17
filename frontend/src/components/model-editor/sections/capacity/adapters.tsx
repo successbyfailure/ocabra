@@ -9,7 +9,7 @@ import type { GPUState, ModelProfile, RuntimePreset, RuntimePresetCreate, Runtim
 import { getPath } from "../../draft"
 import type { Json } from "../../types"
 import type { ModelEditorState } from "../../useModelEditor"
-import { Callout, Hint, Segmented, Toggle, inputCls } from "../../ui"
+import { Callout, Hint, Toggle, inputCls } from "../../ui"
 import { modelEditorApi } from "@/api/modelEditor"
 import { AliasList } from "../presets/PresetParts"
 import { EMPTY_PRESET, PRESET_KEY_RE, presetToForm } from "../presets/presetLogic"
@@ -387,20 +387,6 @@ export function PresetWorkbench({
           <span className="font-medium" title="Desempate entre peldaños que sirven igual">Prioridad</span>
           <input type="number" className={cn(inputCls, "w-20")} value={form.priority ?? 100} disabled={readOnly} onChange={(e) => setForm({ ...form, priority: Number(e.target.value) || 0 })} />
         </label>
-        <div className="space-y-1 text-xs">
-          <span className="font-medium">Ejecución</span>
-          <Segmented
-            size="sm"
-            disabled={readOnly}
-            value={form.executionPolicy}
-            options={[
-              { value: "auto", label: "Auto" },
-              { value: "local", label: "Solo local" },
-              { value: "remote", label: "Remota" },
-            ]}
-            onChange={(v) => setForm({ ...form, executionPolicy: v })}
-          />
-        </div>
         {!isNew && preset && (
           <div className="ml-auto flex flex-wrap items-center gap-2 text-xs">
             {preset.isDefault ? (

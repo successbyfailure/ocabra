@@ -418,7 +418,7 @@ describe("ModelEditor", () => {
   it("with presets, capacity lists only the presets (default focused) plus the shared settings", async () => {
     const preset = (key: string, ctx: number, isDefault = false) => ({
       id: key, profileId: "m", presetKey: key, label: key, contextMode: "fixed", contextTokens: ctx, parallelism: 2,
-      kvCacheDtype: "q8", placementPolicy: "auto", preferredGpus: null, executionPolicy: "auto", enabled: true,
+      kvCacheDtype: "q8", placementPolicy: "auto", preferredGpus: null, enabled: true,
       isDefault, priority: 100, createdAt: null, updatedAt: null,
     })
     api.profiles.listByModel.mockResolvedValue([

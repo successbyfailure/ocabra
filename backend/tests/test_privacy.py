@@ -267,6 +267,9 @@ def test_zero_data_temp_files_go_to_memory(monkeypatch):
 
     if not os.path.isdir("/dev/shm"):
         pytest.skip("no /dev/shm here")
+    # Own directory: the real one may already exist on this host, owned by
+    # another user (a container run as root), and the test is not about that.
+    monkeypatch.setattr(privacy, "MEMORY_TEMP_DIR", f"/dev/shm/ocabra-tmp-test-{os.getpid()}")
     monkeypatch.setattr(settings, "privacy_mode", "zero_data")
     try:
         status = privacy.apply_temp_dir()
@@ -289,4 +292,7 @@ def test_zero_data_temp_files_go_to_memory(monkeypatch):
     finally:
         monkeypatch.setattr(settings, "privacy_mode", "functional")
         status = privacy.apply_temp_dir()
+        import shutil
+
+        shutil.rmtree(privacy.MEMORY_TEMP_DIR, ignore_errors=True)
     assert not status["in_memory"]

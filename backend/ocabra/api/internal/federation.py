@@ -30,6 +30,7 @@ from ocabra.config import settings
 from ocabra.core.federation import PeerState, new_tunnel_token
 from ocabra.schemas.federation import (
     FederationRules,
+    FederationStrategyIn,
     HeartbeatGpu,
     HeartbeatLoad,
     HeartbeatModel,
@@ -130,8 +131,9 @@ async def heartbeat(
 ) -> HeartbeatResponse:
     """Return this node's heartbeat information for federation peers.
 
-    Includes GPU states, loaded models with their profiles, and current
-    load metrics (active requests and average GPU utilization).
+    Includes GPU states, the models we offer with their profiles (loaded ones,
+    plus cold ones we would load for the caller — its «rules» decide), and
+    current load metrics (active requests and average GPU utilization).
     """
     fm = _get_federation_manager(request)
     gpu_manager = getattr(request.app.state, "gpu_manager", None)
@@ -155,11 +157,15 @@ async def heartbeat(
         except Exception as exc:
             logger.warning("federation_heartbeat_gpu_error", error=str(exc))
 
+    from ocabra.core.federation_rules import ALL_ALLOWED
+
+    rules = fm.rules_for_user(getattr(_user, "user_id", None))
+
     # Models
     models: list[HeartbeatModel] = []
     if model_manager is not None:
         try:
-            from ocabra.core.model_manager import ModelStatus
+            from ocabra.core.model_manager import ModelStatus, resolve_display_capabilities
 
             model_states = await model_manager.list_states(include_derived=True)
             for ms in model_states:
@@ -186,8 +192,38 @@ async def heartbeat(
                         runtime_preset=runtime.get("preset_key"),
                         effective_context=runtime.get("effective_context"),
                         parallelism=runtime.get("parallelism"),
+                        capabilities=resolve_display_capabilities(ms)[0],
                     )
                 )
+            # Cold models too: the caller's federation adds them up with its
+            # own, and a request for one makes us load it. Not when the
+            # caller may only use what is warm here («rules»).
+            if rules is None or rules.allow_loads:
+                advertised = {m.model_id for m in models}
+                for ms in model_states:
+                    if "::" in ms.model_id or ms.model_id in advertised:
+                        continue
+                    if ms.status not in (
+                        ModelStatus.CONFIGURED,
+                        ModelStatus.UNLOADED,
+                        ModelStatus.LOADING,
+                    ):
+                        continue
+                    profile_ids = []
+                    if profile_registry is not None:
+                        try:
+                            profiles = await profile_registry.list_by_model(ms.model_id)
+                            profile_ids = [p.profile_id for p in profiles if p.enabled]
+                        except Exception:
+                            pass
+                    models.append(
+                        HeartbeatModel(
+                            model_id=ms.model_id,
+                            status=ms.status.value,
+                            profiles=profile_ids,
+                            capabilities=resolve_display_capabilities(ms)[0],
+                        )
+                    )
         except Exception as exc:
             logger.warning("federation_heartbeat_models_error", error=str(exc))
 
@@ -216,19 +252,15 @@ async def heartbeat(
     cuda = await _asyncio.to_thread(probe_cuda)
 
     from ocabra.core import privacy
-    from ocabra.core.federation_rules import ALL_ALLOWED
 
     # «Mi servidor, mis reglas»: the caller sees the rules we apply to it, and
     # only the models offered to it (so it doesn't send what we'd refuse).
-    rules = fm.rules_for_user(getattr(_user, "user_id", None))
     rules_out = None
     if rules is not None and rules != ALL_ALLOWED:
         rules_out = rules.to_dict()
         if rules.offered_models is not None:
             offered = set(rules.offered_models)
-            models = [
-                m for m in models if m.model_id in offered or offered & set(m.profiles or [])
-            ]
+            models = [m for m in models if m.model_id in offered or offered & set(m.profiles or [])]
 
     return HeartbeatResponse(
         cuda=cuda,
@@ -343,7 +375,10 @@ async def update_peer(
         "Issue a new tunnel token for a tunnel-mode peer. The old token stops "
         "working immediately and the live tunnel, if any, is closed."
     ),
-    responses={400: {"description": "Peer is not in tunnel mode"}, 404: {"description": "Peer not found"}},
+    responses={
+        400: {"description": "Peer is not in tunnel mode"},
+        404: {"description": "Peer not found"},
+    },
 )
 async def rotate_tunnel_token(
     peer_id: str,
@@ -457,9 +492,7 @@ async def test_peer(
 # ── Phase 5: Remote operations (access_level == "full") ─────────
 
 
-async def _get_full_access_peer(
-    peer_id: str, request: Request
-) -> PeerState:
+async def _get_full_access_peer(peer_id: str, request: Request) -> PeerState:
     """Get a peer with full access level, or raise 403/404.
 
     Args:
@@ -1144,9 +1177,7 @@ async def remote_panel_proxy(
         raise HTTPException(
             status_code=502, detail=f"Peer '{peer.name}' unreachable: {exc}"
         ) from exc
-    out_headers = {
-        k: v for k, v in resp.headers.items() if k.lower() in _PANEL_RETURN_HEADERS
-    }
+    out_headers = {k: v for k, v in resp.headers.items() if k.lower() in _PANEL_RETURN_HEADERS}
     return StreamingResponse(
         resp.aiter_raw(),
         status_code=resp.status_code,
@@ -1234,3 +1265,88 @@ async def get_rules_usage(
         "wh_this_month": round(await fr.energy_this_month(fm, peer), 2),
         "max_wh_per_month": rules.max_wh_per_month,
     }
+
+
+# ── Per-model strategies (core/federation_policy.py) ─────────────
+
+
+def _strategy_nodes(fm, model_id: str) -> list[dict]:
+    """Every peer we know, with how it has *model_id* (loaded / cold / no)."""
+    offered = {peer.peer_id: entry for peer, entry in fm.get_remote_catalog().get(model_id, [])}
+    out = []
+    for peer in fm.get_all_peers():
+        entry = offered.get(peer.peer_id)
+        status = None
+        if entry is not None:
+            status = "loaded" if str(entry.get("status", "")).lower() == "loaded" else "cold"
+        out.append(
+            {"name": peer.name, "peer_id": peer.peer_id, "online": peer.online, "model": status}
+        )
+    return out
+
+
+@router.get(
+    "/federation/strategies",
+    summary="Per-model federation strategies",
+    description=(
+        "Where each model's requests are served: `auto` (warm beats cold, local bias), "
+        "`local_only`, or `prefer` an ordered list of nodes. Models not listed are `auto`. "
+        "With `?model_id=` returns that model's strategy and every node with its status "
+        "for it (`loaded`, `cold` or null)."
+    ),
+)
+async def get_strategies(
+    request: Request,
+    model_id: str | None = None,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """List strategies, or describe one model's.
+
+    Returns:
+        ``{"strategies": {model_id: {...}}}``, or for ``model_id``:
+        ``{"model_id", "strategy", "nodes", "fallback", "local", "peers": [...]}``.
+    """
+    from ocabra.core import federation_policy as fp
+
+    fm = _get_federation_manager(request)
+    if model_id is None:
+        return {"strategies": {k: v.to_dict() for k, v in fp.POLICIES.items()}}
+    mm = getattr(request.app.state, "model_manager", None)
+    local = mm is not None and await mm.get_state(model_id) is not None
+    return {
+        "model_id": model_id,
+        **fp.policy_for(model_id).to_dict(),
+        "local": local,
+        "peers": _strategy_nodes(fm, model_id),
+    }
+
+
+@router.put(
+    "/federation/strategies",
+    summary="Set a model's federation strategy",
+    description=(
+        "`prefer` needs `nodes` (peer names or ids, or `local`), tried in order; the first "
+        "online one that has the model serves it, loading it if cold. `fallback: false` "
+        "answers 503 when none can, instead of going on as `auto`. `auto` clears it."
+    ),
+    responses={400: {"description": "Invalid strategy"}},
+)
+async def set_strategy(
+    body: FederationStrategyIn,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict:
+    """Store a model's strategy.
+
+    Returns:
+        The same shape as ``GET /federation/strategies?model_id=``.
+    """
+    from ocabra.core import federation_policy as fp
+
+    fm = _get_federation_manager(request)
+    try:
+        policy = fp.clean_policy(body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await fm.set_policy(body.model_id, policy)
+    return await get_strategies(request, body.model_id, _user)

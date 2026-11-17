@@ -524,7 +524,6 @@ async def apply_setup(registry: Any, profile: Any, plan: SetupPlan) -> list[str]
                     "kv_cache_dtype": "q8",
                     "placement_policy": "forced" if rung.gpus else "auto",
                     "preferred_gpus": rung.gpus or None,
-                    "execution_policy": "auto",
                     "enabled": True,
                     "is_default": priority == 1,
                     "priority": priority * 10,

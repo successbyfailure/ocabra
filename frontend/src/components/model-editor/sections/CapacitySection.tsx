@@ -118,7 +118,6 @@ export function CapacitySection(props: SectionProps & { ladder: { rungs: LadderR
         kvCacheDtype: ct.startsWith("q4") ? "q4" : ct ? "q8" : "fp16",
         placementPolicy: editor.draft.preferredGpu != null ? "forced" : "auto",
         preferredGpus: editor.draft.preferredGpu != null ? [editor.draft.preferredGpu] : null,
-        executionPolicy: "auto",
         enabled: true,
         isDefault: true,
       })

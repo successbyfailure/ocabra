@@ -12,6 +12,7 @@ import {
   Lock,
   MessageSquare,
   Mic,
+  Network,
   Power,
   PowerOff,
   Rocket,
@@ -33,6 +34,7 @@ import { CompileModal } from "@/components/models/CompileModal"
 import { ModelStatusBadge } from "@/components/models/ModelStatusBadge"
 import { MobilePreviewBar, PreviewPanel } from "@/components/model-editor/PreviewPanel"
 import { AccessSection } from "@/components/model-editor/sections/AccessSection"
+import { FederationSection } from "@/components/model-editor/sections/FederationSection"
 import { CapacitySection } from "@/components/model-editor/sections/CapacitySection"
 import { LoadSection } from "@/components/model-editor/sections/LoadSection"
 import { AccelerationSection, AdvancedSection, GroupSection, ResponseSection } from "@/components/model-editor/sections/MiscSections"
@@ -61,6 +63,7 @@ type SectionId =
   | "runtime"
   | "profiles"
   | "access"
+  | "federation"
   | "advanced"
 
 const SECTIONS: { id: SectionId; label: string; icon: typeof Info; llmOnly?: boolean; group?: string }[] = [
@@ -75,6 +78,7 @@ const SECTIONS: { id: SectionId; label: string; icon: typeof Info; llmOnly?: boo
   { id: "runtime", label: "Arranque", icon: Box, group: "runtime" },
   { id: "profiles", label: "Perfiles", icon: Users },
   { id: "access", label: "Acceso", icon: ShieldCheck },
+  { id: "federation", label: "Reparto", icon: Network },
   { id: "advanced", label: "Avanzado", icon: Settings2 },
 ]
 
@@ -382,6 +386,7 @@ export function ModelEditor() {
           {active === "runtime" && <GroupSection {...props} group="runtime" title="Arranque del worker" />}
           {active === "profiles" && <ProfilesSection {...props} />}
           {active === "access" && <AccessSection {...props} />}
+          {active === "federation" && <FederationSection {...props} />}
           {active === "advanced" && <AdvancedSection {...props} />}
         </main>
 

@@ -887,9 +887,6 @@ function toRuntimePreset(raw: unknown): RuntimePreset {
     preferredGpus: Array.isArray(data.preferred_gpus ?? data.preferredGpus)
       ? ((data.preferred_gpus ?? data.preferredGpus) as unknown[]).map(Number)
       : null,
-    executionPolicy: String(
-      data.execution_policy ?? data.executionPolicy ?? "auto",
-    ) as RuntimePreset["executionPolicy"],
     enabled: Boolean(data.enabled ?? true),
     isDefault: Boolean(data.is_default ?? data.isDefault ?? false),
     priority: Number(data.priority ?? 100),
@@ -943,9 +940,6 @@ function fromRuntimePreset(
     }),
     ...(data.preferredGpus !== undefined && {
       preferred_gpus: data.preferredGpus,
-    }),
-    ...(data.executionPolicy !== undefined && {
-      execution_policy: data.executionPolicy,
     }),
     ...(data.enabled !== undefined && { enabled: data.enabled }),
     ...(data.isDefault !== undefined && { is_default: data.isDefault }),
@@ -3698,6 +3692,20 @@ export const api = {
       rules: Partial<import("@/types").FederationRules>,
     ): Promise<import("@/types").FederationNodeRules> =>
       request<import("@/types").FederationNodeRules>("PUT", "/ocabra/federation/rules", rules),
+    /** Where a model's requests are served (core/federation_policy.py). */
+    getStrategy: async (modelId: string): Promise<import("@/types").ModelFederationStrategy> =>
+      request<import("@/types").ModelFederationStrategy>(
+        "GET",
+        `/ocabra/federation/strategies?model_id=${encodeURIComponent(modelId)}`,
+      ),
+    setStrategy: async (
+      modelId: string,
+      strategy: Pick<import("@/types").ModelFederationStrategy, "strategy" | "nodes" | "fallback">,
+    ): Promise<import("@/types").ModelFederationStrategy> =>
+      request<import("@/types").ModelFederationStrategy>("PUT", "/ocabra/federation/strategies", {
+        model_id: modelId,
+        ...strategy,
+      }),
     rulesUsage: async (id: string): Promise<import("@/types").FederationRulesUsage> =>
       request<import("@/types").FederationRulesUsage>(
         "GET",

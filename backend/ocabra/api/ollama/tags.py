@@ -185,7 +185,11 @@ async def _list_tags_from_profiles(
 
     # ── Federation: merge remote models ─────────────────────────
     if federation_manager is not None:
-        remote_models = federation_manager.get_remote_models()
+        # Warm or cold: a peer loads a cold model when asked for it.
+        remote_models = {
+            mid: [peer for peer, _entry in entries]
+            for mid, entries in federation_manager.get_remote_catalog().items()
+        }
         for model_id, peers in remote_models.items():
             if model_id in local_model_ids:
                 # Model exists locally — annotate with remote availability
@@ -204,6 +208,8 @@ async def _list_tags_from_profiles(
                     for m in peer.models:
                         if m.get("model_id") == model_id:
                             remote_profiles.update(m.get("profiles", []))
+                if not user.can_access_model(model_id, *remote_profiles):
+                    continue
                 if remote_profiles & local_profile_ids:
                     continue
 

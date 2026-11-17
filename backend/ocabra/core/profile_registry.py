@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import re
+from collections.abc import Callable
 
 import structlog
 from sqlalchemy import select
@@ -42,6 +43,9 @@ class ProfileRegistry:
     def __init__(self) -> None:
         self._profiles: dict[str, ModelProfile] = {}
         self._aliases: dict[str, ModelProfileAlias] = {}
+        # Set by FederationManager: name → canonical id of a model only a peer
+        # has (routers may target those), or None.
+        self.remote_target_lookup: Callable[[str], str | None] | None = None
 
     # ── Bulk load ────────────────────────────────────────────
 
@@ -468,7 +472,6 @@ class ProfileRegistry:
                     preferred_gpus=(
                         list(preset.preferred_gpus) if preset.preferred_gpus is not None else None
                     ),
-                    execution_policy=preset.execution_policy,
                     placement=copy.deepcopy(getattr(preset, "placement", None)),
                     enabled=preset.enabled,
                     is_default=preset.is_default,
@@ -560,7 +563,6 @@ class ProfileRegistry:
             "kv_cache_dtype": preset.kv_cache_dtype,
             "placement_policy": preset.placement_policy,
             "preferred_gpus": preset.preferred_gpus,
-            "execution_policy": preset.execution_policy,
             "placement": getattr(preset, "placement", None),
             "enabled": preset.enabled,
             "is_default": preset.is_default,
@@ -673,7 +675,12 @@ class ProfileRegistry:
             raise ValueError("Router routing_targets must not contain duplicates.")
         if profile_id in routing_targets:
             raise ValueError("A router cannot target itself.")
-        missing = [target for target in routing_targets if target not in self._profiles]
+        lookup = self.remote_target_lookup
+        missing = [
+            target
+            for target in routing_targets
+            if target not in self._profiles and not (lookup is not None and lookup(target))
+        ]
         if missing:
             raise ValueError("Router target profile(s) not found: " + ", ".join(missing))
 

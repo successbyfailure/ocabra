@@ -27,7 +27,6 @@ def _preset(
         kv_cache_dtype="q8",
         placement_policy="forced",
         preferred_gpus=[1],
-        execution_policy="auto",
         load_policy="warm" if default else "on_demand",
         enabled=True,
         is_default=default,

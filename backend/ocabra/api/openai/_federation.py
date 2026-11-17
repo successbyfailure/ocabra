@@ -82,79 +82,20 @@ def _model_for_peer(peer: Any, requested: str, resolved: dict[str, Any]) -> str 
     return base if profile is not None else None
 
 
-async def try_proxy_json(
-    request: Request,
-    *,
+async def body_for_peer(
+    peer: Any,
     model_id: str,
     body: dict[str, Any],
-    federation_manager: Any,
-    model_manager: Any,
+    resolved: dict[str, Any],
     profile_registry: Any,
-    logger: structlog.stdlib.BoundLogger,
-    required_capability: str | None = None,
-) -> Response | None:
-    """Proxy a JSON request to the best peer for *model_id*.
+) -> tuple[dict[str, Any], Any]:
+    """The body to send *peer*, with ``model`` named the way it knows it.
 
-    Returns:
-        * ``Response`` — the peer served the request (or returned a
-          non-recoverable error worth propagating to the caller).
-        * ``None`` — caller should fall back to local processing (peer
-          unreachable, peer 401/403/404/5xx, federation disabled, or no
-          remote peer has this model warm).
+    Returns ``(body, profile)``: *profile* is the local execution profile
+    behind *model_id* (``None`` for a model only peers have), used by the
+    canonical-id retry.
     """
-    from ocabra.config import settings
-
-    if federation_manager is None or not settings.federation_enabled:
-        return None
-
-    from ocabra.core.federation import resolve_federated, should_fallback_to_local
-
     profile = None
-    execution_policy = "auto"
-    if profile_registry is not None:
-        try:
-            profile = await profile_registry.get(model_id)
-            if profile is None:
-                alias_target = await profile_registry.resolve_alias(model_id)
-                profile = alias_target[0] if alias_target is not None else None
-            profile = await _first_execution_profile(profile_registry, profile)
-            if profile is not None and getattr(profile, "runtime_presets", []):
-                from ocabra.core.runtime_coordinator import plan_profile_runtime
-
-                plan = await plan_profile_runtime(profile, model_manager, body)
-                selected = next(
-                    (
-                        preset
-                        for preset in getattr(profile, "runtime_presets", [])
-                        if preset.preset_key == plan.preset_key
-                    ),
-                    None,
-                )
-                if selected is not None:
-                    execution_policy = selected.execution_policy
-        except Exception:  # noqa: BLE001 -- federation remains best effort
-            profile = None
-            execution_policy = "auto"
-    if execution_policy == "local":
-        return None
-
-    resolved: dict[str, Any] = {}
-    target, peer = await resolve_federated(
-        model_id,
-        model_manager,
-        federation_manager,
-        profile_registry,
-        required_capability=required_capability,
-        resolved=resolved,
-        user=getattr(request.state, "auth_user", None),
-    )
-    if execution_policy == "remote" and profile is not None:
-        forced_peer = federation_manager.find_best_peer(profile.base_model_id)
-        if forced_peer is not None:
-            target, peer = "remote", forced_peer
-    if target != "remote" or peer is None:
-        return None
-
     # ``resolve_federated`` resolves public profile ids to their canonical
     # ``base_model_id`` before inspecting the peer inventory.  Prefer the
     # original public id when the selected peer explicitly advertises it in
@@ -186,9 +127,58 @@ async def try_proxy_json(
     # A router: send the target it resolved to (the block above names the
     # router's *first* target, which is not necessarily the one chosen).
     if resolved.get("profile") is not None:
+        # The canonical-id retry must name the chosen target too, not the
+        # router's first one.
+        profile = resolved["profile"]
         chosen = _model_for_peer(peer, model_id, resolved)
         if chosen:
             proxy_body = {**body, "model": chosen}
+
+    return proxy_body, profile
+
+
+async def try_proxy_json(
+    request: Request,
+    *,
+    model_id: str,
+    body: dict[str, Any],
+    federation_manager: Any,
+    model_manager: Any,
+    profile_registry: Any,
+    logger: structlog.stdlib.BoundLogger,
+    required_capability: str | None = None,
+) -> Response | None:
+    """Proxy a JSON request to the best peer for *model_id*.
+
+    Returns:
+        * ``Response`` — the peer served the request (or returned a
+          non-recoverable error worth propagating to the caller).
+        * ``None`` — caller should fall back to local processing (peer
+          unreachable, peer 401/403/404/5xx, federation disabled, or no
+          remote peer has this model warm).
+    """
+    from ocabra.config import settings
+
+    if federation_manager is None or not settings.federation_enabled:
+        return None
+
+    from ocabra.core.federation import resolve_federated, should_fallback_to_local
+
+    profile = None
+    resolved: dict[str, Any] = {}
+    target, peer = await resolve_federated(
+        model_id,
+        model_manager,
+        federation_manager,
+        profile_registry,
+        required_capability=required_capability,
+        resolved=resolved,
+        user=getattr(request.state, "auth_user", None),
+    )
+    if target != "remote" or peer is None:
+        return None
+
+    proxy_body, profile = await body_for_peer(peer, model_id, body, resolved, profile_registry)
 
     request.state.federation_remote_node_id = peer.peer_id
     try:

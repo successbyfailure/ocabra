@@ -16,6 +16,44 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.97.0 — 2026-11-17
+
+### Nuevo
+
+- Los nodos de una federación suman sus modelos: `GET /v1/models` y
+  `GET /api/tags` listan también los modelos que un vecino ofrece **en frío**,
+  no solo los que tiene cargados. Pedir uno funciona: el vecino lo carga.
+- Un router (`recomendado-*`) puede tener como destino un modelo que solo
+  existe en otro nodo, por ejemplo un pod con un modelo grande. Mientras ese
+  nodo no está en línea, el router lo salta. Mientras lo está, sigue la regla
+  de siempre: gana el primer destino de la lista que esté caliente.
+- Estrategia de reparto por modelo, que configura quien administra el nodo:
+  `auto` (lo de antes), `local_only` (nunca sale de este nodo) o `prefer` (una
+  lista de nodos en orden; el primero en línea que lo tenga lo sirve, aunque
+  esté en frío). Tu cliente no cambia nada: la respuesta es la misma, solo
+  cambia dónde se calcula.
+
+### Cambios
+
+- Con `prefer` sin caída a otros nodos, si ninguno de los preferidos puede
+  servir el modelo, la respuesta es **503** con `code:
+  "preferred_nodes_unavailable"` y `Retry-After`. Reintenta más tarde.
+- **Acción** (solo API interna): los peldaños (`/ocabra/profiles/*/presets`)
+  ya no tienen `execution_policy`; lo sustituye la estrategia del modelo
+  (`GET`/`PUT /ocabra/federation/strategies`). Un cliente que lo siga mandando
+  recibe un 422.
+
+### Errores corregidos
+
+- Un chat o completion **en streaming** a un router que acababa en otro nodo
+  le mandaba el nombre del router en vez del modelo elegido. Un nodo sin ese
+  router (un pod) respondía 404 y la petición acababa sirviéndose aquí.
+- `GET /v1/models` y `GET /api/tags` listaban los modelos que solo tienen los
+  vecinos sin mirar los grupos de tu clave. Ahora solo ves los que tu grupo
+  puede usar, como con los modelos de este nodo.
+
+---
+
 ## 0.96.0 — 2026-11-17
 
 ### Nuevo

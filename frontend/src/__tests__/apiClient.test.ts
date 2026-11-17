@@ -186,7 +186,6 @@ describe("api client mappings", () => {
             kv_cache_dtype: "q8",
             placement_policy: "forced",
             preferred_gpus: [1],
-            execution_policy: "auto",
             load_policy: "warm",
             enabled: true,
             is_default: false,
@@ -222,7 +221,6 @@ describe("api client mappings", () => {
           kv_cache_dtype: "q8",
           placement_policy: "auto",
           preferred_gpus: null,
-          execution_policy: "auto",
           enabled: true,
           is_default: true,
           priority: 20,
@@ -239,7 +237,6 @@ describe("api client mappings", () => {
       parallelism: 2,
       kvCacheDtype: "q8",
       placementPolicy: "auto",
-      executionPolicy: "auto",
       isDefault: true,
       priority: 20,
     })

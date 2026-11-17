@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { AlertCircle, ArrowDown, ArrowUp, Copy, GitBranch, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react"
 import { toast } from "sonner"
 import { api, type RoutingDecisionsResponse } from "@/api/client"
-import type { ModelProfile, ProfileCategory, RouterContextPolicy } from "@/types"
+import type { ModelProfile, ModelState, ProfileCategory, RouterContextPolicy } from "@/types"
 
 const ROUTER_CATEGORIES: { value: ProfileCategory; label: string }[] = [
   { value: "llm", label: "LLM" },
@@ -25,12 +25,22 @@ const ROUTER_CATEGORIES: { value: ProfileCategory; label: string }[] = [
  * status of each target, reorder the priorities and remove/add targets
  * inline, and review the last-7-days routing distribution per router.
  */
-type WorkerStatus = "loaded" | "loading" | "unloaded" | "error" | "configured" | "unknown"
+type WorkerStatus =
+  | "loaded"
+  | "loading"
+  | "unloaded"
+  | "error"
+  | "configured"
+  | "unknown"
+  | "remote_loaded"
+  | "remote_cold"
 
 interface RouterTarget {
   profileId: string
   status: WorkerStatus
   errorMessage?: string | null
+  /** A model only other nodes have: which ones. */
+  remoteNodes?: string[]
 }
 
 interface RouterCardData {
@@ -48,6 +58,8 @@ function statusPill(status: WorkerStatus) {
     configured: { cls: "border-border bg-muted/40 text-muted-foreground", label: "configured" },
     error: { cls: "border-destructive/40 bg-destructive/10 text-destructive", label: "error" },
     unknown: { cls: "border-border bg-muted/20 text-muted-foreground", label: "—" },
+    remote_loaded: { cls: "border-violet-500/40 bg-violet-500/10 text-violet-600 dark:text-violet-300", label: "remoto · cargado" },
+    remote_cold: { cls: "border-violet-500/30 bg-muted/40 text-violet-600 dark:text-violet-300", label: "remoto · en frío" },
   }
   const { cls, label } = map[status]
   return (
@@ -55,6 +67,13 @@ function statusPill(status: WorkerStatus) {
       {label}
     </span>
   )
+}
+
+/** Nodes that have a peer-only model (loaded ones first). */
+function remoteNodesOf(m: ModelState): string[] {
+  const loaded = (m.federation?.loadedOn ?? []).filter((n) => n !== "aquí")
+  const first = m.federation?.nodeName
+  return Array.from(new Set([...loaded, ...(first ? [first] : [])]))
 }
 
 function coerceStatus(raw: string | undefined): WorkerStatus {
@@ -69,6 +88,7 @@ function coerceStatus(raw: string | undefined): WorkerStatus {
 export function Routers() {
   const [cards, setCards] = useState<RouterCardData[]>([])
   const [profilesById, setProfilesById] = useState<Map<string, ModelProfile>>(new Map())
+  const [remoteModels, setRemoteModels] = useState<{ modelId: string; nodes: string[] }[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [routingStats, setRoutingStats] = useState<RoutingDecisionsResponse | null>(null)
@@ -90,12 +110,27 @@ export function Routers() {
       const byId = new Map(profiles.map((p) => [p.profileId, p]))
       setProfilesById(byId)
       const stateMap = new Map(models.map((m) => [m.modelId, m]))
+      // Models only peers have (a pod): routers can target them by id.
+      const remoteOnly = models.filter((m) => m.federation?.remote)
+      setRemoteModels(remoteOnly.map((m) => ({ modelId: m.modelId, nodes: remoteNodesOf(m) })))
 
       const routerProfiles = profiles.filter((p) => p.profileKind === "router")
       const built: RouterCardData[] = routerProfiles.map((router) => {
         const targets = (router.routingTargets ?? []).map((targetId) => {
           const target = byId.get(targetId)
           if (!target) {
+            const remote = stateMap.get(targetId)
+            if (remote?.federation?.remote) {
+              const loaded = (remote.federation.loadedOn ?? []).length > 0
+              return {
+                profileId: targetId,
+                status: (loaded ? "remote_loaded" : "remote_cold") as WorkerStatus,
+                errorMessage: null,
+                remoteNodes: remoteNodesOf(remote),
+              }
+            }
+            // A peer-only target whose node is offline right now: the router
+            // skips it until it is back.
             return { profileId: targetId, status: "unknown" as WorkerStatus, errorMessage: null }
           }
           const modelState = target.baseModelId ? stateMap.get(target.baseModelId) : undefined
@@ -141,14 +176,29 @@ export function Routers() {
   const candidatesForAdd = useMemo(() => {
     // Any enabled non-router profile that isn't already in the router's list
     const forRouter = cards.find((c) => c.router.profileId === addingTo)
-    if (!forRouter) return [] as ModelProfile[]
+    if (!forRouter) return [] as ProfileOption[]
     const already = new Set(forRouter.targets.map((t) => t.profileId))
     already.add(forRouter.router.profileId)
-    return Array.from(profilesById.values())
+    const local = Array.from(profilesById.values())
       .filter((p) => p.enabled && !already.has(p.profileId))
       .filter((p) => p.profileKind === "execution")
       .sort((a, b) => a.profileId.localeCompare(b.profileId))
-  }, [cards, addingTo, profilesById])
+      .map((p) => ({
+        profileId: p.profileId,
+        baseModelId: p.baseModelId ?? "",
+        displayName: p.displayName,
+        category: p.category,
+      }))
+    const remote = remoteModels
+      .filter((m) => !already.has(m.modelId))
+      .map((m) => ({
+        profileId: m.modelId,
+        baseModelId: m.modelId,
+        displayName: `${m.modelId} (en ${m.nodes.join(", ")})`,
+        category: "remoto",
+      }))
+    return [...local, ...remote] as ProfileOption[]
+  }, [cards, addingTo, profilesById, remoteModels])
 
   const moveTarget = (routerId: string, from: number, direction: -1 | 1) => {
     setCards((prev) =>
@@ -408,12 +458,20 @@ export function Routers() {
                         <div className="flex items-center gap-2">
                           <code className="truncate font-mono text-sm">{target.profileId}</code>
                           {statusPill(target.status)}
-                          {!targetProfile && (
-                            <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400">
-                              perfil no encontrado
+                          {!targetProfile && !target.remoteNodes && (
+                            <span
+                              className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400"
+                              title="Ni es un perfil de aquí ni lo ofrece ahora ningún nodo en línea: el router lo salta"
+                            >
+                              no disponible
                             </span>
                           )}
                         </div>
+                        {target.remoteNodes && (
+                          <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+                            en {target.remoteNodes.join(", ")}
+                          </div>
+                        )}
                         {targetProfile && (
                           <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
                             {targetProfile.baseModelId}
@@ -469,12 +527,7 @@ export function Routers() {
                   <div className="flex items-start gap-2">
                     <div className="flex-1">
                       <ProfilePicker
-                        options={candidatesForAdd.map((p) => ({
-                          profileId: p.profileId,
-                          baseModelId: p.baseModelId ?? "",
-                          displayName: p.displayName,
-                          category: p.category,
-                        }))}
+                        options={candidatesForAdd}
                         value={addTargetValue ? [addTargetValue] : []}
                         onChange={(ids) => setAddTargetValue(ids[0] ?? "")}
                         placeholder="Filtrar perfiles disponibles…"

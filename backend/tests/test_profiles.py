@@ -794,7 +794,6 @@ class TestRuntimePresetRegistry:
             parallelism=2,
             kv_cache_dtype="q8",
             placement_policy="auto",
-            execution_policy="auto",
             enabled=True,
             is_default=True,
             priority=100,

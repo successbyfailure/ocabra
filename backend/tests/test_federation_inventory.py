@@ -4,6 +4,7 @@ Tests for Phase 3 — Federated inventory in model listing endpoints.
 Verifies that /v1/models, /api/tags, and /ocabra/models correctly merge
 remote models from federated peers with deduplication.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -64,7 +65,24 @@ def _make_federation_manager(peers: list | None = None, remote_models: dict | No
                     model_map.setdefault(mid, []).append(peer)
         return model_map
 
+    def _get_remote_catalog():
+        # Every offered model, warm or cold (the real one reads peer.models).
+        if remote_models is not None:
+            return {
+                mid: [(p, {"model_id": mid, "status": "LOADED"}) for p in peers]
+                for mid, peers in remote_models.items()
+            }
+        catalog: dict[str, list] = {}
+        for peer in _peers:
+            if not peer.online:
+                continue
+            for m in peer.models:
+                if m.get("model_id"):
+                    catalog.setdefault(m["model_id"], []).append((peer, m))
+        return catalog
+
     fm.get_remote_models = _get_remote_models
+    fm.get_remote_catalog = _get_remote_catalog
     fm.get_online_peers = MagicMock(return_value=[p for p in _peers if p.online])
     fm.get_all_peers = MagicMock(return_value=_peers)
     return fm

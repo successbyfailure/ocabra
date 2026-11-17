@@ -30,7 +30,6 @@ class ResolvedRuntimePreset:
     kv_cache_dtype: str
     placement_policy: str = "auto"
     gpu_indices: tuple[int, ...] = ()
-    execution_policy: str = "auto"
     enabled: bool = True
     is_default: bool = False
     priority: int = 100

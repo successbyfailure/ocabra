@@ -137,9 +137,10 @@ async def list_models(
     ollama_sizes = await _get_ollama_sizes_bytes()
 
     federation_manager = getattr(request.app.state, "federation_manager", None)
-    remote_models: dict[str, list] = {}
+    remote_catalog: dict[str, list] = {}
     if federation_manager is not None:
-        remote_models = federation_manager.get_remote_models()
+        # Every model the peers offer (warm or cold), with each peer's entry.
+        remote_catalog = federation_manager.get_remote_catalog()
 
     # Bulk-fetch every per-model schedule row in one query and group by model_id
     # so we don't trigger one query per model during serialization.
@@ -179,7 +180,7 @@ async def list_models(
 
         # Add federation metadata if enabled
         if federation_manager is not None:
-            peers_for_model = remote_models.get(state.model_id, [])
+            peers_for_model = remote_catalog.get(state.model_id, [])
             local_loaded = str(getattr(state.status, "value", state.status)).lower() == "loaded"
             item["federation"] = {
                 "local": True,
@@ -193,8 +194,12 @@ async def list_models(
                     },
                 ]
                 + [
-                    {"node_name": p.name, "node_id": p.peer_id, "loaded": True}
-                    for p in peers_for_model
+                    {
+                        "node_name": p.name,
+                        "node_id": p.peer_id,
+                        "loaded": str(entry.get("status", "")).lower() == "loaded",
+                    }
+                    for p, entry in peers_for_model
                 ],
             }
 
@@ -212,18 +217,17 @@ async def list_models(
 
     # Add remote-only models (not configured locally)
     if federation_manager is not None:
-        for model_id, peers in remote_models.items():
+        for model_id, entries in remote_catalog.items():
             if model_id in local_model_ids:
                 continue
             if not await _is_accessible(model_id):
                 continue
-            first_peer = peers[0]
-            # Find model info from the first peer's model list
-            model_info: dict = {}
-            for m in first_peer.models:
-                if m.get("model_id") == model_id:
-                    model_info = m
-                    break
+            # A warm copy describes it best (live capabilities).
+            first_peer, model_info = next(
+                ((p, e) for p, e in entries if str(e.get("status", "")).lower() == "loaded"),
+                entries[0],
+            )
+            any_loaded = any(str(e.get("status", "")).lower() == "loaded" for _p, e in entries)
             payloads.append(
                 {
                     "model_id": model_id,
@@ -231,16 +235,21 @@ async def list_models(
                     "backend_model_id": model_id,
                     "display_name": model_id.split("/")[-1] if "/" in model_id else model_id,
                     "status": "remote",
-                    "capabilities": {},
+                    "capabilities": model_info.get("capabilities") or {},
                     "profiles": model_info.get("profiles", []),
                     "disk_size_bytes": None,
                     "federation": {
                         "local": False,
                         "remote": True,
                         "read_only": True,
+                        "loaded": any_loaded,
                         "nodes": [
-                            {"node_name": p.name, "node_id": p.peer_id, "loaded": True}
-                            for p in peers
+                            {
+                                "node_name": p.name,
+                                "node_id": p.peer_id,
+                                "loaded": str(e.get("status", "")).lower() == "loaded",
+                            }
+                            for p, e in entries
                         ],
                     },
                 }

@@ -80,7 +80,6 @@ def preset_from_base(state: Any, gpu_indices: list[int]) -> dict[str, Any] | Non
             "parallelism": slots,
             "kv_cache_dtype": _kv_label(sec.get("cache_type_k")),
             **placement,
-            "execution_policy": "auto",
             "enabled": True,
             "is_default": True,
         }
@@ -97,7 +96,6 @@ def preset_from_base(state: Any, gpu_indices: list[int]) -> dict[str, Any] | Non
             "parallelism": max(1, min(64, int(seqs or 1))),
             "kv_cache_dtype": _kv_label(sec.get("kv_cache_dtype")),
             **placement,
-            "execution_policy": "auto",
             "enabled": True,
             "is_default": True,
         }

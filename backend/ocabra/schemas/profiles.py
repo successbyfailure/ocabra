@@ -44,9 +44,10 @@ class RuntimePolicy(BaseModel):
     downgrade_grace_seconds: int = Field(default=600, ge=0, le=86400)
     minimum_residency_seconds: int = Field(default=120, ge=0, le=86400)
     small_requests_extend_large_ttl: bool = False
-    # Sin efecto: nunca tuvo consumidor (el reparto local/remoto lo decide
-    # execution_policy). Se sigue aceptando porque hay políticas guardadas con
-    # él y el modelo prohíbe claves extra; el editor no lo ofrece.
+    # Sin efecto: nunca tuvo consumidor (el reparto local/remoto lo decide la
+    # estrategia del modelo, core/federation_policy.py). Se sigue aceptando
+    # porque hay políticas guardadas con él y el modelo prohíbe claves extra;
+    # el editor no lo ofrece.
     remote_warm_threshold_seconds: int = Field(default=10, ge=0, le=3600)
     max_context_tokens: int | None = Field(default=None, gt=0)
     # Optional enforceable generation ceiling. This is deliberately distinct
@@ -153,7 +154,6 @@ class RuntimePresetCreate(BaseModel):
     kv_cache_dtype: Literal["fp16", "bf16", "fp8", "q8", "q4"] = "q8"
     placement_policy: Literal["auto", "preferred", "forced"] = "auto"
     preferred_gpus: list[int] | None = None
-    execution_policy: Literal["auto", "local", "remote"] = "auto"
     placement: PresetPlacement | None = None
     enabled: bool = True
     is_default: bool = False
@@ -195,7 +195,6 @@ class RuntimePresetUpdate(BaseModel):
     kv_cache_dtype: Literal["fp16", "bf16", "fp8", "q8", "q4"] | None = None
     placement_policy: Literal["auto", "preferred", "forced"] | None = None
     preferred_gpus: list[int] | None = None
-    execution_policy: Literal["auto", "local", "remote"] | None = None
     # PATCH with ``placement: null`` clears it (back to the base config).
     placement: PresetPlacement | None = None
     enabled: bool | None = None
@@ -227,7 +226,6 @@ class RuntimePresetOut(BaseModel):
     kv_cache_dtype: str
     placement_policy: str
     preferred_gpus: list[int] | None = None
-    execution_policy: str
     placement: PresetPlacement | None = None
     enabled: bool
     is_default: bool

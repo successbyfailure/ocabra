@@ -1576,7 +1576,6 @@ export interface RuntimePreset {
   kvCacheDtype: "fp16" | "bf16" | "fp8" | "q8" | "q4";
   placementPolicy: "auto" | "preferred" | "forced";
   preferredGpus: number[] | null;
-  executionPolicy: "auto" | "local" | "remote";
   enabled: boolean;
   isDefault: boolean;
   priority: number;
@@ -1628,7 +1627,6 @@ export interface RuntimePresetCreate {
   kvCacheDtype: RuntimePreset["kvCacheDtype"];
   placementPolicy: RuntimePreset["placementPolicy"];
   preferredGpus?: number[] | null;
-  executionPolicy: RuntimePreset["executionPolicy"];
   enabled?: boolean;
   isDefault?: boolean;
   priority?: number;
@@ -2164,3 +2162,18 @@ export type WSEvent =
         last_error?: string | null;
       };
     };
+
+/** A model's federation strategy: where its requests are served. */
+export interface ModelFederationStrategy {
+  model_id: string;
+  /** auto: warm beats cold, local bias · local_only · prefer: nodes in order. */
+  strategy: "auto" | "local_only" | "prefer";
+  /** prefer: peer names (or "local"), tried in order. */
+  nodes: string[];
+  /** prefer: when none can serve it, go on as auto (false = 503). */
+  fallback: boolean;
+  /** The model exists on this node. */
+  local: boolean;
+  /** Every peer, with how it has this model: loaded, cold, or null (doesn't). */
+  peers: { name: string; peer_id: string; online: boolean; model: "loaded" | "cold" | null }[];
+}

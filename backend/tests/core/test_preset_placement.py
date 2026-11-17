@@ -74,7 +74,7 @@ def test_create_update_and_out_carry_placement():
         id="00000000-0000-0000-0000-000000000001", profile_id="p", preset_key="normal",
         label="Normal", context_mode="fixed", context_tokens=32768, parallelism=2,
         kv_cache_dtype="q8", placement_policy="auto", preferred_gpus=None,
-        execution_policy="auto", placement={"gpu_layers": 20}, enabled=True,
+        placement={"gpu_layers": 20}, enabled=True,
         is_default=True, priority=100, created_at=None, updated_at=None,
     )
     out = RuntimePresetOut.model_validate(row).model_dump(mode="json")
@@ -300,7 +300,7 @@ def _coord_preset(gpus, placement):
     return SimpleNamespace(
         preset_key="p", context_mode="fixed", context_tokens=65_536, parallelism=2,
         kv_cache_dtype="q8", placement_policy="forced", preferred_gpus=gpus,
-        execution_policy="auto", enabled=True, is_default=True, priority=10,
+        enabled=True, is_default=True, priority=10,
         placement=placement,
     )
 

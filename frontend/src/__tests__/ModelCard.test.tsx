@@ -21,7 +21,6 @@ function preset(presetKey: string, overrides: Partial<RuntimePreset> = {}): Runt
     kvCacheDtype: "q8",
     placementPolicy: "auto",
     preferredGpus: null,
-    executionPolicy: "auto",
     enabled: true,
     isDefault: false,
     priority: 0,
