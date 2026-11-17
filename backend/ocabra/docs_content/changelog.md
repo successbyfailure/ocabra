@@ -16,6 +16,21 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.103.0 — 2026-11-17
+
+### Nuevo
+
+- `POST /ocabra/cloud/recipes` añade un modelo para los nodos en la nube desde
+  Hugging Face (un fichero `.gguf`) o desde Ollama (un tag), con su contexto,
+  slots y política de carga. Se sirve con llama.cpp. Si el modelo ya tenía
+  receta, se actualiza. Un repo de HF sin `.gguf` responde **422**.
+- `PATCH /ocabra/cloud/recipes/{id}` cambia el contexto, los slots, la política
+  de carga o el nombre que tendrá ese modelo en el próximo nodo. Contexto o
+  slots a `0` dejan el valor por defecto del nodo.
+- Las recetas devuelven también su `load_policy`.
+
+---
+
 ## 0.102.0 — 2026-11-17
 
 ### Nuevo

@@ -68,6 +68,74 @@ describe("ModelPicker", () => {
     await waitFor(() => expect(last.recipes).toEqual(["r1"]))
   })
 
+  it("adds a GGUF from a Hugging Face search as a recipe and picks it", async () => {
+    vi.spyOn(api.federation.cloud, "replicableModels").mockResolvedValue([])
+    vi.spyOn(api.federation.cloud, "recipes").mockResolvedValue([])
+    vi.spyOn(api.registry, "searchHF").mockResolvedValue([
+      { repoId: "ggml-org/Nemotron-GGUF", downloads: 1200, gated: false } as never,
+    ])
+    vi.spyOn(api.registry, "getHFVariants").mockResolvedValue([
+      { variantId: "a", label: "Q4", artifact: "Nemotron-Q4_K_M.gguf", sizeGb: 70, quantization: "Q4_K_M" },
+      { variantId: "b", label: "Q8", artifact: "mmproj-Q8_0.gguf", sizeGb: 1, quantization: "Q8_0" },
+    ] as never)
+    const create = vi.spyOn(api.federation.cloud, "createRecipe").mockResolvedValue({ ...nemo, id: "new" })
+    let last = EMPTY_PICK
+    render(<Harness gpuGb={96} onPick={(p) => (last = p)} />)
+    fireEvent.click(await screen.findByRole("button", { name: /Buscar en Hugging Face u Ollama/ }))
+    fireEvent.change(screen.getByLabelText("Buscar modelo"), { target: { value: "nemotron" } })
+    fireEvent.click(screen.getByRole("button", { name: /^Buscar$/ }))
+    fireEvent.click(await screen.findByText("ggml-org/Nemotron-GGUF"))
+    expect(await screen.findByText("Nemotron-Q4_K_M")).toBeTruthy()
+    expect(screen.queryByText(/mmproj/)).toBeNull() // not a model
+    fireEvent.click(screen.getByRole("button", { name: "Añadir Nemotron-Q4_K_M" }))
+    await waitFor(() => expect(last.recipes).toEqual(["new"]))
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "huggingface",
+        model_ref: "ggml-org/Nemotron-GGUF",
+        artifact: "Nemotron-Q4_K_M.gguf",
+      }),
+    )
+  })
+
+  it("an Ollama tag is added with its full name", async () => {
+    vi.spyOn(api.federation.cloud, "replicableModels").mockResolvedValue([])
+    vi.spyOn(api.federation.cloud, "recipes").mockResolvedValue([])
+    vi.spyOn(api.registry, "searchOllama").mockResolvedValue([{ name: "qwen3", pulls: 5 } as never])
+    vi.spyOn(api.registry, "getOllamaVariants").mockResolvedValue([
+      { name: "qwen3:8b", tag: "8b", sizeGb: 5.2, parameterSize: "8B", quantization: "Q4_K_M" },
+    ] as never)
+    const create = vi.spyOn(api.federation.cloud, "createRecipe").mockResolvedValue({ ...nemo, id: "q" })
+    render(<Harness gpuGb={24} onPick={() => {}} />)
+    fireEvent.click(await screen.findByRole("button", { name: /Buscar en Hugging Face u Ollama/ }))
+    fireEvent.change(screen.getByLabelText("Dónde buscar"), { target: { value: "ollama" } })
+    fireEvent.change(screen.getByLabelText("Buscar modelo"), { target: { value: "qwen3" } })
+    fireEvent.click(screen.getByRole("button", { name: /^Buscar$/ }))
+    fireEvent.click(await screen.findByText("qwen3"))
+    fireEvent.click(await screen.findByRole("button", { name: /Añadir qwen3:8b/ }))
+    await waitFor(() =>
+      expect(create).toHaveBeenCalledWith(expect.objectContaining({ source: "ollama", model_ref: "qwen3:8b", artifact: null })),
+    )
+  })
+
+  it("a picked recipe's context and pin can be changed before launching", async () => {
+    vi.spyOn(api.federation.cloud, "replicableModels").mockResolvedValue([])
+    vi.spyOn(api.federation.cloud, "recipes").mockResolvedValue([nemo])
+    const update = vi
+      .spyOn(api.federation.cloud, "updateRecipe")
+      .mockImplementation(async (_id, c) => ({ ...nemo, context: c.context ?? null, load_policy: c.load_policy }))
+    render(<Harness gpuGb={96} onPick={() => {}} />)
+    fireEvent.click(await screen.findByRole("checkbox", { name: /Nemotron 120B/ }))
+    fireEvent.click(screen.getByRole("button", { name: "Configurar Nemotron 120B" }))
+    fireEvent.change(screen.getByLabelText("Contexto"), { target: { value: "131072" } })
+    fireEvent.click(screen.getByLabelText("Fijado (pin)"))
+    fireEvent.click(screen.getByRole("button", { name: "Guardar" }))
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith("r1", { context: 131072, parallel: 4, load_policy: "pin" }),
+    )
+    expect(await screen.findByText(/128k ctx/)).toBeTruthy()
+  })
+
   it("relaunch repeats the node's setup", () => {
     const node = {
       name: "ocabra-pro-6000-63b924",

@@ -706,3 +706,109 @@ async def test_snapshot_stores_and_updates_one_recipe_per_model():
                 sa.delete(CloudModelRecipe).where(CloudModelRecipe.node_model_id == NEMO)
             )
             await s.commit()
+
+
+def test_recipe_from_search_hf_gguf_and_ollama_tag():
+    from ocabra.core.cloud.recipes import new_recipe
+
+    hf = new_recipe(
+        source="huggingface",
+        model_ref="ggml-org/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-GGUF",
+        artifact="NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4.gguf",
+        display_name=None,
+        size_bytes=77 * 1024**3,
+        context=262144,
+        parallel=4,
+        load_policy="pin",
+    )
+    # One repo, several quantizations: the file names the model.
+    assert hf["node_model_id"] == "llamacpp_mks/nvidia-nemotron-3.5-super-vl-120b-a12b-nvfp4"
+    body = hf["steps"][0]["body"]
+    assert body["artifact"].endswith("NVFP4.gguf") and body["register"] is True
+    rc = body["register_config"]
+    assert rc["backend_type"] == "llamacpp_mks" and rc["load_policy"] == "pin"
+    assert rc["extra_config"] == {"llama_cpp": {"ctx_size": 262144, "parallel_slots": 4}}
+    assert hf["steps"][1] == {"kind": "load"}
+
+    ol = new_recipe(
+        source="ollama",
+        model_ref="qwen3:8b",
+        artifact=None,
+        display_name=None,
+        size_bytes=None,
+        context=None,
+        parallel=None,
+        load_policy="on_demand",
+    )
+    assert ol["node_model_id"] == "llamacpp_mks/qwen3:8b"
+    assert ol["steps"][0]["body"] == {
+        "source": "ollama",
+        "model_ref": "qwen3:8b",
+        "register": True,
+        "register_config": {
+            "backend_type": "llamacpp_mks",
+            "model_key": "qwen3:8b",
+            "extra_config": {},
+            "load_policy": "on_demand",
+            "display_name": "qwen3:8b",
+        },
+    }
+
+
+def test_editing_a_recipe_drops_the_stale_reservation():
+    from ocabra.core.cloud.recipes import _apply_config
+
+    rc = {"extra_config": {"llama_cpp": {"ctx_size": 65536, "vram_estimate_mb": 24576}}}
+    _apply_config(rc, context=131072, load_policy="pin")
+    assert rc["extra_config"]["llama_cpp"] == {"ctx_size": 131072}
+    assert rc["load_policy"] == "pin"
+    _apply_config(rc, context=0)  # back to the node's default
+    assert rc["extra_config"] == {}
+
+
+def test_a_hf_recipe_needs_a_gguf_file():
+    from pydantic import ValidationError
+
+    from ocabra.schemas.cloud import CloudRecipeCreate
+
+    with pytest.raises(ValidationError):
+        CloudRecipeCreate(source="huggingface", model_ref="org/repo")
+    CloudRecipeCreate(source="huggingface", model_ref="org/repo", artifact="m-Q4_K_M.gguf")
+    CloudRecipeCreate(source="ollama", model_ref="qwen3:8b")
+
+
+@requires_db
+async def test_create_then_edit_a_recipe():
+    from ocabra.core.cloud import recipes
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.cloud import CloudModelRecipe
+
+    try:
+        made = await recipes.create_recipe(
+            AsyncSessionLocal,
+            source="ollama",
+            model_ref="zz-test:1b",
+            artifact=None,
+            display_name=None,
+            size_bytes=None,
+            context=32768,
+            parallel=2,
+            load_policy="on_demand",
+        )
+        assert made["context"] == 32768 and made["parallel"] == 2
+        out = await recipes.update_recipe(
+            AsyncSessionLocal, made["id"], context=65536, load_policy="pin"
+        )
+        assert out["context"] == 65536 and out["parallel"] == 2 and out["load_policy"] == "pin"
+        assert (
+            await recipes.update_recipe(AsyncSessionLocal, "00000000-0000-0000-0000-000000000000")
+            is None
+        )
+    finally:
+        async with AsyncSessionLocal() as s:
+            await s.execute(
+                sa.delete(CloudModelRecipe).where(
+                    CloudModelRecipe.node_model_id == "llamacpp_mks/zz-test:1b"
+                )
+            )
+            await s.commit()

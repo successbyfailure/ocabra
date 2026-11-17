@@ -21,6 +21,8 @@ from ocabra.schemas.cloud import (
     CloudNodeLaunch,
     CloudNodeModels,
     CloudProviderUpdate,
+    CloudRecipeCreate,
+    CloudRecipeUpdate,
     CloudVolumeCreate,
     CloudVolumeResize,
 )
@@ -309,6 +311,61 @@ async def list_recipes(
     from ocabra.core.cloud import recipes
 
     return await recipes.list_recipes(_cloud(request).fm.session_factory)
+
+
+@router.post(
+    "/cloud/recipes",
+    summary="Add a model for cloud nodes from Hugging Face or Ollama",
+    description=(
+        "A llama.cpp model searched in the launch dialog: a Hugging Face .gguf file or "
+        "an Ollama tag, with its context, slots and load policy. Becomes a recipe "
+        "(same model again = updated)."
+    ),
+    responses={422: {"description": "Not a .gguf / bad value"}},
+)
+async def create_recipe(
+    body: CloudRecipeCreate,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Create a recipe.
+
+    Returns:
+        The recipe, as listed by ``GET /cloud/recipes``.
+    """
+    from ocabra.core.cloud import recipes
+
+    return await recipes.create_recipe(_cloud(request).fm.session_factory, **body.model_dump())
+
+
+@router.patch(
+    "/cloud/recipes/{recipe_id}",
+    summary="Change a model recipe",
+    description="Context, slots, load policy or name the next node will use for it.",
+    responses={404: {"description": "Not found"}},
+)
+async def update_recipe(
+    recipe_id: str,
+    body: CloudRecipeUpdate,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Update a recipe.
+
+    Returns:
+        The recipe, as listed by ``GET /cloud/recipes``.
+    """
+    from ocabra.core.cloud import recipes
+
+    try:
+        out = await recipes.update_recipe(
+            _cloud(request).fm.session_factory, recipe_id, **body.model_dump(exclude_unset=True)
+        )
+    except ValueError:
+        out = None
+    if out is None:
+        raise HTTPException(status_code=404, detail="Receta no encontrada")
+    return out
 
 
 @router.delete(

@@ -3837,6 +3837,32 @@ export const api = {
       /** Models captured from earlier pods (core/cloud/recipes.py). */
       recipes: async (): Promise<import("@/types").CloudRecipe[]> =>
         request<import("@/types").CloudRecipe[]>("GET", "/ocabra/cloud/recipes"),
+      /** A llama.cpp model from HF (.gguf) or Ollama, picked in the launch dialog. */
+      createRecipe: async (body: {
+        source: "huggingface" | "ollama";
+        model_ref: string;
+        artifact?: string | null;
+        display_name?: string | null;
+        size_bytes?: number | null;
+        context?: number | null;
+        parallel?: number | null;
+        load_policy?: "on_demand" | "warm" | "pin";
+      }): Promise<import("@/types").CloudRecipe> =>
+        request<import("@/types").CloudRecipe>("POST", "/ocabra/cloud/recipes", body),
+      updateRecipe: async (
+        id: string,
+        changes: {
+          context?: number;
+          parallel?: number;
+          load_policy?: "on_demand" | "warm" | "pin";
+          display_name?: string;
+        },
+      ): Promise<import("@/types").CloudRecipe> =>
+        request<import("@/types").CloudRecipe>(
+          "PATCH",
+          `/ocabra/cloud/recipes/${encodeURIComponent(id)}`,
+          changes,
+        ),
       deleteRecipe: async (id: string): Promise<void> => {
         await request<unknown>("DELETE", `/ocabra/cloud/recipes/${encodeURIComponent(id)}`)
       },

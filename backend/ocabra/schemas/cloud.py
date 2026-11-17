@@ -122,3 +122,39 @@ class CloudNodeImageUpdate(BaseModel):
         pattern=r"^\d+\.\d+\.\d+$",
         description="Image tag X.Y.Z; empty = the configured image (usually latest)",
     )
+
+
+class CloudRecipeCreate(BaseModel):
+    """A llama.cpp model picked from Hugging Face or Ollama for cloud nodes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(..., pattern=r"^(huggingface|ollama)$")
+    model_ref: str = Field(..., min_length=1, max_length=255, description="HF repo or Ollama tag")
+    artifact: str | None = Field(
+        default=None, max_length=255, description="HF: the .gguf file in the repo"
+    )
+    display_name: str | None = Field(default=None, max_length=255)
+    size_bytes: int | None = Field(default=None, ge=0)
+    context: int | None = Field(
+        default=None, ge=0, le=4_194_304, description="0/None = node default"
+    )
+    parallel: int | None = Field(default=None, ge=0, le=64)
+    load_policy: str = Field(default="on_demand", pattern=r"^(on_demand|warm|pin)$")
+
+    @model_validator(mode="after")
+    def _gguf_from_hf(self) -> CloudRecipeCreate:
+        if self.source == "huggingface" and not (self.artifact or "").lower().endswith(".gguf"):
+            raise ValueError("De Hugging Face, elige un fichero .gguf (llama.cpp)")
+        return self
+
+
+class CloudRecipeUpdate(BaseModel):
+    """Change a recipe before launching."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    context: int | None = Field(default=None, ge=0, le=4_194_304, description="0 = node default")
+    parallel: int | None = Field(default=None, ge=0, le=64, description="0 = node default")
+    load_policy: str | None = Field(default=None, pattern=r"^(on_demand|warm|pin)$")
+    display_name: str | None = Field(default=None, max_length=255)

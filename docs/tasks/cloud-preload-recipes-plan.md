@@ -29,20 +29,29 @@ configurado a mano en un pod al actualizarle la imagen.
 - **`update-image`:** vuelve a encolar lo que el pod tenía, también lo puesto a
   mano.
 
-## Pendiente
+## Hecho (0.103.0) — paso 2
 
-- **Paso 2 — buscador de Hugging Face / Ollama en el diálogo:**
-  - Se reutiliza `/ocabra/registry/hf|ollama` y sus variantes.
-  - Elegir repo y cuantización (o tag) crea una receta con configuración por
-    defecto: GGUF → `llamacpp_mks`, repo diffusers → imagen.
-  - Avisa si no cabe en la GPU elegida.
-- **Editar la configuración de una receta** (contexto, slots, pin) antes de
-  lanzar. Hoy se usa la que tenía en el pod.
-- **Esquinas:**
-  - Un pod que muere sin pasar por el hub (fallo del proveedor) solo deja lo
-    capturado en los últimos 10 min.
-  - Dos pods con el mismo modelo y configuraciones distintas: gana la última
-    captura (una receta por modelo).
-  - Las recetas de un pod en 0 data se guardan igual: solo nombres de modelo y
-    configuración, nada de peticiones (decisión del usuario pendiente de
-    confirmar).
+- **Buscador** dentro del selector: Hugging Face (repos con GGUF; se listan
+  solo los ficheros de modelo, sin `mmproj` ni `imatrix`) u Ollama (tags). Al
+  añadir uno se crea una receta para llama.cpp (`POST /cloud/recipes`) y queda
+  elegido.
+  - La clave del modelo es el nombre del fichero GGUF, porque un repo trae
+    varias cuantizaciones, o el tag de Ollama.
+- **Configurar una receta** antes de lanzar, con la ⚙ de las recetas elegidas
+  (`PATCH /cloud/recipes/{id}`): contexto, slots y fijado. Al cambiar contexto
+  o slots se quita la reserva de VRAM calculada para los valores viejos.
+- **0 data:** confirmado por el usuario. Las recetas de un pod en 0 data se
+  guardan igual: solo nombres de modelo y configuración, nada de peticiones.
+
+## Pendiente / esquinas
+
+- El buscador solo da modelos de llama.cpp. Diffusers, Whisper y otros
+  necesitarían su propia receta (pasos de instalación del backend, ficheros
+  exactos).
+- GGUF partidos en varios ficheros (`-00001-of-0000N`): se ofrece cada parte
+  como variante. Hay que comprobar en un pod que la descarga trae todas las
+  partes.
+- Un pod que muere sin pasar por el hub (fallo del proveedor) solo deja lo
+  capturado en los últimos 10 min.
+- Dos pods con el mismo modelo y configuraciones distintas: gana la última
+  captura (una receta por modelo).

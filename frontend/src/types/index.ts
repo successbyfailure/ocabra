@@ -1997,6 +1997,7 @@ export interface CloudRecipe {
   context: number | null;
   parallel: number | null;
   vram_estimate_mb: number | null;
+  load_policy?: "on_demand" | "warm" | "pin" | null;
   last_node_name: string | null;
   last_gpu_type_id: string | null;
   last_used_at: string | null;

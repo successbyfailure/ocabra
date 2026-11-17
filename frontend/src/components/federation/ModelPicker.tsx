@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react"
-import { History, Loader2, Server, X } from "lucide-react"
+import { History, Loader2, Search, Server, Settings2, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import type { CloudPreloadPick, CloudRecipe, CloudReplicableModel } from "@/types"
+import { RecipeConfig, RecipeSearch } from "./RecipeTools"
 
 export const EMPTY_PICK: CloudPreloadPick = { models: [], recipes: [], downloadOnly: [] }
 
@@ -34,6 +35,7 @@ type Row = {
   badge?: string
   disabledReason?: string | null
   onForget?: () => void
+  recipe?: CloudRecipe
 }
 
 /**
@@ -61,6 +63,8 @@ export function ModelPicker({
   const [models, setModels] = useState<CloudReplicableModel[] | null>(null)
   const [recipes, setRecipes] = useState<CloudRecipe[] | null>(null)
   const [filter, setFilter] = useState("")
+  const [searching, setSearching] = useState(false)
+  const [editing, setEditing] = useState<string | null>(null)
 
   useEffect(() => {
     api.federation.cloud
@@ -132,6 +136,7 @@ export function ModelPicker({
     .map((r) => ({
       key: r.id,
       kind: "recipe",
+      recipe: r,
       name: r.display_name,
       memory: recipeMemory(r),
       detail: [
@@ -175,7 +180,19 @@ export function ModelPicker({
     const list = row.kind === "model" ? value.models : value.recipes
     const on = list.includes(row.key)
     const load = !value.downloadOnly.includes(row.key)
-    return (
+    const recipe = row.recipe
+    const config =
+      on && recipe && editing === row.key ? (
+        <RecipeConfig
+          key={`${row.key}-config`}
+          recipe={recipe}
+          onSaved={(r) => {
+            setRecipes((rs) => (rs ?? []).map((x) => (x.id === r.id ? r : x)))
+            setEditing(null)
+          }}
+        />
+      ) : null
+    return [
       <div
         key={row.key}
         title={row.disabledReason ?? undefined}
@@ -202,13 +219,32 @@ export function ModelPicker({
             <option value="download">solo descargar</option>
           </select>
         )}
+        {on && row.recipe && (
+          <button
+            type="button"
+            aria-label={`Configurar ${row.name}`}
+            title="Contexto, slots y fijado en el nodo"
+            className={`shrink-0 rounded p-0.5 hover:bg-muted ${editing === row.key ? "text-primary" : "text-muted-foreground"}`}
+            onClick={() => setEditing(editing === row.key ? null : row.key)}
+          >
+            <Settings2 size={12} />
+          </button>
+        )}
         {row.onForget && !on && (
           <button type="button" aria-label={`Olvidar ${row.name}`} title="Olvidar" className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted" onClick={row.onForget}>
             <X size={12} />
           </button>
         )}
-      </div>
-    )
+      </div>,
+      config,
+    ]
+  }
+
+  const addRecipe = (r: CloudRecipe) => {
+    setRecipes((rs) => [r, ...(rs ?? []).filter((x) => x.id !== r.id)])
+    if (!value.recipes.includes(r.id)) {
+      toggle({ key: r.id, kind: "recipe", name: r.display_name, memory: recipeMemory(r), detail: "" })
+    }
   }
 
   const ready = models != null && recipes != null
@@ -249,6 +285,15 @@ export function ModelPicker({
                 {recipeRows.map(renderRow)}
               </>
             )}
+            <button
+              type="button"
+              className="flex w-full items-center gap-1.5 bg-muted/40 px-3 py-1 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground hover:bg-muted"
+              onClick={() => setSearching((v) => !v)}
+              aria-expanded={searching}
+            >
+              <Search size={11} /> Buscar en Hugging Face u Ollama
+            </button>
+            {searching && <RecipeSearch onAdded={addRecipe} />}
             <div className="flex items-center gap-1.5 bg-muted/40 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
               <Server size={11} /> De este nodo
             </div>
