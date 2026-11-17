@@ -3,30 +3,39 @@
 # runtime is NVIDIA's NGC image (TENSORRT_LLM_DOCKER_IMAGE), started as a
 # sibling container per model. Installing = pulling that image (tens of GB, in
 # Docker's storage, not in BACKEND_DIR) and recording which one it was.
-# Needs the docker CLI and socket (the compose stack has both; the ocabra-node
-# image does not, so it cannot install this backend).
+#
+# The api has no Docker socket (SEG-03): the pull is done by the docker agent
+# (operation trtllm.pull_image, with the image of its own settings). The
+# ocabra-node image has no agent, so it cannot install this backend.
 #
 # Uninstalling the backend does not remove the image: `docker rmi` it by hand.
 set -euo pipefail
 
 : "${BACKEND_DIR:?BACKEND_DIR not set}"
-image="${TENSORRT_LLM_DOCKER_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:latest}"
-docker_bin="${TENSORRT_LLM_DOCKER_BIN:-docker}"
-command -v "$docker_bin" >/dev/null 2>&1 || [ -x "$docker_bin" ] \
-    || { echo "[install_tensorrt_llm] no docker CLI here: TensorRT-LLM runs as an NGC container" >&2; exit 1; }
-[ -S /var/run/docker.sock ] \
-    || { echo "[install_tensorrt_llm] no /var/run/docker.sock: TensorRT-LLM runs as an NGC container" >&2; exit 1; }
 
-echo "[install_tensorrt_llm] pulling ${image} (large: tens of GB)"
-"$docker_bin" pull "$image"
-digest="$("$docker_bin" image inspect --format '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo "$image")"
+echo "[install_tensorrt_llm] pulling the TensorRT-LLM image through the docker agent (large: tens of GB)"
+digest="$(python - <<'PY'
+import asyncio
+import sys
+
+from ocabra.core import docker_ops
+
+if not docker_ops.available():
+    sys.exit("[install_tensorrt_llm] no docker agent here: TensorRT-LLM runs as an NGC container")
+result = asyncio.run(docker_ops.call("trtllm.pull_image"))
+if result.get("code"):
+    sys.exit(f"[install_tensorrt_llm] pull failed: {result.get('stderr') or result.get('stdout')}")
+print(result["digest"])
+PY
+)"
 mkdir -p "${BACKEND_DIR}/bin"
 printf '%s\n' "$digest" > "${BACKEND_DIR}/IMAGE"
-# extra_bins needs a file: a launcher that runs trtllm-serve from the image
-# (handy for checks; the backend itself starts the container its own way).
-cat > "${BACKEND_DIR}/bin/trtllm-serve" <<SH
+# extra_bins needs a file. The engines are served by the docker agent
+# (operation trtllm.serve), not from here.
+cat > "${BACKEND_DIR}/bin/trtllm-serve" <<'SH'
 #!/bin/sh
-exec "$docker_bin" run --rm --gpus all "$image" trtllm-serve "\$@"
+echo "trtllm-serve runs in the TensorRT-LLM image through oCabra's docker agent." >&2
+exit 1
 SH
 chmod +x "${BACKEND_DIR}/bin/trtllm-serve"
 echo "[install_tensorrt_llm] ${digest}"

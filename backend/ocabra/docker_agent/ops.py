@@ -458,6 +458,22 @@ async def _trtllm_serve(args: dict[str, Any]) -> AsyncIterator[str]:
         yield line
 
 
+async def _trtllm_pull_image(_args: dict[str, Any]) -> dict[str, Any]:
+    """Pull the TensorRT-LLM image of the settings (installing the backend).
+
+    No arguments: the caller cannot choose what to pull. Tens of GB, so no
+    timeout. Returns the image's digest.
+    """
+    image = settings.tensorrt_llm_docker_image
+    pulled = await _exec(["docker", "pull", image], timeout=None)
+    if pulled["code"] != 0:
+        return pulled
+    digest = await _exec(
+        ["docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", image]
+    )
+    return _result(0, pulled["stdout"][-2000:], "", image=image, digest=digest["stdout"] or image)
+
+
 async def _host_helper(entrypoint: str, *args: str) -> dict[str, Any]:
     """A throwaway container in the host's PID namespace, with a fixed command."""
     image = str(settings.tensorrt_llm_host_helper_image).strip() or "ocabra-api:slim"
@@ -523,6 +539,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
     "updater.launch": _updater_launch,
     "trtllm.host_orphans": _trtllm_host_orphans,
     "trtllm.kill_orphans": _trtllm_kill_orphans,
+    "trtllm.pull_image": _trtllm_pull_image,
 }
 
 STREAM_OPERATIONS: dict[str, Callable[[dict[str, Any]], AsyncIterator[str]]] = {

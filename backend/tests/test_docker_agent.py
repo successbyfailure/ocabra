@@ -500,3 +500,35 @@ def test_the_trtllm_worker_relays_the_agents_stream(monkeypatch, capsys):
     assert code == 0
     assert seen["op"] == "trtllm.serve" and seen["gpu_indices"] == [1]
     assert "Uvicorn running" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_installing_tensorrt_pulls_only_the_image_of_the_settings(monkeypatch):
+    """install_tensorrt_llm.sh used to run `docker pull` inside the api (it
+    needed the socket). The agent pulls the configured image; arguments are
+    ignored, so the caller cannot make it pull anything else."""
+    from ocabra.config import settings
+
+    calls: list[tuple[list[str], float | None]] = []
+
+    async def fake_exec(argv, timeout=120.0):  # noqa: ASYNC109
+        calls.append((list(argv), timeout))
+        out = "sha256:abc" if "inspect" in argv else "pulled"
+        return {"code": 0, "stdout": out, "stderr": ""}
+
+    monkeypatch.setattr(ops, "_exec", fake_exec)
+
+    result = await ops.run("trtllm.pull_image", {"image": "evil/image:latest"})
+
+    assert calls[0] == (["docker", "pull", settings.tensorrt_llm_docker_image], None)
+    assert result["digest"] == "sha256:abc"
+    assert "evil/image:latest" not in str(calls)
+
+
+def test_the_tensorrt_install_script_no_longer_needs_the_docker_socket():
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parents[1] / "scripts" / "install_tensorrt_llm.sh").read_text()
+
+    assert "docker.sock" not in script.split("set -euo pipefail", 1)[1]
+    assert "trtllm.pull_image" in script
