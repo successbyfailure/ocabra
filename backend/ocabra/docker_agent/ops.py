@@ -328,14 +328,18 @@ def _trtllm_job(args: dict[str, Any]) -> SimpleNamespace:
     )
 
 
-async def _trtllm_phase(args: dict[str, Any]) -> AsyncIterator[str]:
-    """Run one compile phase, yielding its output lines; the last is ``\\x00exit:<code>``."""
-    from ocabra.core.trtllm_compile_manager import build_trtllm_docker_cmd
+async def _attached_container(argv: list[str], name: str) -> AsyncIterator[str]:
+    """Run ``docker run`` attached under ``--name name``, yielding its output.
 
-    phase = args.get("phase")
-    if phase not in _TRTLLM_PHASES:
-        raise OpError(f"'phase' must be one of {list(_TRTLLM_PHASES)}")
-    argv = build_trtllm_docker_cmd(_trtllm_job(args), phase)
+    The last item is ``EXIT_MARKER<code>``. When the consumer stops early (the
+    api cancels, unloads, or the client goes away), the container is stopped:
+    SIGTERM to the attached ``docker run`` (proxied to the container), then
+    ``docker rm -f`` by name. Killing only the CLI with SIGKILL, as before,
+    left the container running (a compile carried on; a server kept its port).
+    """
+    assert argv[1:3] == ["run", "--rm"], argv
+    argv = [*argv[:3], "--name", name, *argv[3:]]
+    await _exec(["docker", "rm", "-f", name], timeout=30)  # a leftover from a crash
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
     )
@@ -345,9 +349,113 @@ async def _trtllm_phase(args: dict[str, Any]) -> AsyncIterator[str]:
             yield raw.decode("utf-8", errors="replace").rstrip()
         yield f"{EXIT_MARKER}{await proc.wait()}"
     finally:
-        if proc.returncode is None:  # cancelled or the client went away
-            proc.kill()
-            await proc.wait()
+        if proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=20)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+            await _exec(["docker", "rm", "-f", name], timeout=30)
+
+
+async def _trtllm_phase(args: dict[str, Any]) -> AsyncIterator[str]:
+    """Run one compile phase, yielding its output lines; the last is ``\x00exit:<code>``."""
+    from ocabra.core.trtllm_compile_manager import build_trtllm_docker_cmd
+
+    phase = args.get("phase")
+    if phase not in _TRTLLM_PHASES:
+        raise OpError(f"'phase' must be one of {list(_TRTLLM_PHASES)}")
+    job = _trtllm_job(args)
+    argv = build_trtllm_docker_cmd(job, phase)
+    async for line in _attached_container(argv, f"ocabra-trtllm-{phase}-{job.engine_name}"):
+        yield line
+
+
+_TRTLLM_SERVE_BACKENDS = ("trt", "pytorch")
+_TRTLLM_SERVE_INTS = ("max_batch_size", "max_num_tokens", "max_seq_len")
+
+
+def _under(path: str, root: str, what: str) -> str:
+    """``path`` if it is inside ``root`` (no ``..``), else :class:`OpError`."""
+    clean = os.path.normpath(path)
+    root = os.path.normpath(root)
+    if ".." in path.split("/") or not (clean == root or clean.startswith(root + "/")):
+        raise OpError(f"'{what}' must be inside {root}")
+    return clean
+
+
+def _to_host(path: str) -> str:
+    container = os.path.normpath(settings.tensorrt_llm_docker_models_mount_container)
+    host = os.path.normpath(settings.tensorrt_llm_docker_models_mount_host)
+    return host + path[len(container) :]
+
+
+async def _trtllm_serve(args: dict[str, Any]) -> AsyncIterator[str]:
+    """Serve a compiled engine with ``trtllm-serve`` in the TensorRT-LLM image.
+
+    The container shares the api's network namespace (so the api reaches it on
+    ``127.0.0.1:<port>`` as with the other launch modes); the agent finds the
+    api container itself. Image and mounts come from the settings; the engine
+    and tokenizer must be inside the models mount, the port inside the worker
+    range. GPUs are the ones the scheduler assigned (``--gpus all`` before:
+    the assignment never reached the container).
+    """
+    models = settings.tensorrt_llm_docker_models_mount_container
+    engine = _under(_str(args, "engine_dir"), f"{models}/tensorrt_llm", "engine_dir")
+    tokenizer = args.get("tokenizer_path")
+    if tokenizer is not None:
+        tokenizer = _under(_str(args, "tokenizer_path"), models, "tokenizer_path")
+    port = args.get("port")
+    if not (
+        isinstance(port, int)
+        and not isinstance(port, bool)
+        and settings.worker_port_range_start <= port < settings.worker_port_range_end
+    ):
+        raise OpError("'port' must be inside the worker port range")
+    backend = args.get("backend", "trt")
+    if backend not in _TRTLLM_SERVE_BACKENDS:
+        raise OpError(f"'backend' must be one of {list(_TRTLLM_SERVE_BACKENDS)}")
+    gpus = args.get("gpu_indices")
+    if (
+        not isinstance(gpus, list)
+        or not gpus
+        or not all(isinstance(g, int) and not isinstance(g, bool) and 0 <= g < 64 for g in gpus)
+    ):
+        raise OpError("'gpu_indices' must be a non-empty list of GPU indices")
+    trust = args.get("trust_remote_code", False)
+    if not isinstance(trust, bool):
+        raise OpError("'trust_remote_code' must be a boolean")
+    serve = ["serve", _to_host(engine), "--host", "127.0.0.1", "--port", str(port)]
+    serve += ["--backend", backend]
+    if tokenizer:
+        serve += ["--tokenizer", _to_host(tokenizer)]
+    for key in _TRTLLM_SERVE_INTS:
+        value = args.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 < value <= 1 << 22:
+            raise OpError(f"'{key}' must be a positive integer")
+        serve += [f"--{key}", str(value)]
+    if trust:
+        serve.append("--trust_remote_code")
+    api = await _api_container()
+    if not api:
+        raise OpError("api container not found")
+    host_models = settings.tensorrt_llm_docker_models_mount_host
+    argv = [
+        "docker", "run", "--rm",
+        "--gpus", f"device={','.join(str(g) for g in gpus)}",
+        "--ipc=host",
+        f"--network=container:{api}",
+        "-v", f"{host_models}:{host_models}",
+    ]  # fmt: skip
+    hf_host = settings.tensorrt_llm_docker_hf_cache_mount_host
+    if hf_host:
+        argv += ["-v", f"{hf_host}:{hf_host}"]
+    argv += [settings.tensorrt_llm_docker_image, "trtllm-serve", *serve]
+    async for line in _attached_container(argv, f"ocabra-trtllm-serve-{port}"):
+        yield line
 
 
 async def _host_helper(entrypoint: str, *args: str) -> dict[str, Any]:
@@ -419,6 +527,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
 
 STREAM_OPERATIONS: dict[str, Callable[[dict[str, Any]], AsyncIterator[str]]] = {
     "trtllm.phase": _trtllm_phase,
+    "trtllm.serve": _trtllm_serve,
 }
 
 

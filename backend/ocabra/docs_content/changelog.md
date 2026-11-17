@@ -16,6 +16,21 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.106.1 — 2026-11-17
+
+### Correcciones
+
+- Los motores de TensorRT-LLM servidos en modo `docker` usan ahora la GPU
+  asignada al modelo. Antes el contenedor arrancaba con `--gpus all` y el
+  motor se ejecutaba en la primera GPU, aunque oCabra le hubiera asignado
+  otra.
+- Cancelar una compilación de TensorRT-LLM, o descargar un motor servido en
+  modo `docker`, para ahora el contenedor. Antes podía quedar en marcha,
+  compilando o con su puerto ocupado.
+
+
+---
+
 ## 0.106.0 — 2026-11-17
 
 ### Cambios de comportamiento

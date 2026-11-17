@@ -86,23 +86,15 @@ services:
       # second download. Disabled by default (no OLLAMA_SHARED_MODELS_DIR);
       # set to /data/ollama_models in .env to enable.
       - ${AI_MODELS_ROOT:-/docker/ai-models}/ollama/models:/data/ollama_models:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./docker-compose.yml:/opt/ocabra/docker-compose.yml:ro
-      - ./.env:/opt/ocabra/.env:ro
+      # No Docker socket, no .env, no compose file here (SEG-03 phase 2,
+      # 2026-11-17): every Docker operation goes to docker-agent, which holds
+      # them. With the socket, whoever controlled the api was root on the host.
       # Global settings of the shared Ollama daemon (parallelism, max
-      # context): oCabra writes this file from Ajustes and recreates the
-      # ollama service, which reads it through env_file (below).
+      # context): oCabra writes this file from Ajustes and docker-agent
+      # recreates the ollama service, which reads it through env_file (below).
       - ./data/ollama:/opt/ocabra/data/ollama
-      # service_manager runs `docker compose up -d <name>` from inside this
-      # container; the compose file references ./services/* as build contexts
-      # so they need to resolve at the same relative path. Read-only is fine
-      # because compose only reads them.
-      - ./services:/opt/ocabra/services:ro
-      # TRELLIS.2 + ACE-Step are external repos used as compose build
-      # contexts (paths declared in docker-compose.yml: ./TRELLIS.2 and
-      # ${ACESTEP_ROOT}. The api needs to see it at the same path
-      # so `docker compose up -d <service>` finds the build context.
-      - ./TRELLIS.2:/opt/ocabra/TRELLIS.2:ro
+      # The ACE-Step backend's legacy layout reads the repo here
+      # (settings.acestep_project_dir).
       - ${ACESTEP_ROOT:-/docker/ACE-Step-1.5}:${ACESTEP_ROOT:-/docker/ACE-Step-1.5}:ro
       # ACE-Step weights checkpoint dir (~11 GB) is mounted into the modular
       # install path so the cloned src/ tree finds them where the acestep
@@ -132,7 +124,6 @@ services:
   # hw-monitor, which alone may change GPU power limits. No published port:
   # the api reaches it on the compose network, with a token the agent writes
   # at startup to a volume only the two of them share.
-  # Phase 1: the api still mounts the socket as a fallback; phase 2 removes it.
   docker-agent:
     build:
       context: ./backend

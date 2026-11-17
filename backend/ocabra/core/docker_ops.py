@@ -6,9 +6,10 @@ one allows). With ``DOCKER_AGENT_URL`` set and the agent's token readable, the
 request goes to the agent container, which holds the Docker socket; otherwise
 the same operation runs here, with the same validation.
 
-Phase 1 of SEG-03 (2026-11-17): the api still has the socket, so an agent that
-does not answer falls back to running locally (logged). Phase 2 removes the
-socket from the api and, with it, that fallback.
+Phase 2 of SEG-03 (2026-11-17): the api no longer has the socket. With an
+agent configured, an agent that does not answer is an error (there is no
+local Docker to fall back to, and there must not be). Without one (an api run
+by hand with the socket), operations still run here.
 """
 
 from __future__ import annotations
@@ -31,6 +32,10 @@ OpError = ops.OpError
 EXIT_MARKER = ops.EXIT_MARKER
 
 
+class AgentUnavailable(RuntimeError):
+    """The docker agent is configured but did not answer."""
+
+
 def _agent_token() -> str | None:
     if not settings.docker_agent_url:
         return None
@@ -43,7 +48,9 @@ def _agent_token() -> str | None:
 
 def available() -> bool:
     """Whether this api can run Docker operations at all (agent or local socket)."""
-    return bool(_agent_token()) or os.path.exists("/var/run/docker.sock")
+    if settings.docker_agent_url:
+        return bool(_agent_token())
+    return os.path.exists("/var/run/docker.sock")
 
 
 def using_agent() -> bool:
@@ -71,7 +78,10 @@ async def call(op: str, **args: Any) -> dict[str, Any]:
         except OpError:
             raise
         except httpx.HTTPError as exc:
-            logger.warning("docker_agent_unavailable_local_fallback", op=op, error=str(exc))
+            logger.warning("docker_agent_unavailable", op=op, error=str(exc))
+            raise AgentUnavailable(f"docker agent unavailable for {op}: {exc}") from exc
+    if settings.docker_agent_url:
+        raise AgentUnavailable(f"docker agent token not available for {op}")
     return await ops.run(op, args)
 
 
@@ -88,11 +98,11 @@ async def stream(op: str, **args: Any) -> AsyncIterator[str]:
         except OpError:
             raise
         except httpx.HTTPError as exc:
-            if started:
-                # Cut halfway: the phase already ran in the agent; running it
-                # again here would compile twice. Report it as failed.
-                raise RuntimeError(f"docker agent stream for {op} was cut: {exc}") from exc
-            logger.warning("docker_agent_unavailable_local_fallback", op=op, error=str(exc))
+            what = "was cut" if started else "unavailable"
+            logger.warning("docker_agent_unavailable", op=op, error=str(exc))
+            raise AgentUnavailable(f"docker agent stream for {op} {what}: {exc}") from exc
+    if settings.docker_agent_url:
+        raise AgentUnavailable(f"docker agent token not available for {op}")
     async for line in ops.stream(op, args):
         yield line
 

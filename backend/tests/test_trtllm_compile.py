@@ -37,6 +37,19 @@ def _make_req(
     )
 
 
+@pytest.fixture(autouse=True)
+def _agent_side_commands_succeed(monkeypatch):
+    """Phases run through the docker agent's operation (here in-process, no
+    agent configured). Its side commands (``docker rm -f`` of a leftover
+    container before and after) answer success, so the faked processes below
+    are the phases' own ``docker run``."""
+    async def fake_exec(argv, timeout=120.0):  # noqa: ASYNC109
+        return {"code": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr("ocabra.docker_agent.ops._exec", fake_exec)
+    monkeypatch.setattr("ocabra.core.docker_ops.settings.docker_agent_url", "")
+
+
 def _make_proc(returncode: int = 0, stdout_lines: list[bytes] | None = None) -> MagicMock:
     """Return a mock asyncio.subprocess.Process."""
     proc = MagicMock()

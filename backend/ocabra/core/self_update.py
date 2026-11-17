@@ -100,8 +100,13 @@ async def detect_deployment() -> Deployment:
     from ocabra.core import docker_ops
 
     if not docker_ops.available():
-        return Deployment("manual", "Sin acceso a Docker (no hay /var/run/docker.sock).")
-    result = await docker_ops.call("self.deployment")
+        return Deployment(
+            "manual", "Sin acceso a Docker: no hay agente de Docker ni /var/run/docker.sock."
+        )
+    try:
+        result = await docker_ops.call("self.deployment")
+    except docker_ops.AgentUnavailable as exc:
+        return Deployment("manual", f"El agente de Docker no responde ({exc}).")
     return Deployment(**result["deployment"])
 
 
@@ -374,7 +379,10 @@ class SelfUpdater:
     async def _updater_status(self) -> dict[str, Any] | None:
         from ocabra.core import docker_ops
 
-        return (await docker_ops.call("updater.status")).get("status")
+        try:
+            return (await docker_ops.call("updater.status")).get("status")
+        except docker_ops.AgentUnavailable:
+            return None  # the panel still shows the rest; apply() reports the agent
 
     async def apply(self, version: str | None = None, *, force: bool = False) -> dict[str, Any]:
         """Start the updater container. Raises ``RuntimeError`` with the reason

@@ -327,20 +327,176 @@ async def test_a_stream_goes_through_the_agent_too(via_agent, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_unreachable_agent_falls_back_to_running_locally(monkeypatch, tmp_path, argvs):
-    """Phase 1 only: the api still has the socket."""
+async def test_an_unreachable_agent_is_an_error_not_a_local_fallback(monkeypatch, tmp_path, argvs):
+    """Phase 2: the api has no socket; running "locally" would be pointless,
+    and reopening Docker access from the api is exactly what this closes."""
     token = tmp_path / "token"
     token.write_text("t")
     monkeypatch.setattr(docker_ops.settings, "docker_agent_url", "http://127.0.0.1:1")
     monkeypatch.setattr(docker_ops.settings, "docker_agent_token_file", str(token))
 
-    result = await docker_ops.call("ollama.ps")
+    with pytest.raises(docker_ops.AgentUnavailable):
+        await docker_ops.call("ollama.ps")
+    assert argvs == []
 
-    assert result["code"] == 0
-    assert argvs and argvs[0][:2] == ["docker", "compose"]
+
+@pytest.mark.asyncio
+async def test_an_agent_without_its_token_yet_is_an_error_too(monkeypatch, tmp_path, argvs):
+    monkeypatch.setattr(docker_ops.settings, "docker_agent_url", "http://docker-agent:8790")
+    monkeypatch.setattr(docker_ops.settings, "docker_agent_token_file", str(tmp_path / "none"))
+
+    with pytest.raises(docker_ops.AgentUnavailable):
+        await docker_ops.call("ollama.ps")
+    assert docker_ops.available() is False
+    assert argvs == []
 
 
 def test_without_an_agent_url_the_api_runs_operations_itself(monkeypatch):
     monkeypatch.setattr(docker_ops.settings, "docker_agent_url", "")
 
     assert docker_ops.using_agent() is False
+
+
+# ── TensorRT-LLM serving (docker launch mode) ────────────────────────────────
+
+
+def _serve_args(**overrides):
+    from ocabra.config import settings
+
+    models = settings.tensorrt_llm_docker_models_mount_container
+    args = {
+        "engine_dir": f"{models}/tensorrt_llm/Qwen--Qwen2.5-7B-fp16/engine",
+        "tokenizer_path": f"{models}/huggingface/Qwen--Qwen2.5-7B-Instruct",
+        "port": settings.worker_port_range_start + 5,
+        "backend": "trt",
+        "gpu_indices": [1],
+        "trust_remote_code": False,
+        "max_seq_len": 8192,
+    }
+    return {**args, **overrides}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"engine_dir": "/etc/passwd"},
+        {"engine_dir": "/data/models/tensorrt_llm/../../../etc"},
+        {"engine_dir": "/data/models/huggingface/not-an-engine"},
+        {"tokenizer_path": "/root/.ssh"},
+        {"port": 22},
+        {"port": "18005"},
+        {"gpu_indices": ["all"]},
+        {"backend": "trt; id"},
+        {"trust_remote_code": "yes"},
+        {"max_seq_len": "8192 --entrypoint sh"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_trtllm_serve_refuses_anything_outside_its_shape(bad):
+    stream = ops.stream("trtllm.serve", _serve_args(**bad))
+
+    with pytest.raises(ops.OpError):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_trtllm_serve_builds_the_container_from_settings(monkeypatch):
+    from ocabra.config import settings
+
+    started: list[list[str]] = []
+
+    async def fake_attached(argv, name):
+        started.append([*argv, f"name={name}"])
+        yield f"{ops.EXIT_MARKER}0"
+
+    async def fake_api_container():
+        return "abc123def456"
+
+    monkeypatch.setattr(ops, "_attached_container", fake_attached)
+    monkeypatch.setattr(ops, "_api_container", fake_api_container)
+
+    lines = [line async for line in ops.stream("trtllm.serve", _serve_args())]
+
+    argv = started[0]
+    host = settings.tensorrt_llm_docker_models_mount_host
+    assert lines == [f"{ops.EXIT_MARKER}0"]
+    assert argv[:3] == ["docker", "run", "--rm"]
+    assert argv[argv.index("--gpus") + 1] == "device=1"  # the assigned GPU, not "all"
+    assert "--network=container:abc123def456" in argv  # found by the agent, not given
+    assert settings.tensorrt_llm_docker_image in argv
+    assert f"{host}/tensorrt_llm/Qwen--Qwen2.5-7B-fp16/engine" in argv  # host path
+    assert argv[argv.index("--tokenizer") + 1] == f"{host}/huggingface/Qwen--Qwen2.5-7B-Instruct"
+    assert argv[-1] == f"name=ocabra-trtllm-serve-{settings.worker_port_range_start + 5}"
+
+
+@pytest.mark.asyncio
+async def test_a_container_left_early_is_stopped_and_removed(monkeypatch, argvs):
+    """Killing only the `docker run` CLI used to leave the container running."""
+    import asyncio
+
+    class _Proc:
+        returncode = None
+        terminated = False
+
+        def __init__(self):
+            async def lines():
+                yield b"listening\n"
+                await asyncio.sleep(3600)
+
+            self.stdout = lines()
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+        async def wait(self):
+            return self.returncode
+
+    proc = _Proc()
+
+    async def fake_spawn(*argv, **kwargs):
+        return proc
+
+    monkeypatch.setattr(ops.asyncio, "create_subprocess_exec", fake_spawn)
+    stream = ops._attached_container(["docker", "run", "--rm", "img"], "ocabra-trtllm-serve-18005")
+
+    assert await anext(stream) == "listening"
+    await stream.aclose()  # the api unloaded the model
+
+    assert proc.terminated
+    assert argvs[-1] == ["docker", "rm", "-f", "ocabra-trtllm-serve-18005"]
+
+
+def test_the_trtllm_worker_relays_the_agents_stream(monkeypatch, capsys):
+    import argparse
+
+    from ocabra.workers import tensorrt_llm_worker as worker
+
+    seen: dict = {}
+
+    async def fake_stream(op, **params):
+        seen.update(op=op, **params)
+        yield "Uvicorn running on 127.0.0.1"
+        yield f"{ops.EXIT_MARKER}0"
+
+    monkeypatch.setattr(docker_ops, "stream", fake_stream)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    args = argparse.Namespace(
+        engine_dir="/data/models/tensorrt_llm/x/engine",
+        port=18005,
+        backend="trt",
+        trust_remote_code=False,
+        tokenizer_path=None,
+        max_batch_size=None,
+        max_num_tokens=None,
+        max_seq_len=4096,
+    )
+
+    code = worker._serve_through_docker_agent(args)
+
+    assert code == 0
+    assert seen["op"] == "trtllm.serve" and seen["gpu_indices"] == [1]
+    assert "Uvicorn running" in capsys.readouterr().out
