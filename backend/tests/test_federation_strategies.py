@@ -290,7 +290,10 @@ def _hb_request(rules):
             status=ModelStatus.CONFIGURED,
         ),
     ]
-    states[1].capabilities = BackendCapabilities(chat=True, tools=True)
+    # Real capabilities carry numbers too: 0.97.0 sent them as-is, the
+    # heartbeat schema (bools) rejected them and the model list came out empty.
+    states[0].capabilities = BackendCapabilities(embeddings=True, context_length=40960)
+    states[1].capabilities = BackendCapabilities(chat=True, tools=True, context_length=262144)
 
     async def list_states(include_derived=False):
         return states
@@ -324,6 +327,8 @@ async def test_heartbeat_offers_cold_models_with_capabilities(monkeypatch):
     assert by_id[BIG].status == "configured"
     assert by_id[BIG].profiles == ["kimi-k3"]
     assert by_id[BIG].capabilities["tools"] is True
+    assert "context_length" not in by_id[BIG].capabilities
+    assert by_id[EMB].capabilities["embeddings"] is True
 
 
 async def test_heartbeat_only_warm_when_the_peer_may_not_load(monkeypatch):

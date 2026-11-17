@@ -116,6 +116,23 @@ def _get_federation_manager(request: Request):
     return fm
 
 
+def _capability_flags(state) -> dict[str, bool] | None:
+    """A model's yes/no capabilities for the heartbeat, or None if unknown.
+
+    The capabilities dict also carries numbers (``context_length``…): sent
+    as-is they failed validation and, since one failure aborted the loop,
+    every heartbeat from 0.97.0 to 0.98.4 advertised no models at all. Never
+    let this lose the model list again.
+    """
+    from ocabra.core.model_manager import resolve_display_capabilities
+
+    try:
+        caps, _source = resolve_display_capabilities(state)
+    except Exception:  # noqa: BLE001 — capabilities are a hint
+        return None
+    return {k: v for k, v in caps.items() if isinstance(v, bool)}
+
+
 @router.get(
     "/federation/heartbeat",
     summary="Federation heartbeat",
@@ -165,7 +182,7 @@ async def heartbeat(
     models: list[HeartbeatModel] = []
     if model_manager is not None:
         try:
-            from ocabra.core.model_manager import ModelStatus, resolve_display_capabilities
+            from ocabra.core.model_manager import ModelStatus
 
             model_states = await model_manager.list_states(include_derived=True)
             for ms in model_states:
@@ -192,7 +209,7 @@ async def heartbeat(
                         runtime_preset=runtime.get("preset_key"),
                         effective_context=runtime.get("effective_context"),
                         parallelism=runtime.get("parallelism"),
-                        capabilities=resolve_display_capabilities(ms)[0],
+                        capabilities=_capability_flags(ms),
                     )
                 )
             # Cold models too: the caller's federation adds them up with its
@@ -221,7 +238,7 @@ async def heartbeat(
                             model_id=ms.model_id,
                             status=ms.status.value,
                             profiles=profile_ids,
-                            capabilities=resolve_display_capabilities(ms)[0],
+                            capabilities=_capability_flags(ms),
                         )
                     )
         except Exception as exc:

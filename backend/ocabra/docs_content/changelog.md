@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.98.5 — 2026-11-17
+
+### Errores corregidos
+
+- Desde la 0.97.0, cada nodo anunciaba **0 modelos** a la federación (o solo
+  parte de ellos): las capacidades que se añadieron al heartbeat traían también
+  números, como el contexto, y la validación tumbaba la lista entera. Los
+  vecinos no veían sus modelos y no les mandaban peticiones. Cada nodo tiene
+  que estar en 0.98.5 para que sus vecinos vuelvan a ver sus modelos.
+
+---
+
 ## 0.98.4 — 2026-11-17
 
 ### Errores corregidos
