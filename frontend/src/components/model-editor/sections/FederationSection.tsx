@@ -133,18 +133,6 @@ export function FederationSection(props: SectionProps) {
       <Panel
         title="Dónde se sirve"
         subtitle="Entre este nodo y los de la federación que tienen el modelo. Se aplica a todas sus peticiones, sea cual sea el peldaño."
-        actions={
-          !readOnly && (
-            <button
-              type="button"
-              disabled={!dirty || saving}
-              onClick={() => void save()}
-              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-50"
-            >
-              {saving && <Loader2 size={12} className="animate-spin" />} Guardar
-            </button>
-          )
-        }
       >
         <div className="space-y-3">
           <Segmented<Strategy>
@@ -220,6 +208,33 @@ export function FederationSection(props: SectionProps) {
                 onChange={setFallback}
                 label={<span className="text-xs">Si ninguno puede servirlo, seguir como Auto (si no, responde 503)</span>}
               />
+            </div>
+          )}
+          {/* The editor's own «Guardar» doesn't cover this (it isn't one of
+              the model's fields): its save sits right under what you change,
+              and only while there is something to save. */}
+          {!readOnly && dirty && (
+            <div
+              className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
+              data-testid="federation-unsaved"
+            >
+              <span className="text-amber-700 dark:text-amber-300">Cambios sin guardar en el reparto</span>
+              <button
+                type="button"
+                className="ml-auto rounded-md border border-border px-2.5 py-1 hover:bg-muted"
+                disabled={saving}
+                onClick={() => data && apply(data)}
+              >
+                Descartar
+              </button>
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => void save()}
+                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1 text-primary-foreground disabled:opacity-50"
+              >
+                {saving && <Loader2 size={12} className="animate-spin" />} Guardar reparto
+              </button>
             </div>
           )}
         </div>

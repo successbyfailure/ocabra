@@ -45,10 +45,24 @@ describe("FederationSection", () => {
     expect(screen.getByText("1.")).toBeTruthy()
     expect(screen.getAllByText("Mapache").length).toBeGreaterThan(0)
 
-    fireEvent.click(screen.getByRole("button", { name: "Guardar" }))
+    // The save shows up right under what changed (the editor's own
+    // «Guardar» doesn't cover this section).
+    expect(screen.getByTestId("federation-unsaved")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Guardar reparto" }))
     await waitFor(() =>
       expect(save).toHaveBeenCalledWith(EMB, { strategy: "prefer", nodes: ["Mapache", "local"], fallback: true }),
     )
+    await waitFor(() => expect(screen.queryByTestId("federation-unsaved")).toBeNull())
+  })
+
+  it("nothing to save, no save bar; Descartar goes back to what is stored", async () => {
+    vi.spyOn(api.federation, "getStrategy").mockResolvedValue(strategy())
+    render(<FederationSection {...props()} />)
+    fireEvent.click(await screen.findByRole("button", { name: "Solo este nodo" }))
+    fireEvent.click(screen.getByRole("button", { name: "Descartar" }))
+    expect(screen.queryByTestId("federation-unsaved")).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: "Auto" }))
+    expect(screen.queryByTestId("federation-unsaved")).toBeNull()
   })
 
   it("says so when the node is not in a federation", async () => {
