@@ -468,6 +468,7 @@ class CloudNodeManager:
         privacy_mode: str = "functional",
         recipes: list[str] | None = None,
         download_only: list[str] | None = None,
+        backends: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a pod that joins us as a swarm peer. Returns the node.
 
@@ -481,7 +482,9 @@ class CloudNodeManager:
 
         models = list(dict.fromkeys(models or []))
         await preload.validate_models(self.fm.session_factory, models)
-        preload_items = await self._preload_items(models, recipes or [], download_only or [])
+        preload_items = await self._preload_items(
+            models, recipes or [], download_only or [], backends or []
+        )
 
         cfg = (await self.get_provider(provider))["settings"]
         hub_url = (cfg.get("hub_url") or getattr(self.fm.settings, "public_url", "") or "").rstrip(
@@ -597,9 +600,15 @@ class CloudNodeManager:
         return out
 
     async def _preload_items(
-        self, models: list[str], recipe_ids: list[str], download_only: list[str]
+        self,
+        models: list[str],
+        recipe_ids: list[str],
+        download_only: list[str],
+        backends: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Preload entries for our *models* and captured *recipe_ids*."""
+        """Preload entries: the backends first (the chosen ones plus those the
+        models need), then our *models* and captured *recipe_ids*."""
+        from ocabra.core.cloud import preload
         from ocabra.core.cloud import recipes as recipes_mod
 
         skip_load = set(download_only)
@@ -619,7 +628,18 @@ class CloudNodeManager:
                 continue
             taken.add(row.node_model_id)
             items.append(recipes_mod.preload_item(row, load=rid not in skip_load))
-        return items
+
+        needed = list(dict.fromkeys(backends or []))
+        if models:
+            ours = await preload.load_model_rows(self.fm.session_factory, models)
+            needed += [str(r.backend_type) for r in ours.values()]
+        needed += [str(rows[rid].backend_type) for rid in dict.fromkeys(recipe_ids)]
+        backend_items = [
+            recipes_mod.backend_item(b)
+            for b in dict.fromkeys(needed)
+            if b and b != "ollama" and b not in recipes_mod.IMAGE_BACKENDS
+        ]
+        return backend_items + items
 
     async def add_models(
         self,
@@ -627,6 +647,7 @@ class CloudNodeManager:
         models: list[str],
         recipes: list[str] | None = None,
         download_only: list[str] | None = None,
+        backends: list[str] | None = None,
     ) -> dict[str, Any]:
         """Queue more of our models (or captured recipes) for a running node."""
         from ocabra.core.cloud import preload
@@ -634,7 +655,9 @@ class CloudNodeManager:
 
         models = list(dict.fromkeys(models))
         await preload.validate_models(self.fm.session_factory, models)
-        new_items = await self._preload_items(models, recipes or [], download_only or [])
+        new_items = await self._preload_items(
+            models, recipes or [], download_only or [], backends or []
+        )
         async with self.fm.session_factory() as session:
             row = await session.get(CloudNode, uuid.UUID(node_id))
             if row is None:
@@ -765,7 +788,7 @@ class CloudNodeManager:
         from ocabra.core.cloud import recipes as recipes_mod
         from ocabra.db.cloud import CloudModelRecipe
 
-        keep = ("model_id", "recipe_id", "recipe_steps", "load")
+        keep = ("model_id", "kind", "recipe_id", "recipe_steps", "load")
         out = [{**{k: i[k] for k in keep if k in i}, "status": "pending"} for i in items]
         have = {i["model_id"] for i in out}
         async with self.fm.session_factory() as session:

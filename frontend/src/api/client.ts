@@ -3828,7 +3828,7 @@ export const api = {
       addModels: async (
         id: string,
         models: string[],
-        opts: { recipes?: string[]; download_only?: string[] } = {},
+        opts: { recipes?: string[]; download_only?: string[]; backends?: string[] } = {},
       ): Promise<CloudNode> =>
         request<CloudNode>("POST", `/ocabra/cloud/nodes/${encodeURIComponent(id)}/models`, {
           models,
@@ -3847,6 +3847,7 @@ export const api = {
         context?: number | null;
         parallel?: number | null;
         load_policy?: "on_demand" | "warm" | "pin";
+        backend_type?: string;
       }): Promise<import("@/types").CloudRecipe> =>
         request<import("@/types").CloudRecipe>("POST", "/ocabra/cloud/recipes", body),
       updateRecipe: async (

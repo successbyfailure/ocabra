@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { useState } from "react"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api } from "@/api/client"
 import type { CloudNode, CloudPreloadPick, CloudRecipe, CloudReplicableModel } from "@/types"
 import { EMPTY_PICK, ModelPicker } from "../ModelPicker"
@@ -39,6 +39,18 @@ function Harness({ gpuGb, from, onPick }: { gpuGb: number; from?: string; onPick
     />
   )
 }
+
+const backend = (backendType: string, displayName: string) =>
+  ({ backendType, displayName, description: "" }) as never
+
+beforeEach(() => {
+  vi.spyOn(api.backends, "list").mockResolvedValue([
+    backend("llamacpp_mks", "llama.cpp (Makespace)"),
+    backend("diffusers", "Diffusers"),
+    backend("whisper", "Whisper"),
+    backend("ollama", "Ollama"),
+  ])
+})
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -136,6 +148,65 @@ describe("ModelPicker", () => {
     expect(await screen.findByText(/128k ctx/)).toBeTruthy()
   })
 
+  it("backends: the image's and the ones the picked models need are on and locked", async () => {
+    const img: CloudReplicableModel = { ...ours("qwen-image", 22), backend_type: "diffusers" }
+    vi.spyOn(api.federation.cloud, "replicableModels").mockResolvedValue([img])
+    vi.spyOn(api.federation.cloud, "recipes").mockResolvedValue([])
+    let last = EMPTY_PICK
+    render(<Harness gpuGb={96} onPick={(p) => (last = p)} />)
+    const bar = await screen.findByTestId("node-backends")
+    expect(screen.queryByRole("button", { name: /^Ollama/ })).toBeNull() // nodes have none
+    const llama = screen.getByRole("button", { name: /llama.cpp \(Makespace\) · en la imagen/ })
+    expect(llama.getAttribute("aria-pressed")).toBe("true")
+    expect(bar).toBeTruthy()
+    fireEvent.click(screen.getByRole("checkbox", { name: /qwen-image/ }))
+    const diff = screen.getByRole("button", { name: /Diffusers · lo necesitan/ })
+    expect(diff.hasAttribute("disabled")).toBe(true)
+    fireEvent.click(screen.getByRole("button", { name: "Whisper" }))
+    expect(last.backends).toEqual(["whisper"])
+  })
+
+  it("with backends chosen, suggestions for others wait behind a toggle", async () => {
+    vi.spyOn(api.federation.cloud, "replicableModels").mockResolvedValue([
+      { ...ours("whisper-large", 3), backend_type: "whisper" },
+      { ...ours("qwen-image", 22), backend_type: "diffusers" },
+    ])
+    vi.spyOn(api.federation.cloud, "recipes").mockResolvedValue([])
+    render(<Harness gpuGb={96} onPick={() => {}} />)
+    expect(await screen.findByRole("checkbox", { name: /qwen-image/ })).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Whisper" }))
+    expect(screen.getByRole("checkbox", { name: /whisper-large/ })).toBeTruthy()
+    expect(screen.queryByRole("checkbox", { name: /qwen-image/ })).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: /De otros backends \(1\)/ }))
+    expect(screen.getByRole("checkbox", { name: /qwen-image/ })).toBeTruthy()
+  })
+
+  it("search offers what the chosen backends can serve, with that backend", async () => {
+    vi.spyOn(api.federation.cloud, "replicableModels").mockResolvedValue([])
+    vi.spyOn(api.federation.cloud, "recipes").mockResolvedValue([])
+    const search = vi.spyOn(api.registry, "searchHF").mockResolvedValue([
+      { repoId: "Qwen/Qwen-Image", downloads: 9, gated: false } as never,
+    ])
+    vi.spyOn(api.registry, "getHFVariants").mockResolvedValue([
+      { variantId: "d", label: "diffusers", artifact: null, sizeGb: 40, backendType: "diffusers" },
+      { variantId: "v", label: "vllm", artifact: null, sizeGb: 40, backendType: "vllm" },
+    ] as never)
+    const create = vi.spyOn(api.federation.cloud, "createRecipe").mockResolvedValue({ ...nemo, id: "img", backend_type: "diffusers" })
+    render(<Harness gpuGb={96} onPick={() => {}} />)
+    fireEvent.click(await screen.findByRole("button", { name: "Diffusers" }))
+    fireEvent.click(screen.getByRole("button", { name: /Buscar en Hugging Face u Ollama/ }))
+    fireEvent.change(screen.getByLabelText("Buscar modelo"), { target: { value: "qwen image" } })
+    fireEvent.click(screen.getByRole("button", { name: /^Buscar$/ }))
+    expect(search).toHaveBeenCalledWith("qwen image") // not only GGUF: diffusers is on the node
+    fireEvent.click(await screen.findByText("Qwen/Qwen-Image"))
+    expect(await screen.findByRole("button", { name: "Añadir diffusers" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Añadir vllm" })).toBeNull() // vLLM not chosen
+    fireEvent.click(screen.getByRole("button", { name: "Añadir diffusers" }))
+    await waitFor(() =>
+      expect(create).toHaveBeenCalledWith(expect.objectContaining({ model_ref: "Qwen/Qwen-Image", backend_type: "diffusers", artifact: null })),
+    )
+  })
+
   it("relaunch repeats the node's setup", () => {
     const node = {
       name: "ocabra-pro-6000-63b924",
@@ -147,10 +218,16 @@ describe("ModelPicker", () => {
       preload_models: [
         { model_id: "llamacpp_mks/gemma4:26b", status: "loaded" },
         { model_id: "llamacpp_mks/nemotron-120b", status: "ready", recipe_id: "r1", load: false },
+        { model_id: "backend:whisper", kind: "backend", status: "ready", load: false },
       ],
     } as unknown as CloudNode
     const p = presetFromNode(node)
     expect(p).toMatchObject({ gpuId: "NVIDIA RTX PRO 6000", volumeId: "vol1", zeroData: true, cloudType: "SECURE" })
-    expect(p.pick).toEqual({ models: ["llamacpp_mks/gemma4:26b"], recipes: ["r1"], downloadOnly: ["r1"] })
+    expect(p.pick).toEqual({
+      models: ["llamacpp_mks/gemma4:26b"],
+      recipes: ["r1"],
+      downloadOnly: ["r1"],
+      backends: ["whisper"],
+    })
   })
 })

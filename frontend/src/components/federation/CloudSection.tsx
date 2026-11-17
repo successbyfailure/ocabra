@@ -60,6 +60,7 @@ function AddModelsDialog({
                   await api.federation.cloud.addModels(node.id, picked.models, {
                     recipes: picked.recipes,
                     download_only: picked.downloadOnly,
+                    backends: picked.backends,
                   })
                   toast.success("Modelos en cola en el nodo")
                   onOpenChange(false)
@@ -313,9 +314,10 @@ export function presetFromNode(node: CloudNode): LaunchPreset {
     volumeId: node.network_volume_id ?? "",
     zeroData: node.privacy_mode === "zero_data",
     pick: {
-      models: items.filter((i) => !i.recipe_id).map((i) => i.model_id),
-      recipes: items.filter((i) => i.recipe_id).map((i) => i.recipe_id as string),
-      downloadOnly: items.filter((i) => i.load === false).map(key),
+      models: items.filter((i) => !i.recipe_id && i.kind !== "backend").map((i) => i.model_id),
+      recipes: items.filter((i) => i.recipe_id && i.kind !== "backend").map((i) => i.recipe_id as string),
+      downloadOnly: items.filter((i) => i.load === false && i.kind !== "backend").map(key),
+      backends: items.filter((i) => i.kind === "backend").map((i) => i.model_id.replace(/^backend:/, "")),
     },
   }
 }
@@ -576,6 +578,7 @@ function LaunchDialog({
                     models: picked.models,
                     recipes: picked.recipes,
                     download_only: picked.downloadOnly,
+                    backends: picked.backends,
                   })
                   toast.success(`${node.name} lanzado: tardará unos minutos en unirse`)
                   onOpenChange(false)
@@ -606,7 +609,7 @@ function PreloadChip({ item }: { item: CloudPreloadItem }) {
     downloading: `descargando${pct}${steps}`,
     loading: "cargando",
     loaded: "listo",
-    ready: "descargado",
+    ready: item.kind === "backend" ? "instalado" : "descargado",
     error: "error",
   }[item.status]
   const cls = {
@@ -624,7 +627,10 @@ function PreloadChip({ item }: { item: CloudPreloadItem }) {
       {item.status !== "pending" && item.status !== "loaded" && item.status !== "ready" && item.status !== "error" && (
         <Loader2 size={10} className="animate-spin" />
       )}
-      <span className="font-mono">{item.model_id.split("/").pop()}</span> · {label}
+      <span className="font-mono">
+        {item.kind === "backend" ? `backend ${item.model_id.replace(/^backend:/, "")}` : item.model_id.split("/").pop()}
+      </span>{" "}
+      · {label}
     </span>
   )
 }

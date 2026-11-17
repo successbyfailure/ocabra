@@ -57,6 +57,14 @@ class CloudNodeLaunch(BaseModel):
         max_length=10,
         description="Recipe ids (GET /cloud/recipes): models captured from earlier pods",
     )
+    backends: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description=(
+            "Backends to install on the node when it joins, before any model. The "
+            "ones the chosen models need are added anyway."
+        ),
+    )
     download_only: list[str] = Field(
         default_factory=list,
         max_length=20,
@@ -104,11 +112,12 @@ class CloudNodeModels(BaseModel):
     models: list[str] = Field(default_factory=list, max_length=10)
     recipes: list[str] = Field(default_factory=list, max_length=10)
     download_only: list[str] = Field(default_factory=list, max_length=20)
+    backends: list[str] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def _at_least_one(self) -> CloudNodeModels:
-        if not self.models and not self.recipes:
-            raise ValueError("Elige al menos un modelo")
+        if not self.models and not self.recipes and not self.backends:
+            raise ValueError("Elige al menos un modelo o un backend")
         return self
 
 
@@ -141,11 +150,26 @@ class CloudRecipeCreate(BaseModel):
     )
     parallel: int | None = Field(default=None, ge=0, le=64)
     load_policy: str = Field(default="on_demand", pattern=r"^(on_demand|warm|pin)$")
+    backend_type: str = Field(
+        default="llamacpp_mks",
+        pattern=r"^[a-z0-9_]+$",
+        max_length=64,
+        description="Backend the node serves it with (installed first if needed)",
+    )
 
     @model_validator(mode="after")
-    def _gguf_from_hf(self) -> CloudRecipeCreate:
-        if self.source == "huggingface" and not (self.artifact or "").lower().endswith(".gguf"):
-            raise ValueError("De Hugging Face, elige un fichero .gguf (llama.cpp)")
+    def _consistent(self) -> CloudRecipeCreate:
+        llama = self.backend_type in ("llamacpp_mks", "llama_cpp", "bitnet")
+        if self.backend_type == "ollama":
+            raise ValueError("Los nodos en la nube no tienen Ollama: usa llama.cpp")
+        if self.source == "ollama" and not llama:
+            raise ValueError("Un tag de Ollama se sirve con llama.cpp")
+        if (
+            self.source == "huggingface"
+            and llama
+            and not (self.artifact or "").lower().endswith(".gguf")
+        ):
+            raise ValueError("Para llama.cpp, elige un fichero .gguf del repo")
         return self
 
 

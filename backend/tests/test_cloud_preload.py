@@ -654,23 +654,81 @@ async def test_snapshot_reads_the_pod_and_skips_our_own_models(monkeypatch):
 
 
 async def test_relaunch_and_image_update_items(monkeypatch):
-    """_preload_items: ours + recipes, «solo descargar» per id, no duplicates."""
+    """_preload_items: backends first (chosen + what the models need), then
+    ours + recipes, «solo descargar» per id, no duplicates."""
+    from ocabra.core.cloud import preload
     from ocabra.core.cloud import recipes as recipes_mod
     from ocabra.core.cloud.manager import CloudNodeManager
 
-    row = SimpleNamespace(id="r1", node_model_id=NEMO, steps=[{"kind": "load"}])
+    row = SimpleNamespace(
+        id="r1", node_model_id=NEMO, steps=[{"kind": "load"}], backend_type="llamacpp_mks"
+    )
 
     async def load_recipes(_sf, ids):
         return {"r1": row} if "r1" in ids else {}
 
+    async def load_rows(_sf, ids):
+        return {i: SimpleNamespace(backend_type="llamacpp_mks") for i in ids}
+
     monkeypatch.setattr(recipes_mod, "load_recipes", load_recipes)
+    monkeypatch.setattr(preload, "load_model_rows", load_rows)
     mgr = object.__new__(CloudNodeManager)
     mgr.fm = SimpleNamespace(session_factory=None)
-    items = await mgr._preload_items(["llamacpp_mks/gemma4:26b"], ["r1"], ["r1"])
-    assert items[0] == {"model_id": "llamacpp_mks/gemma4:26b", "status": "pending", "load": True}
-    assert items[1]["recipe_id"] == "r1" and items[1]["load"] is False
+    rows_backend = {"llamacpp_mks/gemma4:26b": "llamacpp_mks"}
+
+    async def load_rows2(_sf, ids):
+        return {i: SimpleNamespace(backend_type=rows_backend.get(i, "diffusers")) for i in ids}
+
+    monkeypatch.setattr(preload, "load_model_rows", load_rows2)
+    items = await mgr._preload_items(
+        ["llamacpp_mks/gemma4:26b", "diffusers/qwen-image"],
+        ["r1"],
+        ["r1"],
+        ["whisper", "ollama", "whisper"],
+    )
+    backends = [i for i in items if i.get("kind") == "backend"]
+    # Chosen first, then what the models need (diffusers); once each; never
+    # Ollama nor llama.cpp, which the node image already has.
+    assert [b["model_id"] for b in backends] == ["backend:whisper", "backend:diffusers"]
+    assert items[: len(backends)] == backends
+    models = items[len(backends) :]
+    assert models[0] == {"model_id": "llamacpp_mks/gemma4:26b", "status": "pending", "load": True}
+    assert models[2]["recipe_id"] == "r1" and models[2]["load"] is False
     with pytest.raises(CloudError):
         await mgr._preload_items([], ["gone"], [])
+
+
+async def test_a_backend_item_only_installs_and_ends_ready():
+    from ocabra.core.cloud import preload
+    from ocabra.core.cloud.recipes import backend_item
+
+    state = {"s": "not_installed"}
+    calls = []
+
+    class _Stream:
+        status_code = 200
+
+        async def aiter_bytes(self):
+            yield b"data: {}\n\n"
+
+        async def aclose(self):
+            pass
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        return httpx.Response(200, json={"install_status": state["s"]})
+
+    async def proxy_raw(peer, method, path, content, headers=None):
+        calls.append(path)
+        state["s"] = "installing"
+        return _Stream()
+
+    fm = SimpleNamespace(session_factory=None, proxy_get=proxy_get, proxy_raw=proxy_raw)
+    peer = SimpleNamespace(peer_id="p", gpus=[], tunnel_session=None)
+    items = await preload.drive(fm, peer, [backend_item("whisper")], {})
+    assert items[0]["status"] == "installing" and calls == ["/ocabra/backends/whisper/install"]
+    state["s"] = "installed"
+    items = await preload.drive(fm, peer, items, {})
+    assert items[0]["status"] == "ready"
 
 
 @requires_db
@@ -812,3 +870,37 @@ async def test_create_then_edit_a_recipe():
                 )
             )
             await s.commit()
+
+
+def test_recipe_for_another_backend_registers_the_whole_repo():
+    """A Whisper (or diffusers, vLLM…) repo from HF: the node downloads the
+    repo and registers it for that backend; context/slots don't apply."""
+    from ocabra.core.cloud.recipes import new_recipe
+
+    r = new_recipe(
+        source="huggingface",
+        model_ref="Systran/faster-whisper-large-v3",
+        artifact=None,
+        display_name=None,
+        size_bytes=3 * 1024**3,
+        context=65536,
+        parallel=4,
+        load_policy="on_demand",
+        backend_type="whisper",
+    )
+    assert r["node_model_id"] == "whisper/faster-whisper-large-v3"
+    rc = r["steps"][0]["body"]["register_config"]
+    assert rc["backend_type"] == "whisper" and rc["extra_config"] == {}
+    assert "artifact" not in r["steps"][0]["body"]
+
+
+def test_recipe_backend_rules():
+    from pydantic import ValidationError
+
+    from ocabra.schemas.cloud import CloudRecipeCreate
+
+    CloudRecipeCreate(source="huggingface", model_ref="org/whisper", backend_type="whisper")
+    with pytest.raises(ValidationError):  # nodes have no Ollama daemon
+        CloudRecipeCreate(source="ollama", model_ref="qwen3:8b", backend_type="ollama")
+    with pytest.raises(ValidationError):  # an Ollama tag is a GGUF for llama.cpp
+        CloudRecipeCreate(source="ollama", model_ref="qwen3:8b", backend_type="vllm")

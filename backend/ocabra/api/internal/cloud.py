@@ -281,7 +281,11 @@ async def add_node_models(
     """
     try:
         return await _cloud(request).add_models(
-            node_id, body.models, recipes=body.recipes, download_only=body.download_only
+            node_id,
+            body.models,
+            recipes=body.recipes,
+            download_only=body.download_only,
+            backends=body.backends,
         )
     except Exception as exc:
         raise _err(exc) from exc

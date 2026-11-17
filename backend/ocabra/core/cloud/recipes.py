@@ -262,6 +262,17 @@ async def delete_recipe(session_factory: Any, recipe_id: str) -> bool:
     return True
 
 
+def backend_item(backend: str) -> dict[str, Any]:
+    """A preload entry that only installs *backend* on the node."""
+    return {
+        "model_id": f"backend:{backend}",
+        "kind": "backend",
+        "status": "pending",
+        "recipe_steps": [{"kind": "backend", "backend": backend}],
+        "load": False,
+    }
+
+
 def preload_item(row: Any, *, load: bool) -> dict[str, Any]:
     """A preload entry that runs the recipe's own steps (no model of ours behind)."""
     return {
@@ -276,6 +287,9 @@ def preload_item(row: Any, *, load: bool) -> dict[str, Any]:
 # ── recipes made by hand: search in the launch dialog, edit before launching ──
 
 LLAMA_BACKEND = "llamacpp_mks"
+LLAMA_FAMILY = ("llamacpp_mks", "llama_cpp", "bitnet")
+# Already in the ocabra-node image (backend/Dockerfile.node): nothing to install.
+IMAGE_BACKENDS = ("llamacpp_mks",)
 
 
 def _model_key(source: str, model_ref: str, artifact: str | None) -> str:
@@ -331,14 +345,22 @@ def new_recipe(
     context: int | None,
     parallel: int | None,
     load_policy: str,
+    backend_type: str = LLAMA_BACKEND,
 ) -> dict[str, Any]:
-    """A recipe for a llama.cpp model picked in the launch dialog's search."""
+    """A recipe for a model picked in the launch dialog's search.
+
+    Any backend the node can install: the download registers it there for
+    *backend_type*, as Explore does here. Context and slots only mean
+    something to llama.cpp."""
     key = _model_key(source, model_ref, artifact)
-    register: dict[str, Any] = {"backend_type": LLAMA_BACKEND, "model_key": key}
+    if source == "huggingface" and not artifact:
+        key = model_ref.rsplit("/", 1)[-1].strip().lower()
+    llama = backend_type in LLAMA_FAMILY
+    register: dict[str, Any] = {"backend_type": backend_type, "model_key": key}
     _apply_config(
         register,
-        context=context,
-        parallel=parallel,
+        context=context if llama else None,
+        parallel=parallel if llama else None,
         load_policy=load_policy,
         display_name=display_name or (model_ref if source == "ollama" else key),
     )
@@ -347,9 +369,9 @@ def new_recipe(
         body["artifact"] = artifact
     body.update(register=True, register_config=register)
     return {
-        "node_model_id": f"{LLAMA_BACKEND}/{key}",
+        "node_model_id": f"{backend_type}/{key}",
         "display_name": register["display_name"],
-        "backend_type": LLAMA_BACKEND,
+        "backend_type": backend_type,
         "source": _source_label({"source": source, "model_ref": model_ref, "artifact": artifact})[
             :512
         ],

@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.104.0 — 2026-11-17
+
+### Nuevo
+
+- `POST /ocabra/cloud/nodes` (y `.../nodes/{id}/models`) acepta `backends`:
+  los backends que se instalan en el nodo al unirse, antes que cualquier
+  modelo. Los que necesitan los modelos elegidos se añaden siempre, y
+  llama.cpp ya viene en la imagen del nodo. En la precarga salen como
+  elementos `kind: "backend"` (`model_id: "backend:<tipo>"`), que acaban en
+  `ready` cuando quedan instalados.
+- Las recetas ya no son solo de llama.cpp: `POST /ocabra/cloud/recipes` acepta
+  `backend_type` (Whisper, diffusers, vLLM…). Para esos backends se descarga
+  el repo entero de Hugging Face. Un tag de Ollama sigue siendo llama.cpp. Un
+  repo para llama.cpp sin `.gguf`, o Ollama como backend, responden **422**.
+
+---
+
 ## 0.103.0 — 2026-11-17
 
 ### Nuevo

@@ -13,14 +13,42 @@ const btnCls =
 const CONTEXTS = [0, 8192, 16384, 32768, 65536, 131072, 262144]
 const ctxLabel = (n: number) => (n === 0 ? "por defecto" : `${Math.round(n / 1024)}k`)
 
-type Variant = { key: string; label: string; artifact: string | null; sizeBytes: number | null }
+type Variant = {
+  key: string
+  label: string
+  artifact: string | null
+  sizeBytes: number | null
+  /** Backend the node will serve it with. */
+  backend: string
+}
+
+const LLAMA = ["llamacpp_mks", "llama_cpp", "bitnet"]
+
+/** Which of the node's *backends* serves this HF variant (null = none of them). */
+export function backendForVariant(v: HFModelVariant, backends: string[]): string | null {
+  if (/\.gguf$/i.test(v.artifact ?? "")) {
+    return backends.find((b) => LLAMA.includes(b)) ?? null
+  }
+  const candidates = [v.backendType, ...(v.compatibleBackends ?? []).map((c) => c.backend)]
+  return candidates.find((b) => b && backends.includes(b) && !LLAMA.includes(b) && b !== "ollama") ?? null
+}
 
 /**
  * Add a model to the cloud catalogue from Hugging Face (a .gguf file) or
  * Ollama (a tag): becomes a recipe (core/cloud/recipes.py) and is picked.
  * llama.cpp only — what a node can download and run without our config.
  */
-export function RecipeSearch({ onAdded }: { onAdded: (r: CloudRecipe) => void }) {
+export function RecipeSearch({
+  onAdded,
+  backends,
+  nameOf = (b) => b,
+}: {
+  onAdded: (r: CloudRecipe) => void
+  /** Backends the node will have: results are what they can serve. */
+  backends: string[]
+  nameOf?: (backend: string) => string
+}) {
+  const onlyLlama = backends.every((b) => LLAMA.includes(b))
   const [source, setSource] = useState<"huggingface" | "ollama">("huggingface")
   const [q, setQ] = useState("")
   const [busy, setBusy] = useState(false)
@@ -38,7 +66,9 @@ export function RecipeSearch({ onAdded }: { onAdded: (r: CloudRecipe) => void })
     try {
       if (source === "huggingface") {
         setOl(null)
-        setHf(await api.registry.searchHF(q.trim().toLowerCase().includes("gguf") ? q.trim() : `${q.trim()} gguf`))
+        // Only llama.cpp on the node: GGUF repos. Other backends chosen: any repo.
+        const term = q.trim()
+        setHf(await api.registry.searchHF(onlyLlama && !term.toLowerCase().includes("gguf") ? `${term} gguf` : term))
       } else {
         setHf(null)
         setOl(await api.registry.searchOllama(q.trim()))
@@ -63,12 +93,15 @@ export function RecipeSearch({ onAdded }: { onAdded: (r: CloudRecipe) => void })
         setVariants(
           vs
             // Model files only: not the vision projector or the imatrix.
-            .filter((v) => /\.gguf$/i.test(v.artifact ?? "") && !/^(mmproj|imatrix)/i.test(v.artifact ?? ""))
-            .map((v) => ({
+            .filter((v) => !/^(mmproj|imatrix)/i.test(v.artifact ?? ""))
+            .map((v) => ({ v, backend: backendForVariant(v, backends) }))
+            .filter((x): x is { v: HFModelVariant; backend: string } => x.backend !== null)
+            .map(({ v, backend }) => ({
               key: v.variantId,
               label: (v.artifact ?? v.label).replace(/\.gguf$/i, ""),
               artifact: v.artifact,
               sizeBytes: v.sizeGb != null ? v.sizeGb * GB : null,
+              backend,
             })),
         )
       } else {
@@ -79,6 +112,7 @@ export function RecipeSearch({ onAdded }: { onAdded: (r: CloudRecipe) => void })
             label: [v.name, v.parameterSize, v.quantization].filter(Boolean).join(" · "),
             artifact: null,
             sizeBytes: v.sizeGb != null ? v.sizeGb * GB : null,
+            backend: backends.find((b) => LLAMA.includes(b)) ?? "llamacpp_mks",
           })),
         )
       }
@@ -98,6 +132,7 @@ export function RecipeSearch({ onAdded }: { onAdded: (r: CloudRecipe) => void })
         artifact: v.artifact,
         size_bytes: v.sizeBytes != null ? Math.round(v.sizeBytes) : null,
         display_name: source === "huggingface" ? `${name.split("/").pop()} · ${v.label}` : tag,
+        backend_type: v.backend,
       })
       onAdded(r)
       toast.success(`${r.display_name} añadido`)
@@ -151,12 +186,15 @@ export function RecipeSearch({ onAdded }: { onAdded: (r: CloudRecipe) => void })
                   </span>
                 ) : variants.length === 0 ? (
                   <span className="text-xs text-muted-foreground">
-                    {source === "huggingface" ? "Este repo no tiene ficheros GGUF." : "Sin variantes."}
+                    {source === "huggingface"
+                      ? `Nada en este repo que puedan servir los backends del nodo (${backends.map(nameOf).join(", ")}).`
+                      : "Sin variantes."}
                   </span>
                 ) : (
                   variants.map((v) => (
                     <div key={v.key} className="flex items-center gap-2 py-0.5 text-xs">
                       <span className="truncate">{v.label}</span>
+                      <span className="shrink-0 text-[10px] text-muted-foreground">{nameOf(v.backend)}</span>
                       <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">
                         {v.sizeBytes ? `${(v.sizeBytes / GB).toFixed(1)} GB` : ""}
                       </span>

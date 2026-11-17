@@ -43,11 +43,26 @@ configurado a mano en un pod al actualizarle la imagen.
 - **0 data:** confirmado por el usuario. Las recetas de un pod en 0 data se
   guardan igual: solo nombres de modelo y configuración, nada de peticiones.
 
+## Hecho (0.104.0) — backends del nodo
+
+- Al lanzar (y al llevar modelos) se eligen los **backends a instalar**. Van
+  primero en la precarga (`kind: "backend"`). Se añaden siempre los que
+  necesitan los modelos elegidos. llama.cpp (`llamacpp_mks`) ya viene en la
+  imagen y no se instala. Ollama no existe en los nodos.
+- **Las sugerencias lo tienen en cuenta:** con backends elegidos, «Recientes»
+  y «De este nodo» enseñan los suyos y el resto queda tras «De otros
+  backends».
+- **La búsqueda también:** solo con llama.cpp busca GGUF. Con otros backends,
+  cualquier repo, y de cada repo ofrece las variantes que esos backends pueden
+  servir (por `backend_type` y compatibilidades). La receta se crea para ese
+  backend (repo entero, registro con ese `backend_type`, como Explorar).
+
 ## Pendiente / esquinas
 
-- El buscador solo da modelos de llama.cpp. Diffusers, Whisper y otros
-  necesitarían su propia receta (pasos de instalación del backend, ficheros
-  exactos).
+- Recetas de diffusers creadas desde la búsqueda: es el repo entero (lo que
+  haría Explorar). Las réplicas de nuestros modelos diffusers, en cambio,
+  copian solo los ficheros exactos y el GGUF del transformer. Una receta de
+  búsqueda puede ser mucho más grande.
 - GGUF partidos en varios ficheros (`-00001-of-0000N`): se ofrece cada parte
   como variante. Hay que comprobar en un pod que la descarga trae todas las
   partes.

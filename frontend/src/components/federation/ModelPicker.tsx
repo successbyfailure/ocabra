@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useState } from "react"
-import { History, Loader2, Search, Server, Settings2, X } from "lucide-react"
+import { Boxes, History, Loader2, Search, Server, Settings2, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import type { CloudPreloadPick, CloudRecipe, CloudReplicableModel } from "@/types"
+import type { BackendModuleState } from "@/types/backends"
 import { RecipeConfig, RecipeSearch } from "./RecipeTools"
 
-export const EMPTY_PICK: CloudPreloadPick = { models: [], recipes: [], downloadOnly: [] }
+export const EMPTY_PICK: CloudPreloadPick = { models: [], recipes: [], downloadOnly: [], backends: [] }
 
-export const pickCount = (p: CloudPreloadPick) => p.models.length + p.recipes.length
+export const pickCount = (p: CloudPreloadPick) =>
+  p.models.length + p.recipes.length + (p.backends?.length ?? 0)
+
+/** Already in the ocabra-node image (backend/Dockerfile.node). */
+export const IMAGE_BACKENDS = ["llamacpp_mks"]
+/** Nodes have no Ollama daemon: its tags run on llama.cpp. */
+const NOT_ON_NODES = ["ollama"]
 
 const GB = 1024 ** 3
 const gb = (bytes: number | null | undefined) =>
@@ -36,6 +43,7 @@ type Row = {
   disabledReason?: string | null
   onForget?: () => void
   recipe?: CloudRecipe
+  backend: string
 }
 
 /**
@@ -65,6 +73,8 @@ export function ModelPicker({
   const [filter, setFilter] = useState("")
   const [searching, setSearching] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
+  const [catalog, setCatalog] = useState<BackendModuleState[]>([])
+  const [showOthers, setShowOthers] = useState(false)
 
   useEffect(() => {
     api.federation.cloud
@@ -75,6 +85,10 @@ export function ModelPicker({
       .recipes()
       .then(setRecipes)
       .catch(() => setRecipes([]))
+    api.backends
+      .list()
+      .then((bs) => setCatalog(bs.filter((b) => !NOT_ON_NODES.includes(b.backendType))))
+      .catch(() => setCatalog([]))
   }, [])
 
   // Relaunch: add what that node had, once its recipes are known.
@@ -94,7 +108,20 @@ export function ModelPicker({
     return m
   }, [models, recipes])
 
+  const backendOf = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const x of models ?? []) if (x.backend_type) m.set(x.model_id, x.backend_type)
+    for (const r of recipes ?? []) m.set(r.id, r.backend_type)
+    return m
+  }, [models, recipes])
+  const chosen = value.backends ?? []
   const picked = [...value.models, ...value.recipes]
+  // What the picked models need: installed anyway, can't be unticked.
+  const required = [...new Set(picked.map((k) => backendOf.get(k)).filter((b): b is string => Boolean(b)))]
+  const effective = [...new Set([...IMAGE_BACKENDS, ...required, ...chosen])]
+  const nameOf = (b: string) => catalog.find((c) => c.backendType === b)?.displayName ?? b
+  const toggleBackend = (b: string) =>
+    onChange({ ...value, backends: chosen.includes(b) ? chosen.filter((x) => x !== b) : [...chosen, b] })
   const loading = picked.filter((k) => !value.downloadOnly.includes(k))
   const loadBytes = loading.reduce((acc, k) => acc + (memoryOf.get(k) ?? 0), 0)
   const diskBytes = picked.reduce((acc, k) => acc + (memoryOf.get(k) ?? 0), 0)
@@ -137,6 +164,7 @@ export function ModelPicker({
       key: r.id,
       kind: "recipe",
       recipe: r,
+      backend: r.backend_type,
       name: r.display_name,
       memory: recipeMemory(r),
       detail: [
@@ -169,6 +197,7 @@ export function ModelPicker({
     .map((m) => ({
       key: m.model_id,
       kind: "model",
+      backend: m.backend_type ?? "",
       name: m.display_name,
       memory: m.size_bytes ?? 0,
       detail: m.replicable ? gb(m.size_bytes) : "no replicable",
@@ -206,6 +235,7 @@ export function ModelPicker({
           {row.badge && (
             <span className="shrink-0 rounded-full border border-border px-1.5 text-[10px] text-muted-foreground">{row.badge}</span>
           )}
+          <span className="shrink-0 text-[10px] text-muted-foreground">{nameOf(row.backend)}</span>
           <span className="ml-auto shrink-0 truncate text-xs tabular-nums text-muted-foreground">{row.detail}</span>
         </label>
         {on && (
@@ -243,9 +273,24 @@ export function ModelPicker({
   const addRecipe = (r: CloudRecipe) => {
     setRecipes((rs) => [r, ...(rs ?? []).filter((x) => x.id !== r.id)])
     if (!value.recipes.includes(r.id)) {
-      toggle({ key: r.id, kind: "recipe", name: r.display_name, memory: recipeMemory(r), detail: "" })
+      toggle({
+        key: r.id,
+        kind: "recipe",
+        name: r.display_name,
+        memory: recipeMemory(r),
+        detail: "",
+        backend: r.backend_type,
+      })
     }
   }
+
+  // With backends chosen, suggestions are for them; the rest wait behind a
+  // toggle (picking one still installs what it needs).
+  const filtering = chosen.length > 0
+  const fits = (row: Row) => !filtering || effective.includes(row.backend) || picked.includes(row.key)
+  const mainRecipes = recipeRows.filter(fits)
+  const mainModels = modelRows.filter(fits)
+  const others = [...recipeRows, ...modelRows].filter((r) => !fits(r))
 
   const ready = models != null && recipes != null
   return (
@@ -264,6 +309,40 @@ export function ModelPicker({
           onChange={(e) => setFilter(e.target.value)}
         />
       </div>
+      {catalog.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-border px-3 py-2" data-testid="node-backends">
+          <span className="mr-1 flex items-center gap-1 text-xs text-muted-foreground">
+            <Boxes size={12} /> Backends
+          </span>
+          {catalog.map((b) => {
+            const inImage = IMAGE_BACKENDS.includes(b.backendType)
+            const needed = required.includes(b.backendType)
+            const on = inImage || needed || chosen.includes(b.backendType)
+            return (
+              <button
+                key={b.backendType}
+                type="button"
+                aria-pressed={on}
+                disabled={inImage || needed}
+                title={
+                  inImage
+                    ? "Ya viene en la imagen del nodo"
+                    : needed
+                      ? "Lo necesitan los modelos elegidos: se instala igualmente"
+                      : b.description
+                }
+                onClick={() => toggleBackend(b.backendType)}
+                className={`rounded-full border px-2 py-0.5 text-[11px] ${
+                  on ? "border-primary bg-primary/10 text-foreground" : "border-border text-muted-foreground hover:bg-muted"
+                } disabled:cursor-default`}
+              >
+                {b.displayName}
+                {inImage ? " · en la imagen" : needed && !chosen.includes(b.backendType) ? " · lo necesitan" : ""}
+              </button>
+            )
+          })}
+        </div>
+      )}
       {tooBig && (
         <div className="border-b border-border bg-amber-500/10 px-3 py-1.5 text-xs text-amber-700 dark:text-amber-300" data-testid="preload-too-big">
           Los que se cargan al arrancar ocupan unos {gb(loadBytes)} y la GPU tiene {gpuMemoryGb} GB: no caben juntos.
@@ -277,12 +356,12 @@ export function ModelPicker({
           </div>
         ) : (
           <>
-            {recipeRows.length > 0 && (
+            {mainRecipes.length > 0 && (
               <>
                 <div className="flex items-center gap-1.5 bg-muted/40 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                   <History size={11} /> Recientes en pods
                 </div>
-                {recipeRows.map(renderRow)}
+                {mainRecipes.map(renderRow)}
               </>
             )}
             <button
@@ -293,14 +372,27 @@ export function ModelPicker({
             >
               <Search size={11} /> Buscar en Hugging Face u Ollama
             </button>
-            {searching && <RecipeSearch onAdded={addRecipe} />}
+            {searching && <RecipeSearch onAdded={addRecipe} backends={effective} nameOf={nameOf} />}
             <div className="flex items-center gap-1.5 bg-muted/40 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
               <Server size={11} /> De este nodo
             </div>
-            {modelRows.length === 0 ? (
+            {mainModels.length === 0 ? (
               <div className="px-3 py-2 text-sm text-muted-foreground">No hay modelos que llevar.</div>
             ) : (
-              modelRows.map(renderRow)
+              mainModels.map(renderRow)
+            )}
+            {others.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1.5 bg-muted/40 px-3 py-1 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground hover:bg-muted"
+                  onClick={() => setShowOthers((v) => !v)}
+                  aria-expanded={showOthers}
+                >
+                  De otros backends ({others.length})
+                </button>
+                {showOthers && others.map(renderRow)}
+              </>
             )}
           </>
         )}

@@ -1957,6 +1957,8 @@ export interface CloudPreloadItem {
   progress?: number;
   /** A model captured from an earlier pod (not one of ours). */
   recipe_id?: string;
+  /** "backend": only installs a backend (model_id = "backend:<type>"). */
+  kind?: "backend";
   /** false: download only, load when asked for. */
   load?: boolean;
   error?: string;
@@ -1980,6 +1982,8 @@ export interface CloudNodeLaunch {
   recipes?: string[];
   /** Ids from models/recipes to download but not load. */
   download_only?: string[];
+  /** Backends to install first (the ones the models need are added anyway). */
+  backends?: string[];
   /** Network volume to mount as the node's model/backend cache. */
   volume_id?: string;
   privacy_mode?: "functional" | "zero_data";
@@ -2010,6 +2014,8 @@ export interface CloudPreloadPick {
   recipes: string[];
   /** Ids (of either) to download but not load. */
   downloadOnly: string[];
+  /** Backends chosen to install on the node (besides what the models need). */
+  backends: string[];
 }
 
 export interface CloudVolume {
