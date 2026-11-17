@@ -202,6 +202,8 @@ def updater_script(dep: Deployment, version: str, current: str, health_tries: in
     tag = f"v{version}"
     return f"""
 set -u
+# docker compose reports on stderr; keep it in the same log the panel shows.
+exec 2>&1
 log() {{ echo "[ocabra-updater] $*"; }}
 owner=$(stat -c %u:%g .)
 as_owner() {{ HOME=/tmp setpriv --reuid "${{owner%%:*}}" --regid "${{owner##*:}}" --clear-groups "$@"; }}
@@ -258,6 +260,10 @@ class UpdateState:
     message: str | None = None
     busy: list[str] = field(default_factory=list)
     idle_since: float | None = None
+    # Release whose update failed: "auto" does not retry it on its own (a
+    # newer one, or the button, does). Without this a failing pull repeated
+    # every hour.
+    failed_target: str | None = None
 
 
 class SelfUpdater:
@@ -307,6 +313,18 @@ class SelfUpdater:
     async def snapshot(self) -> dict[str, Any]:
         dep = await self.deployment()
         updater = await self._updater_status()
+        if self.state.phase == "updating" and updater and not updater.get("running"):
+            # The updater finished and this API is still the old one: it
+            # rolled back (or failed before touching anything). A successful
+            # update replaces this process, so it never gets here.
+            code = updater.get("exit_code")
+            self.state.phase = "failed"
+            self.state.failed_target = self.state.target
+            self.state.message = (
+                f"La actualización a {self.state.target} falló y se volvió a {APP_VERSION}"
+                if code == 4
+                else f"La actualización a {self.state.target} falló (código {code}); no se cambió nada"
+            )
         out = asdict(self.state)
         out.update(
             policy=settings.self_update_policy,
@@ -333,7 +351,10 @@ class SelfUpdater:
             st = json.loads(out)
         except ValueError:
             return None
-        _, logs, _ = await _run("docker", "logs", "--tail", "40", UPDATER_NAME, timeout=10)
+        # stderr too: an updater started by an older version did not merge it
+        # and its compose errors were only there.
+        _, out, err = await _run("docker", "logs", "--tail", "40", UPDATER_NAME, timeout=10)
+        logs = out + (("\n" + err) if err.strip() else "")
         return {
             "running": st.get("Running"),
             "exit_code": st.get("ExitCode"),
@@ -377,6 +398,7 @@ class SelfUpdater:
                 self.state.message = f"No se pudo lanzar el actualizador: {err.strip()[:300]}"
                 raise RuntimeError(self.state.message)
             self.state.phase = "updating"
+            self.state.idle_since = None
             self.state.target = target
             self.state.started_at = time.time()
             self.state.message = f"Actualizando a {target}: la API se reiniciará."
@@ -391,6 +413,9 @@ class SelfUpdater:
         latest = await self.check()
         if policy != "auto" or not is_newer(latest):
             self.state.idle_since = None
+            return
+        await self.snapshot()  # closes a finished update attempt
+        if latest == self.state.failed_target or self.state.phase == "updating":
             return
         dep = await self.deployment()
         if not dep.can_apply:

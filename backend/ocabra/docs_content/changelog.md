@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.98.2 — 2026-11-17
+
+### Corregido
+
+- Actualización automática: cuando fallaba, `GET /ocabra/system/update` se
+  quedaba en `phase: updating` para siempre y el registro (`updater.log`) no
+  traía el error de `docker compose`, que solo iba a stderr. Ahora pasa a
+  `failed` con el motivo, el registro incluye stderr, y con la política `auto`
+  una versión que falló no se reintenta sola (sí una más nueva o el botón).
+
+---
+
 ## 0.98.0 — 2026-11-17
 
 ### Nuevo

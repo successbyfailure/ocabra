@@ -44,7 +44,7 @@ async def test_a_stack_on_release_images_can_update_itself(monkeypatch):
     monkeypatch.setattr(su.os.path, "exists", lambda p: True)
     monkeypatch.delenv("OCABRA_NODE_IMAGE", raising=False)
 
-    async def run(*args, timeout=30.0):
+    async def run(*args, timeout=30.0):  # noqa: ASYNC109
         return 0, _inspect("ghcr.io/successbyfailure/ocabra-api:0.95.6"), ""
 
     monkeypatch.setattr(su, "_run", run)
@@ -58,7 +58,7 @@ async def test_a_stack_building_its_own_images_only_gets_told(monkeypatch):
     monkeypatch.setattr(su.os.path, "exists", lambda p: True)
     monkeypatch.delenv("OCABRA_NODE_IMAGE", raising=False)
 
-    async def run(*args, timeout=30.0):
+    async def run(*args, timeout=30.0):  # noqa: ASYNC109
         return 0, _inspect("ocabra-api:slim"), ""
 
     monkeypatch.setattr(su, "_run", run)
@@ -87,7 +87,9 @@ def test_the_updater_script_is_valid_shell_and_does_the_steps():
     assert "git merge --ff-only --quiet v0.96.0" in script
     assert "OCABRA_API_IMAGE ghcr.io/successbyfailure/ocabra-api:0.96.0" in script
     assert "OCABRA_FRONTEND_IMAGE ghcr.io/successbyfailure/ocabra-frontend:0.96.0" in script
-    assert "docker compose -p ocabra -f /docker/ocabra/docker-compose.yml pull api frontend" in script
+    assert (
+        "docker compose -p ocabra -f /docker/ocabra/docker-compose.yml pull api frontend" in script
+    )
     assert '"0.96.0"' in script  # waits for /health to report the new version
     assert "rollback" in script
 
@@ -157,3 +159,64 @@ async def test_notify_never_applies(monkeypatch):
     monkeypatch.setattr(upd, "check", check)
     monkeypatch.setattr(upd, "apply", apply)
     await upd.tick()
+
+
+@pytest.mark.asyncio
+async def test_a_finished_updater_closes_the_updating_phase(monkeypatch):
+    upd = su.SelfUpdater(_app())
+    upd._deployment = su.Deployment("compose", project="ocabra", working_dir="/x", api_image="i")
+    upd.state.phase = "updating"
+    upd.state.target = "0.98.1"
+
+    async def status():
+        return {"running": False, "exit_code": 4, "finished_at": "", "log": ["ROLLBACK"]}
+
+    monkeypatch.setattr(upd, "_updater_status", status)
+    snap = await upd.snapshot()
+    assert snap["phase"] == "failed" and "se volvió" in snap["message"]
+
+
+def test_the_updater_keeps_compose_errors_in_its_log():
+    dep = su.Deployment(
+        "compose", project="ocabra", working_dir="/x", config_files=[], api_image="i"
+    )
+    assert "exec 2>&1" in su.updater_script(dep, "1.0.1", "1.0.0")
+
+
+@pytest.mark.asyncio
+async def test_auto_does_not_retry_a_release_that_failed(monkeypatch):
+    monkeypatch.setattr(settings, "self_update_policy", "auto")
+    monkeypatch.setattr(settings, "self_update_idle_minutes", 1)
+    upd = su.SelfUpdater(_app())
+    upd._deployment = su.Deployment("compose", project="ocabra", working_dir="/x", api_image="i")
+    upd.state.failed_target = "0.98.1"
+    latest = ["0.98.1"]
+    applied: list[str] = []
+
+    async def check(force=False):
+        return latest[0]
+
+    async def busy(app):
+        return []
+
+    async def status():
+        return None
+
+    async def apply(version=None, *, force=False):
+        applied.append(version)
+
+    monkeypatch.setattr(upd, "check", check)
+    monkeypatch.setattr(upd, "_updater_status", status)
+    monkeypatch.setattr(su, "busy_reasons", busy)
+    monkeypatch.setattr(upd, "apply", apply)
+    clock = [1000.0]
+    monkeypatch.setattr(su.time, "time", lambda: clock[0])
+    for _ in range(3):
+        await upd.tick()
+        clock[0] += 120
+    assert applied == []
+    latest[0] = "0.98.2"  # a newer release is tried again
+    await upd.tick()
+    clock[0] += 120
+    await upd.tick()
+    assert applied == ["0.98.2"]
