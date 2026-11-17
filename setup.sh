@@ -75,6 +75,15 @@ urlencode() {
 echo -e "\n${BOLD}=== oCabra Setup ===${NC}\n"
 if $IS_WSL; then
     info "WSL2 detected; enabling Windows-compatible installation defaults."
+    # A Windows drive (/mnt/c, /mnt/j…) can't hold Linux permissions: Postgres
+    # refuses to start («could not change permissions of directory»), the api
+    # (uid 1000) can't own its data, and Docker is very slow there.
+    case "$(pwd -P)" in
+        /mnt/[a-zA-Z]|/mnt/[a-zA-Z]/*)
+            fatal "oCabra is on a Windows drive ($(pwd -P)). Clone it inside WSL instead, e.g.:
+         mkdir -p ~/src && cd ~/src && git clone https://github.com/successbyfailure/ocabra && cd ocabra && bash setup.sh"
+            ;;
+    esac
 fi
 
 command -v docker >/dev/null 2>&1 || fatal "Docker is not installed. See https://docs.docker.com/engine/install/"
