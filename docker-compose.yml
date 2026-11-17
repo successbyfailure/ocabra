@@ -12,6 +12,11 @@ services:
     # ghcr.io/successbyfailure/ocabra-{api,frontend}:X.Y.Z and the updater
     # moves them. Unset, the stack builds and runs its own images as before.
     image: ${OCABRA_API_IMAGE:-ocabra-api:slim}
+    # Not root (SEG-03 phase 3, 2026-11-17): the owner of the repo and data/
+    # (makespace on the hub). What it writes (/data/*, data/openai_files,
+    # data/image_outputs, the ACE-Step checkpoints) belongs to that uid;
+    # backend/scripts/chown-api-data.sh moves an older install over.
+    user: "${OCABRA_UID:-1000}:${OCABRA_GID:-1000}"
     gpus: all
     ipc: host
     shm_size: "8gb"
@@ -60,6 +65,12 @@ services:
       OCABRA_ADMIN_USER: ${OCABRA_ADMIN_USER:-ocabra}
       OCABRA_ADMIN_PASS: ${OCABRA_ADMIN_PASS:-ocabra}
       JWT_SECRET: ${JWT_SECRET:-}
+      # Not root: no /root. HOME holds throwaway caches (as /root did, the
+      # container filesystem); Hugging Face downloads that use the default
+      # cache (faster-whisper's) go to the persistent cache, not re-downloaded
+      # after every recreate as they were.
+      HOME: /tmp
+      HF_HOME: /data/hf_cache
       # Docker operations go through the docker-agent service (SEG-03).
       DOCKER_AGENT_URL: ${DOCKER_AGENT_URL:-http://docker-agent:8790}
       REQUIRE_API_KEY_OPENAI: ${REQUIRE_API_KEY_OPENAI:-true}

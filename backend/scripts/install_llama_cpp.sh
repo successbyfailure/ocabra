@@ -52,9 +52,12 @@ echo "[install_llama_cpp] cmake build (CUDA=${ENABLE_CUDA}, archs=${LLAMA_CUDA_A
 # they got.
 if [[ "${ENABLE_CUDA}" == "ON" ]]; then
     if [[ -f /usr/local/cuda/lib64/stubs/libcuda.so ]]; then
-        ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
-        export LIBRARY_PATH="/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-}"
-        export LD_LIBRARY_PATH="/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH:-}"
+        # libcuda.so.1 next to the stub, in a temp dir: the api runs without root
+        # (SEG-03) and cannot write into /usr/local/cuda.
+        cuda_stub_dir="$(mktemp -d)"
+        ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "${cuda_stub_dir}/libcuda.so.1"
+        export LIBRARY_PATH="${cuda_stub_dir}:/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="${cuda_stub_dir}:/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH:-}"
     elif ! command -v nvcc >/dev/null 2>&1; then
         echo "[install_llama_cpp] WARNING: ENABLE_CUDA=ON but no CUDA toolkit detected; falling back to CPU build."
         ENABLE_CUDA=OFF

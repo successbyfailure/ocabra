@@ -54,9 +54,12 @@ if [[ -f "${KERNEL_CONFIG}" ]]; then
 fi
 
 if [[ "${BITNET_ENABLE_CUDA}" == "true" && -f /usr/local/cuda/lib64/stubs/libcuda.so ]]; then
-    ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
-    export LIBRARY_PATH="/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-}"
-    export LD_LIBRARY_PATH="/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH:-}"
+    # libcuda.so.1 next to the stub, in a temp dir: the api runs without root
+    # (SEG-03) and cannot write into /usr/local/cuda.
+    cuda_stub_dir="$(mktemp -d)"
+    ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "${cuda_stub_dir}/libcuda.so.1"
+    export LIBRARY_PATH="${cuda_stub_dir}:/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="${cuda_stub_dir}:/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH:-}"
     GGML_CUDA_FLAG="ON"
 else
     GGML_CUDA_FLAG="OFF"

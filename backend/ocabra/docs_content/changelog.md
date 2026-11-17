@@ -16,6 +16,17 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.106.2 — 2026-11-17
+
+### Correcciones
+
+- Tras cada reinicio del servidor, el modelo de Faster-Whisper volvía a
+  descargarse (1,6 GB) en una caché que no se conservaba, y la transcripción
+  tardaba más en estar disponible. Ahora se queda en la caché persistente.
+
+
+---
+
 ## 0.106.1 — 2026-11-17
 
 ### Correcciones
