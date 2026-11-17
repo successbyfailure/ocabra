@@ -189,8 +189,8 @@ async def test_auto_does_not_retry_a_release_that_failed(monkeypatch):
     monkeypatch.setattr(settings, "self_update_idle_minutes", 1)
     upd = su.SelfUpdater(_app())
     upd._deployment = su.Deployment("compose", project="ocabra", working_dir="/x", api_image="i")
-    upd.state.failed_target = "0.98.1"
-    latest = ["0.98.1"]
+    upd.state.failed_target = "99.0.0"
+    latest = ["99.0.0"]
     applied: list[str] = []
 
     async def check(force=False):
@@ -215,8 +215,8 @@ async def test_auto_does_not_retry_a_release_that_failed(monkeypatch):
         await upd.tick()
         clock[0] += 120
     assert applied == []
-    latest[0] = "0.98.2"  # a newer release is tried again
+    latest[0] = "99.0.1"  # a newer release is tried again
     await upd.tick()
     clock[0] += 120
     await upd.tick()
-    assert applied == ["0.98.2"]
+    assert applied == ["99.0.1"]

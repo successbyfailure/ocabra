@@ -25,6 +25,15 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   traía el error de `docker compose`, que solo iba a stderr. Ahora pasa a
   `failed` con el motivo, el registro incluye stderr, y con la política `auto`
   una versión que falló no se reintenta sola (sí una más nueva o el botón).
+- La actualización fallaba siempre con «pull falló»: el actualizador usaba el
+  `docker compose` (v2.31) de la imagen en marcha, que no entiende `gpus: all`
+  del `docker-compose.yml` actual. Ahora descarga primero la imagen de la
+  versión nueva y la actualización corre con ella (y la imagen trae compose
+  v5.7.1). Los servicios opcionales que la API arranca con `docker compose`
+  (Unsloth, TRELLIS…) fallaban por lo mismo. **Acción** para los nodos en
+  0.98.0 o 0.98.1: actualizar una vez a mano a 0.98.2 (cambiar las dos líneas
+  `OCABRA_*_IMAGE` del `.env`, `git pull`, `docker compose pull api frontend`,
+  `docker compose up -d api frontend`); desde ahí se actualizan solos.
 
 ---
 

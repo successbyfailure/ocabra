@@ -382,15 +382,31 @@ class SelfUpdater:
                 raise RuntimeError("Ya hay una actualización en marcha.")
             await _run("docker", "rm", "-f", UPDATER_NAME, timeout=20)
             script = updater_script(dep, target, APP_VERSION)
+            # Two stages. This image only pulls the target release and hands
+            # over to it: the update itself runs with the *new* image's docker
+            # compose. With the running one, a node whose compose was too old
+            # for the new docker-compose.yml (v2.31 vs `gpus: all`) could
+            # never update itself.
+            new_image = image_for("api", target)
+            mounts = (
+                f"-v /var/run/docker.sock:/var/run/docker.sock "
+                f"-v {shlex.quote(str(dep.working_dir))}:{shlex.quote(str(dep.working_dir))} "
+                f"-w {shlex.quote(str(dep.working_dir))}"
+            )
+            stage1 = (
+                f'echo "[ocabra-updater] descargando {new_image}"; '
+                f"docker pull -q {shlex.quote(new_image)} 2>&1 || "
+                f'{{ echo "[ocabra-updater] ERROR: no se pudo descargar {new_image}"; exit 5; }}; '
+                f"exec docker run --rm --label org.ocabra.updater=2 {mounts} "
+                f"--entrypoint sh {shlex.quote(new_image)} -c {shlex.quote(script)}"
+            )
             args = [
                 "docker", "run", "-d", "--name", UPDATER_NAME,
                 "--label", "org.ocabra.updater=1",
                 "-v", "/var/run/docker.sock:/var/run/docker.sock",
-                "-v", f"{dep.working_dir}:{dep.working_dir}",
-                "-w", str(dep.working_dir),
                 "--entrypoint", "sh",
                 str(dep.api_image),
-                "-c", script,
+                "-c", stage1,
             ]  # fmt: skip
             code, out, err = await _run(*args, timeout=60)
             if code != 0:
