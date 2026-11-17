@@ -153,6 +153,22 @@ describe("Models · vista por modelo", () => {
     vi.clearAllMocks()
   })
 
+  it("also lists models only another node has (a pod), which have no logical model here", async () => {
+    const pod = {
+      ...deploymentState("llamacpp_mks/nemotron-120b", "llamacpp_mks"),
+      status: "remote",
+      federation: { remote: true, nodeName: "pod-6000", nodeId: "p1", loadedOn: ["pod-6000"] },
+    } as unknown as ModelState
+    api.models.list.mockResolvedValue([
+      deploymentState("llamacpp_mks/gemma4:26b", "llamacpp_mks"),
+      deploymentState("ollama/gemma4:26b", "ollama"),
+      pod,
+    ])
+    await renderModelView()
+    expect(await screen.findByText(/2 modelos en chat/)).toBeTruthy()
+    expect(screen.getAllByText(/nemotron-120b/).length).toBeGreaterThan(0)
+  })
+
   it("is the default view and lists one card per model", async () => {
     const card = await renderModelView()
     expect(screen.getByRole("button", { name: "Por modelo" }).getAttribute("aria-pressed")).toBe("true")

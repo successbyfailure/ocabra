@@ -222,7 +222,12 @@ export function Models() {
 
   const categoryCounts = useMemo(() => {
     const counts = new Map<ModelCategory, number>()
-    const source = viewMode === "model" ? logicalMatchingOtherFilters : matchingOtherFilters
+    // The model view groups this node's deployments; models only other nodes
+    // have (a pod) are not in any group, so they are counted on their own.
+    const source =
+      viewMode === "model"
+        ? [...logicalMatchingOtherFilters, ...matchingOtherFilters.filter(({ model }) => model.federation?.remote)]
+        : matchingOtherFilters
     for (const { category } of source) {
       counts.set(category, (counts.get(category) ?? 0) + 1)
     }
@@ -415,7 +420,10 @@ export function Models() {
     return parts.join(" ")
   })()
 
-  const visibleCount = viewMode === "model" ? logicalFiltered.length : filtered.length
+  // Models only other nodes have: shown in the model view too (they have no
+  // logical model here, so that view used to hide a pod's models).
+  const remoteFiltered = filtered.filter(({ model }) => model.federation?.remote)
+  const visibleCount = viewMode === "model" ? logicalFiltered.length + remoteFiltered.length : filtered.length
   const deleteModelProfiles = deleteModel?.profiles ?? []
 
   return (
@@ -617,7 +625,7 @@ export function Models() {
       {loading ? (
         <SkeletonList count={5} />
       ) : viewMode === "model" ? (
-        logicalFiltered.length === 0 ? (
+        logicalFiltered.length + remoteFiltered.length === 0 ? (
           <EmptyState
             title="Sin modelos con esos filtros"
             description="Prueba a ampliar los criterios de búsqueda o elige otra categoría."
@@ -639,6 +647,18 @@ export function Models() {
                   onAddDeployment: (backend) => handleAddDeployment(model, backend),
                   onRemoveDeployment: (deployment) => setRemoveTarget({ model, deployment }),
                 }}
+              />
+            ))}
+            {remoteFiltered.map(({ model }) => (
+              <ModelCard
+                key={model.modelId}
+                deploymentId={model.modelId}
+                states={models}
+                live={live}
+                gpus={gpus}
+                nowMs={nowMs}
+                busy={busyModelId === model.modelId}
+                actions={cardActions}
               />
             ))}
           </div>
