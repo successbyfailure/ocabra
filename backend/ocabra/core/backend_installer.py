@@ -108,6 +108,24 @@ class BackendAlreadyInstallingError(RuntimeError):
     """Raised when a second concurrent install is attempted for the same backend."""
 
 
+async def _system_package_present(package: str) -> bool:
+    """Whether OS package ``package`` is installed (dpkg), or a command of that
+    name is (``python3`` comes from the python image, not from a Debian package).
+    """
+    if shutil.which(package):
+        return True
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "dpkg-query", "-W", "-f=${Status}", package,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )  # fmt: skip
+    except FileNotFoundError:
+        return False
+    out, _ = await proc.communicate()
+    return proc.returncode == 0 and b"install ok installed" in out
+
+
 class BackendInstaller:
     """Manage runtime install/uninstall of inference backends.
 
@@ -1068,22 +1086,34 @@ class BackendInstaller:
     async def _install_apt_packages(
         self, backend_type: str, packages: list[str]
     ) -> None:
-        """Install OS packages via ``apt-get``.
+        """Make sure the OS packages a backend needs are there.
 
-        Best-effort: when ``apt-get`` is missing (non-Debian base) we log a
-        warning and continue rather than failing the install — the operator is
-        expected to have provided the deps in the base image.  Packages that
-        fail to install (typo, unavailable in repo) DO surface as install
-        errors because that's a real problem the user should see.
+        Packages already in the image are skipped, and ``apt-get`` runs only for
+        the missing ones. The api runs as a regular user since v0.106.2
+        (SEG-03), so it cannot install system packages: a missing one is then a
+        clear error naming it, rather than a failed ``apt-get update`` (it used
+        to abort every source install although the image had them all). With
+        no ``apt-get`` at all (non-Debian base) it logs and continues, as
+        before: the operator provides them in the base image.
         """
+        missing = [pkg for pkg in packages if not await _system_package_present(pkg)]
+        if not missing:
+            self._log(backend_type, f"system packages already in the image: {packages}")
+            return
         apt_get = shutil.which("apt-get")
         if apt_get is None:
             self._log(
                 backend_type,
-                f"apt-get not found on PATH; skipping apt_packages={packages}. "
+                f"apt-get not found on PATH; skipping apt_packages={missing}. "
                 "Ensure these are pre-installed in the base image.",
             )
             return
+        if os.geteuid() != 0:
+            raise RuntimeError(
+                f"{backend_type} needs system packages not in the image: {missing}. "
+                "The api does not run as root, so it cannot apt-get them: add them "
+                "to backend/Dockerfile.slim."
+            )
 
         env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
         await self._run_subprocess(
@@ -1096,7 +1126,7 @@ class BackendInstaller:
                 "install",
                 "-y",
                 "--no-install-recommends",
-                *packages,
+                *missing,
             ],
             env=env,
         )

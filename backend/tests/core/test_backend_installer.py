@@ -6,6 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -524,11 +525,16 @@ async def test_install_runs_apt_when_available(
         self._log(backend_type, f"MOCK $ {' '.join(argv)}")
 
     monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
-    # Pretend apt-get is on PATH at /usr/bin/apt-get.
+    # Pretend apt-get is on PATH at /usr/bin/apt-get, the packages are missing
+    # and the installer runs as root (a deployment that still does).
     monkeypatch.setattr(
         "ocabra.core.backend_installer.shutil.which",
         lambda name: "/usr/bin/apt-get" if name == "apt-get" else None,
     )
+    monkeypatch.setattr(
+        "ocabra.core.backend_installer._system_package_present", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr("ocabra.core.backend_installer.os.geteuid", lambda: 0)
 
     async for _ in installer.install("mock", method="source"):
         pass
@@ -573,12 +579,92 @@ async def test_install_skips_apt_when_unavailable(
     monkeypatch.setattr(
         "ocabra.core.backend_installer.shutil.which", lambda name: None
     )
+    monkeypatch.setattr(
+        "ocabra.core.backend_installer._system_package_present", AsyncMock(return_value=False)
+    )
 
     states = await _collect_states(installer.install("mock", method="source"))
     assert states[-1].install_status == BackendInstallStatus.INSTALLED
     assert not any(c and c[0].endswith("apt-get") for c in calls)
     log = installer.get_logs("mock")
     assert any("apt-get not found" in line for line in log)
+
+
+def _apt_spec(monkeypatch, installer, packages):
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            apt_packages=packages,
+            include_core_runtime=False,
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_packages_already_in_the_image_need_no_apt(installer, monkeypatch) -> None:
+    """The api runs without root since v0.106.2: `apt-get update` failed and
+    aborted every source install, although the image had all the packages."""
+    await installer.start()
+    _apt_spec(monkeypatch, installer, ["build-essential", "cmake"])
+    calls: list[list[str]] = []
+
+    async def _capture_run(self, backend_type, argv, *, cwd=None, env=None):  # noqa: ANN001
+        calls.append(list(argv))
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
+    monkeypatch.setattr(
+        "ocabra.core.backend_installer._system_package_present", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr("ocabra.core.backend_installer.os.geteuid", lambda: 1000)
+
+    states = await _collect_states(installer.install("mock", method="source"))
+
+    assert states[-1].install_status == BackendInstallStatus.INSTALLED
+    assert not any(c and c[0].endswith("apt-get") for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_package_without_root_is_a_clear_error(installer, monkeypatch) -> None:
+    await installer.start()
+    _apt_spec(monkeypatch, installer, ["build-essential", "libfoo-dev"])
+    calls: list[list[str]] = []
+
+    async def _capture_run(self, backend_type, argv, *, cwd=None, env=None):  # noqa: ANN001
+        calls.append(list(argv))
+
+    async def present(pkg):
+        return pkg == "build-essential"
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
+    monkeypatch.setattr("ocabra.core.backend_installer._system_package_present", present)
+    monkeypatch.setattr(
+        "ocabra.core.backend_installer.shutil.which",
+        lambda name: "/usr/bin/apt-get" if name == "apt-get" else None,
+    )
+    monkeypatch.setattr("ocabra.core.backend_installer.os.geteuid", lambda: 1000)
+
+    states = await _collect_states(installer.install("mock", method="source"))
+
+    assert states[-1].install_status == BackendInstallStatus.ERROR
+    assert "libfoo-dev" in (states[-1].error or "") and "build-essential" not in (
+        states[-1].error or ""
+    )
+    assert not any(c and c[0].endswith("apt-get") for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_system_package_check_counts_commands_from_the_image(monkeypatch) -> None:
+    """``python3`` comes from the python image, not from a Debian package."""
+    from ocabra.core import backend_installer as bi
+
+    monkeypatch.setattr(bi.shutil, "which", lambda name: "/usr/local/bin/python3")
+
+    assert await bi._system_package_present("python3") is True
 
 
 @pytest.mark.asyncio
