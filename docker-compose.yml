@@ -85,12 +85,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker-compose.yml:/opt/ocabra/docker-compose.yml:ro
       - ./.env:/opt/ocabra/.env:ro
-      # Custom Dockerfile referenced as build context by the `ollama` service.
-      # Required for the in-app updater — it runs `docker compose build --pull
-      # ollama` from inside this container to refresh the base ollama image
-      # AND rebuild the ffmpeg layer, and needs the Dockerfile at the same
-      # relative path the compose file declares.
-      - ./Dockerfile.ollama:/opt/ocabra/Dockerfile.ollama:ro
       # Global settings of the shared Ollama daemon (parallelism, max
       # context): oCabra writes this file from Ajustes and recreates the
       # ollama service, which reads it through env_file (below).
@@ -191,12 +185,13 @@ services:
   # una sola GPU (visto en phobos: pedir el índice "1" explícito rompía
   # ahí porque solo existe el índice 0).
   ollama:
-    # Imagen custom: layer ffmpeg sobre ollama/ollama:latest para el path
-    # multimodal (libmtmd.so lo requiere en 0.32+ incluso para JPEG/PNG).
-    build:
-      context: .
-      dockerfile: Dockerfile.ollama
-    image: ocabra-ollama:latest
+    # Imagen oficial tal cual. Hasta 2026-11-17 se le añadía ffmpeg
+    # (Dockerfile.ollama): en 0.32 el path multimodal lo necesitaba hasta para
+    # JPEG/PNG. Con 0.40.16 la imagen oficial, sin ffmpeg, decodifica PNG,
+    # JPEG, WAV y MP3 (probado con gemma4:12b), y una imagen local impedía
+    # `docker compose pull` en los nodos. El actualizador del panel hace
+    # `pull` + recrear (y `build --pull` si algún nodo vuelve a usar build:).
+    image: ollama/ollama:latest
     gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: all
