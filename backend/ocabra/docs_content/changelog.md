@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.106.4 — 2026-11-17
+
+### Correcciones
+
+- En una instalación nueva no se podía instalar ningún backend. La api corre
+  sin root desde la 0.106.2, y el volumen de backends se creaba con dueño
+  root. Además, `setup.sh` no arrancaba el agente de Docker, del que
+  dependen los servicios, Ollama y las actualizaciones.
+
+
+---
+
 ## 0.106.2 — 2026-11-17
 
 ### Correcciones
