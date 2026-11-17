@@ -93,7 +93,11 @@ function SpeculativePanel({ editor, readOnly }: SectionProps) {
   }, [modelId])
   if (!field) return null
   const spec = (getPath(editor.draft!.extraConfig, field.path) ?? undefined) as JsonObject | undefined
-  const type = (spec?.spec_type as string | undefined) ?? (spec?.draft_model_id ? "draft-simple" : undefined)
+  // Sin spec_type, el backend lee el tipo del GGUF del draft: el draft MTP que
+  // trae un tag de Ollama (gemma4) es draft-mtp, no un "modelo draft" que haya
+  // que buscar con el mismo tokenizer (eso sacaba un aviso falso).
+  const inferred = !spec?.spec_type && !!spec?.draft_model_id
+  const type = (spec?.spec_type as string | undefined) ?? (inferred ? "draft-mtp" : undefined)
   const meta = SPEC_TYPES.find((t) => t.value === type)
   const setSpec = (patch: Record<string, Json | undefined>) => {
     const next: JsonObject = { ...(spec ?? {}) }
@@ -118,10 +122,15 @@ function SpeculativePanel({ editor, readOnly }: SectionProps) {
           disabled={readOnly}
           value={type ?? "off"}
           options={[{ value: "off", label: "Apagada" }, ...SPEC_TYPES.map((t) => ({ value: t.value, label: t.label, title: t.hint }))]}
-          onChange={(v) => (v === "off" ? editor.setField(field.path, undefined) : setSpec({ spec_type: v, ...(SPEC_TYPES.find((t) => t.value === v)?.draft ? {} : { draft_model_id: undefined }) }))}
+          onChange={(v) => (v === "off" ? editor.setField(field.path, undefined) : setSpec({ spec_type: v, ...(v === "ngram-simple" ? { draft_model_id: undefined } : {}) }))}
           testId="spec-type"
         />
         {meta && <Hint>{meta.hint}</Hint>}
+        {type === "draft-mtp" && spec?.draft_model_id && (
+          <Hint>
+            {inferred ? "Tipo detectado del fichero: " : ""}usa el draft MTP del modelo ({String(spec.draft_model_id).split("/").pop()?.slice(0, 19)}…). Ocupa VRAM: en una GPU pequeña, apágala para ganar contexto.
+          </Hint>
+        )}
         {meta?.draft && (
           <div>
             <p className="mb-1 text-xs font-medium">Modelo draft</p>

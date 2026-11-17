@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.95.6 — 2026-11-17
+
+### Corregido
+
+- En nodos donde oCabra corre en un contenedor (los PID de la GPU son los del
+  host), los modelos de oCabra cargados contaban como memoria ajena que no se
+  puede desalojar: `capacity[].budgetMb` de la vista previa y el alta
+  automática (`POST /ocabra/models/{id}/auto-setup`) se quedaban en ~150 MB y
+  no proponían ninguna configuración. Ahora se cuenta con la misma regla que
+  usa la carga para desalojar.
+- Apagar la decodificación especulativa (`speculative: null`) en un modelo
+  instalado desde Ollama no quitaba el draft MTP del tag: se volvía a poner en
+  cada carga.
+
+---
+
 ## 0.95.5 — 2026-11-16
 
 ### Corregido

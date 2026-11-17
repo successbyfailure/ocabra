@@ -107,28 +107,52 @@ def test_solo_cpu():
 
 
 @pytest.mark.asyncio
-async def test_presupuesto_resta_escritorio_sistema_y_margen():
+async def test_presupuesto_cuenta_como_el_planificador_con_todo_ocabra_fuera():
+    # Mapache: dos encoders de oCabra cargados con PIDs del host distintos de
+    # los del contenedor; antes contaban como memoria ajena (budget 147 MB).
     gpu = SimpleNamespace(
-        index=0,
-        name="GTX 1660",
-        total_vram_mb=6144,
-        free_vram_mb=4888,
-        processes=[
-            SimpleNamespace(pid=1865, used_vram_mb=443),  # escritorio
-            SimpleNamespace(pid=4242, used_vram_mb=700),  # worker de oCabra
-        ],
+        index=0, name="GTX 1660", total_vram_mb=6144, free_vram_mb=646, processes=[]
     )
-    gm = SimpleNamespace(get_all_states=lambda: _aw([gpu]))
+    asked: list[dict] = []
+
+    async def released(index, models):
+        asked.append(models)
+        return 4361
+
+    gm = SimpleNamespace(get_all_states=lambda: _aw([gpu]), get_free_vram_if_released=released)
     mm = SimpleNamespace(
         _gpu_manager=gm,
-        _states={"x": SimpleNamespace(worker_info=SimpleNamespace(pid=4242))},
+        _states={
+            "emb": SimpleNamespace(
+                model_id="emb", current_gpu=[0], worker_info=SimpleNamespace(pid=11)
+            ),
+            "rr": SimpleNamespace(
+                model_id="rr", current_gpu=[0], worker_info=SimpleNamespace(pid=12)
+            ),
+            "cpu": SimpleNamespace(model_id="cpu", current_gpu=[], worker_info=None),
+        },
     )
     (b,) = await au.gpu_budgets(mm, [0])
-    unowned = 6144 - 4888 - 1143
+    assert asked == [{"emb": 11, "rr": 12}]
+    assert b.budget_mb == 4361  # en 6 GB el margen pesa más que el umbral
+
+
+@pytest.mark.asyncio
+async def test_presupuesto_aplica_el_umbral_en_tarjetas_grandes(monkeypatch):
     from ocabra.config import settings
 
-    esperado = min(6144 - settings.vram_buffer_mb, int(6144 * settings.vram_eviction_threshold))
-    assert b.budget_mb == esperado - unowned - 443  # el worker de oCabra no resta
+    monkeypatch.setattr(settings, "vram_buffer_mb", 512)
+    monkeypatch.setattr(settings, "vram_eviction_threshold", 0.96)
+    gpu = SimpleNamespace(
+        index=1, name="RTX 3090", total_vram_mb=24576, free_vram_mb=24000, processes=[]
+    )
+
+    async def released(index, models):
+        return 23500
+
+    gm = SimpleNamespace(get_all_states=lambda: _aw([gpu]), get_free_vram_if_released=released)
+    (b,) = await au.gpu_budgets(SimpleNamespace(_gpu_manager=gm, _states={}), [1])
+    assert b.budget_mb == 23500 - ((24576 - 512) - int(24576 * 0.96))
 
 
 async def _aw(value):

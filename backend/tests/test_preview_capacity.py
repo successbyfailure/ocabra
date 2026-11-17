@@ -38,7 +38,8 @@ class _Gpus:
 
     async def get_free_vram_if_released(self, index: int, released: dict) -> int:
         self.released.append(released)
-        return max(0, self.free + 3700 - settings.vram_buffer_mb)
+        gain = 3700 if released else 0
+        return max(0, self.free + gain - settings.vram_buffer_mb)
 
 
 @pytest.mark.asyncio
@@ -64,7 +65,7 @@ async def test_a_loaded_model_counts_its_own_copy_as_free(monkeypatch):
     mm = SimpleNamespace(_gpu_manager=gm, _states={})
     state = SimpleNamespace(model_id="m", current_gpu=[0], worker_info=SimpleNamespace(pid=3603882))
     [cap] = await _preview_capacity(mm, gm, state)
-    assert gm.released == [{"m": 3603882}]
+    assert {"m": 3603882} in gm.released
     assert cap["availableMb"] == 1175 + 3700 - 512
     assert cap["budgetMb"] >= cap["availableMb"]
 

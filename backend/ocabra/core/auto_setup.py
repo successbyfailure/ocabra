@@ -96,40 +96,46 @@ def _gpu_value(gpu: Any, name: str, default: Any = 0) -> Any:
 
 
 async def gpu_budgets(model_manager: Any, indices: list[int]) -> list[GpuBudget]:
-    """What each selected GPU can give one model, if every oCabra model left."""
+    """What each selected GPU can give one model, if every oCabra model left.
+
+    Counted by the scheduler's own rule (``get_free_vram_if_released`` with
+    every oCabra model on that GPU), so the buffer, service reservations and
+    processes oCabra does not own (a desktop) stay out. Matching workers by
+    the PIDs of the polled process list failed on Mapache, where those are the
+    host's PIDs and ``WorkerInfo.pid`` the container's: two loaded encoders
+    counted as foreign memory, the budget fell to 147 MB and the editor and
+    the planner found no configuration at all. The eviction threshold also
+    caps the budget when it is stricter than the buffer (large cards).
+    """
     gm = getattr(model_manager, "_gpu_manager", None)
     if gm is None:
         return []
-    ours = {
-        int(s.worker_info.pid)
-        for s in getattr(model_manager, "_states", {}).values()
-        if getattr(s, "worker_info", None) is not None and getattr(s.worker_info, "pid", None)
-    }
+    states = list(getattr(model_manager, "_states", {}).values())
     threshold = float(getattr(settings, "vram_eviction_threshold", 0.96) or 0.96)
+    buffer = int(settings.vram_buffer_mb or 0)
     out: list[GpuBudget] = []
     for gpu in await gm.get_all_states():
         index = int(_gpu_value(gpu, "index"))
         if index not in indices:
             continue
         total = int(_gpu_value(gpu, "total_vram_mb") or 0)
-        free = int(_gpu_value(gpu, "free_vram_mb") or 0)
-        procs = _gpu_value(gpu, "processes", []) or []
-        owned = 0
-        foreign = 0
-        for proc in procs:
-            used = int(_gpu_value(proc, "used_vram_mb") or 0)
-            owned += used
-            if int(_gpu_value(proc, "pid") or 0) not in ours:
-                foreign += used
-        unowned = max(0, total - free - owned)
-        buffer = int(settings.vram_buffer_mb or 0)
-        budget = min(total - buffer, int(total * threshold)) - unowned - foreign
+        released = {
+            str(getattr(s, "model_id", id(s))): getattr(
+                getattr(s, "worker_info", None), "pid", None
+            )
+            for s in states
+            if index in (getattr(s, "current_gpu", None) or [])
+        }
+        room = int(await gm.get_free_vram_if_released(index, released))
+        # The buffer is already out of ``room``; the threshold only bites when
+        # it reserves more than the buffer.
+        room -= max(0, (total - buffer) - int(total * threshold))
         out.append(
             GpuBudget(
                 index=index,
                 name=str(_gpu_value(gpu, "name", "") or f"GPU {index}"),
                 total_mb=total,
-                budget_mb=max(0, budget),
+                budget_mb=max(0, room),
             )
         )
     out.sort(key=lambda b: b.budget_mb, reverse=True)

@@ -104,6 +104,23 @@ def test_ui_round_trip_of_paths_is_ignored_but_a_real_edit_updates_the_artifact(
     assert updated["source"] == "ollama" and updated["ref"] == "gemma4:26b"
 
 
+def test_turning_speculative_off_drops_the_artifact_draft() -> None:
+    # The editor's "off" sends ``speculative: null``; before, only
+    # ``speculative.draft_model_id: null`` cleared the draft and every load
+    # put Ollama's MTP draft back (Mapache's 1660 could not drop it).
+    art = {
+        "source": "ollama",
+        "ref": "gemma4:26b",
+        "draft": {"source": "ollama", "layer": "draft"},
+    }
+    current = {"llama_cpp": {"speculative": {"draft_model_id": "/blobs/d"}}}
+    updated = artifacts.apply_path_edits(
+        "llamacpp_mks", art, {"llama_cpp": {"speculative": None}}, current
+    )
+    assert "draft" not in updated
+    assert updated["ref"] == "gemma4:26b"
+
+
 def test_backend_ref_prefers_the_artifact() -> None:
     assert (
         artifacts.backend_ref({"ref": "BAAI/bge-reranker-v2-m3"}, "bge-reranker-v2-m3")

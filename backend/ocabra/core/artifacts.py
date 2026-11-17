@@ -341,6 +341,11 @@ def apply_path_edits(
     def _explicit_null(extra: dict, key: str) -> bool:
         sec = extra.get(section_key) if isinstance(extra.get(section_key), dict) else {}
         if key == "draft_model_id":
+            # ``speculative: null`` (the editor's "off") drops the whole
+            # section, draft included; only checking the inner key left the
+            # artifact's draft in place and every load put it back.
+            if "speculative" in sec and sec["speculative"] is None:
+                return True
             spec = sec.get("speculative")
             return isinstance(spec, dict) and key in spec and spec[key] is None
         return (key in sec and sec[key] is None) or (key in extra and extra[key] is None)
