@@ -7,14 +7,12 @@
 # (the one production runs).
 name: native backends
 
+# Manual only while there are no Actions minutes: publish from the hub with
+# backend/scripts/publish-native-backends.sh. To follow main again, add back a
+# `push:` trigger on branches [main] and these paths:
+#   backend/Dockerfile.backend-native, backend/scripts/publish-native-backends.sh,
+#   backend/scripts/install_llama_cpp.sh, backend/scripts/install_whispercpp.sh
 on:
-  push:
-    branches: [main]
-    paths:
-      - backend/Dockerfile.backend-native
-      - backend/scripts/publish-native-backends.sh
-      - backend/scripts/install_llama_cpp.sh
-      - backend/scripts/install_whispercpp.sh
   workflow_dispatch:
     inputs:
       backend:

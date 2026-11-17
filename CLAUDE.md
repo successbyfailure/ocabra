@@ -72,14 +72,19 @@ siguiente). Hay un test que falla si subes de versión sin hacerlo.
 ## Publicar una versión (y cómo se actualizan los nodos)
 
 Una versión publicada es una **etiqueta git `vX.Y.Z`** igual a `APP_VERSION` y
-a `frontend/package.json`. Al hacer push de la etiqueta,
-`.github/workflows/release.yml` comprueba que las tres coinciden, publica
-`ghcr.io/successbyfailure/ocabra-{api,frontend,node}:X.Y.Z` (y `latest`) y
-crea la release de GitHub con la sección del changelog:
+a `frontend/package.json`, más las imágenes
+`ghcr.io/successbyfailure/ocabra-{api,frontend,node}:X.Y.Z` (y `latest`) y la
+release de GitHub con la sección del changelog. Sin minutos de Actions se
+publica **a mano desde el hub** (los workflows `release.yml` y
+`backends-native.yml` quedan solo con lanzamiento manual):
 
 ```bash
-git tag v0.96.0 && git push origin v0.96.0
+git tag v0.98.0 && git push origin v0.98.0
+backend/scripts/publish-release.sh 0.98.0            # --no-node: sin la imagen CUDA del nodo
 ```
+
+El script construye desde un worktree limpio de la etiqueta (nunca el árbol de
+trabajo, que puede tener WIP de otras sesiones) y sube con `gh auth token`.
 
 No etiquetes sin que el usuario lo pida: publicar una etiqueta es lo que hace
 que los nodos con política `auto` se actualicen solos.
@@ -102,8 +107,9 @@ Cómo se actualiza cada tipo de nodo (`backend/ocabra/core/self_update.py`):
   `OCABRA_FRONTEND_IMAGE=ghcr.io/successbyfailure/ocabra-frontend:X.Y.Z` y haz
   `docker compose pull api frontend && docker compose up -d api frontend`.
 
-Los backends nativos se publican con `.github/workflows/backends-native.yml`
-(al cambiar su receta en `main`, o a mano); los Python pesados (vLLM, torch…)
+Los backends nativos se publican con
+`GHCR_TOKEN=$(gh auth token) backend/scripts/publish-native-backends.sh [backend…]`
+(o el workflow `backends-native.yml` cuando haya minutos); los Python pesados (vLLM, torch…)
 se siguen publicando desde el hub copiando la instalación de producción
 (`python -m ocabra.core.oci_registry publish`).
 

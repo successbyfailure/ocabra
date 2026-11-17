@@ -208,6 +208,9 @@ class FakeProvider:
         self.created: list[PodSpec] = []
         self.terminated: list[str] = []
         self.volumes: dict[str, dict] = {}
+        self.updated: list[tuple] = []
+        self.restarted: list[str] = []
+        self.envs: dict[str, dict] = {}
 
     def factory(self, provider, api_key):
         return self
@@ -257,6 +260,18 @@ class FakeProvider:
 
     async def data_centers(self):
         return [{"id": "EU-RO-1", "name": "EU-RO-1", "region": "EUROPE", "gpus": []}]
+
+    async def get_pod(self, pod_id):
+        spec = next(s for s in self.created if self.pods[pod_id].name == s.name)
+        return {"id": pod_id, "env": dict(self.envs.get(pod_id, spec.env))}
+
+    async def update_pod(self, pod_id, *, image, env):
+        self.updated.append((pod_id, image, dict(env)))
+        self.envs[pod_id] = dict(env)
+        return self.pods[pod_id]
+
+    async def restart_pod(self, pod_id):
+        self.restarted.append(pod_id)
 
     async def aclose(self):
         pass
@@ -711,3 +726,71 @@ async def test_zero_data_pod_is_secure_and_gets_no_hf_token(hub):  # noqa: F811
     assert spec.env["PRIVACY_MODE"] == "zero_data"
     assert spec.cloud_type == "SECURE"
     assert "HF_TOKEN" not in spec.env
+
+
+async def test_update_pod_sends_v2_patch_and_restart():
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, json.loads(request.content or b"{}")))
+        return httpx.Response(200, json={"id": "pod1", "status": "RUNNING"})
+
+    client = _rp(handler)
+    await client.update_pod("pod1", image="ghcr.io/a/ocabra-node:0.96.0", env={"A": "1"})
+    await client.restart_pod("pod1")
+    await client.aclose()
+    assert seen == [
+        ("PATCH", "/v2/pods/pod1", {"image": "ghcr.io/a/ocabra-node:0.96.0", "env": {"A": "1"}}),
+        ("POST", "/v2/pods/pod1/action", {"action": "restart"}),
+    ]
+
+
+@requires_db
+async def test_update_image_restarts_the_pod_and_it_joins_again(hub):
+    fm, fake = hub
+    await fm.cloud.update_provider("runpod", settings={"pass_hf_token": True})
+    node = await fm.cloud.launch(gpu_type_id="3090", max_runtime_minutes=0)
+    pod_id = node["provider_pod_id"]
+    fake.pods[pod_id].status = "running"
+    spec = fake.created[0]
+    first = spec.env["FEDERATION_JOIN_INVITE"]
+    await fm.join_service.create_request(
+        {"node_id": "pod-node", "node_name": spec.name, "invite_code": first}, source_ip="1.2.3.4"
+    )
+    await fm.cloud.reconcile()
+    old_peer = (await _node(fm, node["id"]))["peer_id"]
+    assert old_peer
+
+    out = await fm.cloud.update_image(node["id"], "0.96.0")
+    assert out["status"] == "starting" and out["peer_id"] is None
+    (pid, image, env), = fake.updated
+    assert pid == pod_id and image == "ghcr.io/successbyfailure/ocabra-node:0.96.0"
+    # Everything stays but the invite: a new single-use one.
+    assert env["HF_TOKEN"] == "hf_secret" and env["FEDERATION_JOIN_URL"] == "https://hub.example"
+    assert env["FEDERATION_JOIN_INVITE"] != first
+    assert fake.restarted == [pod_id]
+    assert all(p.peer_id != old_peer for p in fm.get_all_peers())
+    revoked = {i["label"]: i["revoked"] for i in await fm.join_service.list_invites()}
+    assert revoked[f"cloud:{spec.name}"] is True
+
+    # Started long ago: the join timeout counts from the update, not the start.
+    await _set(node["id"], started_at=datetime.now(UTC) - timedelta(minutes=45))
+    await fm.cloud.reconcile()
+    assert (await _node(fm, node["id"]))["status"] != "terminated"
+
+    await fm.join_service.create_request(
+        {"node_id": "pod-node-2", "node_name": spec.name, "invite_code": env["FEDERATION_JOIN_INVITE"]},
+        source_ip="1.2.3.4",
+    )
+    await fm.cloud.reconcile()
+    after = await _node(fm, node["id"])
+    assert after["peer_id"] and after["peer_id"] != old_peer
+
+
+@requires_db
+async def test_update_image_needs_a_running_node(hub):
+    fm, _ = hub
+    node = await fm.cloud.launch(gpu_type_id="3090")
+    await fm.cloud.terminate(node["id"])
+    with pytest.raises(CloudError, match="no está en marcha"):
+        await fm.cloud.update_image(node["id"])

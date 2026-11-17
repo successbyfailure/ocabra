@@ -12,9 +12,10 @@
 # and update themselves according to their policy (core/self_update.py).
 name: release
 
+# Manual only while there are no Actions minutes: releases are published from
+# the hub with backend/scripts/publish-release.sh. To make it follow tags
+# again, add back:  push: { tags: ["v[0-9]+.[0-9]+.[0-9]+"] }
 on:
-  push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       tag:

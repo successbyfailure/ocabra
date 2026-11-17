@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.schemas.cloud import (
+    CloudNodeImageUpdate,
     CloudNodeLaunch,
     CloudNodeModels,
     CloudProviderUpdate,
@@ -178,6 +179,33 @@ async def terminate_node(
     """
     try:
         return await _cloud(request).terminate(node_id, reason="manual")
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.post(
+    "/cloud/nodes/{node_id}/update-image",
+    summary="Restart a cloud node on another ocabra-node image",
+    description=(
+        "Same pod and GPU, new image. The container disk is wiped, so the node "
+        "joins again as a new peer (fresh invite); models on its network volume "
+        "stay and its preload list is queued again."
+    ),
+    responses={404: {"description": "Not found"}, 409: {"description": "Not running"}},
+)
+async def update_node_image(
+    node_id: str,
+    body: CloudNodeImageUpdate,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Restart a cloud node on ``ocabra-node:<version>`` (or the configured image).
+
+    Returns:
+        The node, ``starting`` until it joins again.
+    """
+    try:
+        return await _cloud(request).update_image(node_id, body.version)
     except Exception as exc:
         raise _err(exc) from exc
 

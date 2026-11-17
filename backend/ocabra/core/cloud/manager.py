@@ -111,6 +111,12 @@ class CloudProviderClient(Protocol):
 
     async def terminate_pod(self, pod_id: str) -> None: ...
 
+    async def get_pod(self, pod_id: str) -> dict[str, Any]: ...
+
+    async def update_pod(self, pod_id: str, *, image: str, env: dict[str, str]) -> PodInfo: ...
+
+    async def restart_pod(self, pod_id: str) -> None: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -156,6 +162,11 @@ class CloudNodeManager:
         self._lock = asyncio.Lock()
         # Background model loads started by the preload driver.
         self._preload_tasks: dict = {}
+        # node id → when it was restarted with a new image and has to join
+        # again (update_image): the join timeout counts from here, not from
+        # the pod's start. In memory: after a hub restart it counts from the
+        # start again, which at worst terminates a node that failed to rejoin.
+        self._rejoin_since: dict[str, datetime] = {}
 
     @staticmethod
     def _default_client_factory(provider: str, api_key: str) -> CloudProviderClient:
@@ -587,12 +598,90 @@ class CloudNodeManager:
             items = list(row.preload_models or [])
             present = {i["model_id"] for i in items if i.get("status") != "error"}
             # A model that failed before can be retried by adding it again.
-            items = [i for i in items if not (i["model_id"] in models and i.get("status") == "error")]
+            items = [
+                i for i in items if not (i["model_id"] in models and i.get("status") == "error")
+            ]
             items += [{"model_id": m, "status": "pending"} for m in models if m not in present]
             row.preload_models = items
             await session.commit()
             out = self._node_out(row)
         logger.info("cloud_node_models_added", node=out["name"], models=models)
+        return out
+
+    async def update_image(self, node_id: str, version: str | None = None) -> dict[str, Any]:
+        """Point a running pod at another ``ocabra-node`` image and restart it.
+
+        Same machine and GPU (no new rental), but the container disk is wiped:
+        the node comes back with an empty database, so it joins again as a new
+        peer with a fresh single-use invite. The pod's environment is read
+        back from RunPod and only the invite changes (privacy mode, HF token,
+        everything else stays). Models on its network volume survive; the ones
+        queued for preload are queued again. *version* is an ``X.Y.Z`` tag of
+        the image's repository (default: the tag of the configured image).
+        """
+        from ocabra.db.cloud import CloudNode
+
+        async with self.fm.session_factory() as session:
+            row = await session.get(CloudNode, uuid.UUID(node_id))
+            if row is None:
+                raise CloudError("Nodo no encontrado", 404)
+            if row.status not in LIVE_STATUSES or not row.provider_pod_id:
+                raise CloudError("El nodo no está en marcha", 409)
+            pod_id, provider, name = row.provider_pod_id, row.provider, row.name
+            old_peer, old_invite = row.peer_id, row.invite_id
+        cfg = (await self.get_provider(provider))["settings"]
+        repo = (
+            str(cfg["image"]).rsplit(":", 1)[0]
+            if ":" in str(cfg["image"]).rsplit("/", 1)[-1]
+            else str(cfg["image"])
+        )
+        image = f"{repo}:{version}" if version else str(cfg["image"])
+
+        client = await self._client(provider)
+        invite = await self.fm.join_service.create_invite(
+            label=f"cloud:{name}:update", max_uses=1, expires_in_hours=INVITE_TTL_HOURS
+        )
+        try:
+            current = await client.get_pod(pod_id)
+            env = current.get("env")
+            if not isinstance(env, dict) or "FEDERATION_JOIN_URL" not in env:
+                raise CloudError(
+                    "RunPod no devolvió el entorno del pod: no se puede cambiar la imagen "
+                    "sin perder su configuración",
+                    502,
+                )
+            env = {str(k): str(v) for k, v in env.items()}
+            env["FEDERATION_JOIN_INVITE"] = invite["code"]
+            await client.update_pod(pod_id, image=image, env=env)
+            with contextlib.suppress(CloudError):
+                # Changing the image may already restart it; then this is a no-op.
+                await client.restart_pod(pod_id)
+        except Exception:
+            await self.fm.join_service.revoke_invite(invite["id"])
+            raise
+        finally:
+            await client.aclose()
+
+        if old_peer is not None:
+            with contextlib.suppress(Exception):
+                await self.fm.remove_peer(str(old_peer))
+        if old_invite is not None:
+            with contextlib.suppress(Exception):
+                await self.fm.join_service.revoke_invite(str(old_invite))
+        self._rejoin_since[node_id] = _now()
+        async with self.fm.session_factory() as session:
+            row = await session.get(CloudNode, uuid.UUID(node_id))
+            row.image = image
+            row.invite_id = uuid.UUID(invite["id"])
+            row.peer_id = None
+            row.status = "starting"
+            row.error = None
+            row.preload_models = [
+                {"model_id": i["model_id"], "status": "pending"} for i in (row.preload_models or [])
+            ] or None
+            await session.commit()
+            out = self._node_out(row)
+        logger.info("cloud_node_image_updated", node=name, image=image)
         return out
 
     async def terminate(self, node_id: str, *, reason: str = "manual") -> dict[str, Any]:
@@ -763,6 +852,9 @@ class CloudNodeManager:
                             row.last_active_at = active
 
                     started = row.started_at or row.created_at
+                    join_from = max(started, self._rejoin_since.get(str(row.id), started))
+                    if row.peer_id is not None:
+                        self._rejoin_since.pop(str(row.id), None)
                     if over_budget:
                         to_kill.append((str(row.id), "budget"))
                     elif row.max_runtime_minutes and now - started >= timedelta(
@@ -778,7 +870,7 @@ class CloudNodeManager:
                             f"({(peer.cuda or {}).get('error')}); se termina para no pagar en vano"
                         )
                         to_kill.append((str(row.id), "gpu_broken"))
-                    elif row.peer_id is None and now - started >= JOIN_TIMEOUT:
+                    elif row.peer_id is None and now - join_from >= JOIN_TIMEOUT:
                         row.error = "No llegó a unirse a la federación (¿imagen o red?)"
                         to_kill.append((str(row.id), "join_timeout"))
                     elif (

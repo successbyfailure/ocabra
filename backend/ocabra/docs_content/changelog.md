@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.98.0 — 2026-11-17
+
+### Nuevo
+
+- `POST /ocabra/cloud/nodes/{id}/update-image` (`{"version": "X.Y.Z"}` o vacío
+  para la imagen configurada): reinicia un nodo de RunPod en marcha con otra
+  imagen de `ocabra-node`, en la misma máquina y GPU. Se borra el disco del
+  contenedor, así que el nodo vuelve a unirse como un peer nuevo con una
+  invitación de un solo uso nueva; el resto de su entorno (privacidad, token de
+  Hugging Face) se conserva, los modelos de su disco de red también y los que
+  tenía en precarga se vuelven a encolar.
+
+---
+
 ## 0.97.0 — 2026-11-17
 
 ### Nuevo

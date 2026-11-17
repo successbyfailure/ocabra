@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
-import { AlertTriangle, Cloud, Cpu, KeyRound, Loader2, PackagePlus, Power, Rocket, Settings2, Trash2 } from "lucide-react"
+import { AlertTriangle, ArrowUpCircle, Cloud, Cpu, KeyRound, Loader2, PackagePlus, Power, Rocket, Settings2, Trash2 } from "lucide-react"
 import { toast } from "sonner"
-import { api } from "@/api/client"
+import { api, request } from "@/api/client"
 import { VolumesPanel } from "./VolumesPanel"
 import type {
   CloudDataCenter,
@@ -740,7 +740,41 @@ function NodeRow({
       {live && (
         <button
           type="button"
-          className={`${btnCls} ${onAddModels ? "" : "ml-auto"} text-red-600 dark:text-red-300`}
+          className={`${btnCls} ${onAddModels ? "" : "ml-auto"}`}
+          disabled={busy}
+          title={`Imagen actual: ${node.image}`}
+          data-testid="cloud-node-update"
+          onClick={async () => {
+            const version = window.prompt(
+              `Reiniciar ${node.name} con otra imagen de ocabra-node.\n\nMisma máquina y GPU, pero se borra el disco del contenedor: vuelve a unirse como un nodo nuevo y se recargan sus modelos (los del disco de red se conservan).\n\nVersión (X.Y.Z), o vacío para la imagen configurada:`,
+              "",
+            )
+            if (version === null) return
+            if (version && !/^\d+\.\d+\.\d+$/.test(version.trim())) {
+              toast.error("La versión tiene que ser X.Y.Z")
+              return
+            }
+            setBusy(true)
+            try {
+              await request("POST", `/ocabra/cloud/nodes/${encodeURIComponent(node.id)}/update-image`, {
+                version: version.trim() || null,
+              })
+              toast.success("Reiniciando con la imagen nueva; volverá a unirse en unos minutos")
+              onChanged()
+            } catch (err) {
+              toast.error(errMsg(err))
+            } finally {
+              setBusy(false)
+            }
+          }}
+        >
+          <ArrowUpCircle size={12} /> Actualizar imagen
+        </button>
+      )}
+      {live && (
+        <button
+          type="button"
+          className={`${btnCls} text-red-600 dark:text-red-300`}
           disabled={busy}
           onClick={async () => {
             if (!window.confirm(`¿Terminar ${node.name}? Deja de cobrarse y sale de la federación.`)) return

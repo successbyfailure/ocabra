@@ -92,3 +92,15 @@ class CloudNodeModels(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     models: list[str] = Field(..., min_length=1, max_length=10)
+
+
+class CloudNodeImageUpdate(BaseModel):
+    """Restart a running cloud node on another ocabra-node image."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str | None = Field(
+        default=None,
+        pattern=r"^\d+\.\d+\.\d+$",
+        description="Image tag X.Y.Z; empty = the configured image (usually latest)",
+    )

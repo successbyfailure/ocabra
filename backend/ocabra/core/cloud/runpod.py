@@ -33,6 +33,7 @@ def _max_cuda(a: str, b: str | None) -> str:
 
     return b if b and key(b) > key(a) else a
 
+
 _STATUS_MAP = {
     "PROVISIONING": "starting",
     "STARTING": "starting",
@@ -176,7 +177,9 @@ class RunPodClient:
             # The model cache: same data center as the volume, Secure Cloud
             # (the only one with network volumes), mounted where the node
             # entrypoint links its model and backend folders.
-            body["mounts"] = {"network": [{"volumeId": spec.network_volume_id, "path": PERSIST_PATH}]}
+            body["mounts"] = {
+                "network": [{"volumeId": spec.network_volume_id, "path": PERSIST_PATH}]
+            }
             body["cloud"] = "SECURE"
             if spec.data_center_id:
                 body["dataCenterIds"] = [spec.data_center_id]
@@ -279,6 +282,19 @@ class RunPodClient:
             )
         out.sort(key=lambda d: (-len(d["gpus"]), str(d["id"])))
         return out
+
+    async def get_pod(self, pod_id: str) -> dict[str, Any]:
+        """The pod as RunPod returns it (``env`` included)."""
+        return (await self._request("GET", f"/pods/{pod_id}")).json()
+
+    async def update_pod(self, pod_id: str, *, image: str, env: dict[str, str]) -> PodInfo:
+        """``PATCH /pods/{id}``: partial update; ``env`` replaces the whole set."""
+        resp = await self._request("PATCH", f"/pods/{pod_id}", json={"image": image, "env": env})
+        return pod_info(resp.json())
+
+    async def restart_pod(self, pod_id: str) -> None:
+        """Restart the container in place (same machine; container disk wiped)."""
+        await self._request("POST", f"/pods/{pod_id}/action", json={"action": "restart"})
 
     async def terminate_pod(self, pod_id: str) -> None:
         try:
