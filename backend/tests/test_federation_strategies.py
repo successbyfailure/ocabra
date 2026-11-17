@@ -129,6 +129,21 @@ async def test_a_model_only_a_peer_has_is_served_there_even_cold():
     assert (target, peer) == ("remote", pod)
 
 
+async def test_a_peer_only_model_resolves_by_the_public_name_it_advertises():
+    """/v1/models lists it as ``kimi-k3``: asking for that must reach the pod."""
+    pod = _make_peer(
+        peer_id="pod",
+        name="pod",
+        models=[{"model_id": BIG, "status": "loaded", "profiles": ["kimi-k3"]}],
+    )
+    resolved: dict = {}
+    target, peer = await resolve_federated(
+        "kimi-k3", _FakeModelManager(), _make_fm_with_peers(pod), resolved=resolved
+    )
+    assert (target, peer) == ("remote", pod)
+    assert resolved["model_id"] == BIG
+
+
 def test_catalog_has_cold_models_but_remote_models_stays_warm_only():
     fm = _make_fm_with_peers(_mapache("configured"))
     assert EMB in fm.get_remote_catalog()

@@ -1611,6 +1611,12 @@ async def resolve_federated(
         if canonical_state is not None:
             state = canonical_state
             model_id = canonical
+    if state is None and federation_manager is not None:
+        # A model only peers have, asked for by the public name they
+        # advertise (what /v1/models lists): their canonical id.
+        remote_id = federation_manager.remote_model_for(model_id)
+        if remote_id is not None:
+            model_id = remote_id
 
     local_loaded = state is not None and state.status == ModelStatus.LOADED
     local_known = state is not None

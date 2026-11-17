@@ -16,6 +16,17 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.98.4 — 2026-11-17
+
+### Errores corregidos
+
+- Un modelo que solo tiene otro nodo de la federación (un pod) salía en
+  `GET /v1/models` con su nombre público, pero pedirlo por ese nombre daba
+  **404** `model_not_found`: solo funcionaba con el id completo
+  (`llamacpp_mks/...`). Ahora valen los dos.
+
+---
+
 ## 0.98.2 — 2026-11-17
 
 ### Corregido
