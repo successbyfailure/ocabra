@@ -136,7 +136,7 @@ async def test_launch_rejects_unknown_models_before_renting(hub):  # noqa: F811
 async def test_preload_downloads_then_loads_on_the_node(hub, our_model):  # noqa: F811
     fm, fake = hub
     node = await fm.cloud.launch(gpu_type_id="3090", models=[MID])
-    assert node["preload_models"] == [{"model_id": MID, "status": "pending"}]
+    assert node["preload_models"] == [{"model_id": MID, "status": "pending", "load": True}]
     fake.pods[node["provider_pod_id"]].status = "running"
     spec = fake.created[0]
     await fm.join_service.create_request(
@@ -269,7 +269,7 @@ async def test_models_can_be_added_to_a_running_node(hub, our_model):  # noqa: F
     node = await fm.cloud.launch(gpu_type_id="3090")
     assert node["preload_models"] == []
     out = await fm.cloud.add_models(node["id"], [MID])
-    assert out["preload_models"] == [{"model_id": MID, "status": "pending"}]
+    assert out["preload_models"] == [{"model_id": MID, "status": "pending", "load": True}]
     again = await fm.cloud.add_models(node["id"], [MID])  # no duplicates
     assert len(again["preload_models"]) == 1
     with pytest.raises(CloudError):
@@ -544,3 +544,165 @@ async def test_model_loaded_by_hand_meanwhile_counts_as_loaded():
     assert await preload._poll_step(
         SimpleNamespace(), SimpleNamespace(), item, {("p", "m"): task}, ("p", "m")
     )
+
+
+# ── recipes: models captured from pods (core/cloud/recipes.py) ───
+
+NEMO = "llamacpp_mks/nvidia-nemotron-3.5-super-vl-120b-a12b-gguf"
+NEMO_JOB = {
+    "job_id": "j1",
+    "status": "completed",
+    "source": "huggingface",
+    "model_ref": "ggml-org/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-GGUF",
+    "artifact": "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4.gguf",
+    "register": True,
+    "register_config": {
+        "display_name": "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-GGUF",
+        "load_policy": "on_demand",
+        "backend_type": "llamacpp_mks",
+        "model_key": "nvidia-nemotron-3.5-super-vl-120b-a12b-gguf",
+        "placement": {"gpus": [0], "cpu": False},
+    },
+}
+NEMO_MODEL = {
+    "model_id": NEMO,
+    "backend_type": "llamacpp_mks",
+    "display_name": "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-GGUF",
+    "load_policy": "pin",
+    "disk_size_bytes": 76918795904,
+    "last_request_at": "2026-11-17T02:16:36+00:00",
+    "extra_config": {
+        "llama_cpp": {
+            "ctx_size": 262144,
+            "parallel_slots": 4,
+            "model_path": "/data/models/huggingface/x/NVIDIA-NVFP4.gguf",
+            "tensor_split": [1],
+        },
+        "_runtime": {"preset_key": "normal"},
+        "registry_metadata": {"source": "huggingface"},
+    },
+}
+
+
+def test_recipe_keeps_the_source_and_the_config_tuned_on_the_pod():
+    """The 120B nemotron set up by hand on the PRO 6000: where it came from
+    plus the context/slots/pin it was given, without that machine's paths."""
+    from ocabra.core.cloud.recipes import recipe_from_node
+
+    r = recipe_from_node(NEMO_JOB, NEMO_MODEL)
+    assert r["node_model_id"] == NEMO
+    download, load = r["steps"]
+    assert load == {"kind": "load"}
+    body = download["body"]
+    assert body["model_ref"] == NEMO_JOB["model_ref"] and body["artifact"] == NEMO_JOB["artifact"]
+    rc = body["register_config"]
+    assert rc["load_policy"] == "pin" and "placement" not in rc
+    assert rc["extra_config"] == {"llama_cpp": {"ctx_size": 262144, "parallel_slots": 4}}
+    assert r["source"].startswith("huggingface: ggml-org/")
+
+
+async def test_drive_runs_a_recipe_and_can_download_without_loading():
+    """A recipe item uses its own steps (no model of ours behind); with
+    ``load: False`` it ends «ready», downloaded but not loaded."""
+    from ocabra.core.cloud import preload
+    from ocabra.core.cloud.recipes import recipe_from_node
+
+    steps = recipe_from_node(NEMO_JOB, NEMO_MODEL)["steps"]
+    jobs: dict = {}
+    calls = []
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        return httpx.Response(200, json=jobs[path.rsplit("/", 1)[1]])
+
+    async def proxy_request(peer, path, body, headers, timeout=None):  # noqa: ASYNC109
+        calls.append((path, body))
+        jobs["j0"] = {"status": "completed", "progress_pct": 100}
+        return httpx.Response(200, json={"job_id": "j0"})
+
+    async def no_rows(*_a):  # a recipe never looks for one of our models
+        raise AssertionError("looked up our models")
+
+    fm = SimpleNamespace(session_factory=None, proxy_get=proxy_get, proxy_request=proxy_request)
+    peer = SimpleNamespace(peer_id="p", gpus=[], tunnel_session=None)
+    item = {"model_id": NEMO, "status": "pending", "recipe_steps": steps, "load": False}
+    mp = pytest.MonkeyPatch()
+    mp.setattr(preload, "load_model_rows", no_rows)
+    try:
+        items = await preload.drive(fm, peer, [item], {})
+        assert items[0]["status"] == "downloading"
+        items = await preload.drive(fm, peer, items, {})
+    finally:
+        mp.undo()
+    assert items[0]["status"] == "ready", items[0]
+    assert [p for p, _ in calls] == ["/ocabra/downloads"]  # never /load
+    assert calls[0][1]["register_config"]["extra_config"]["llama_cpp"]["ctx_size"] == 262144
+
+
+async def test_snapshot_reads_the_pod_and_skips_our_own_models(monkeypatch):
+    from ocabra.core.cloud import recipes
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        if path == "/ocabra/downloads":
+            other = {**NEMO_JOB, "status": "failed"}
+            return httpx.Response(200, json=[NEMO_JOB, other])
+        if path.startswith("/ocabra/models/"):
+            return httpx.Response(200, json=NEMO_MODEL)
+        raise AssertionError(path)
+
+    got = await recipes._node_recipes(SimpleNamespace(proxy_get=proxy_get), SimpleNamespace())
+    assert [r["node_model_id"] for r in got] == [NEMO]
+
+
+async def test_relaunch_and_image_update_items(monkeypatch):
+    """_preload_items: ours + recipes, «solo descargar» per id, no duplicates."""
+    from ocabra.core.cloud import recipes as recipes_mod
+    from ocabra.core.cloud.manager import CloudNodeManager
+
+    row = SimpleNamespace(id="r1", node_model_id=NEMO, steps=[{"kind": "load"}])
+
+    async def load_recipes(_sf, ids):
+        return {"r1": row} if "r1" in ids else {}
+
+    monkeypatch.setattr(recipes_mod, "load_recipes", load_recipes)
+    mgr = object.__new__(CloudNodeManager)
+    mgr.fm = SimpleNamespace(session_factory=None)
+    items = await mgr._preload_items(["llamacpp_mks/gemma4:26b"], ["r1"], ["r1"])
+    assert items[0] == {"model_id": "llamacpp_mks/gemma4:26b", "status": "pending", "load": True}
+    assert items[1]["recipe_id"] == "r1" and items[1]["load"] is False
+    with pytest.raises(CloudError):
+        await mgr._preload_items([], ["gone"], [])
+
+
+@requires_db
+async def test_snapshot_stores_and_updates_one_recipe_per_model():
+    from ocabra.core.cloud import recipes
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.cloud import CloudModelRecipe
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        if path == "/ocabra/downloads":
+            return httpx.Response(200, json=[NEMO_JOB])
+        return httpx.Response(200, json=NEMO_MODEL)
+
+    fm = SimpleNamespace(session_factory=AsyncSessionLocal, proxy_get=proxy_get)
+    try:
+        assert (
+            await recipes.snapshot(fm, SimpleNamespace(), node_name="pod-a", gpu_type_id="PRO 6000")
+            == 1
+        )
+        assert (
+            await recipes.snapshot(fm, SimpleNamespace(), node_name="pod-b", gpu_type_id="PRO 6000")
+            == 1
+        )
+        listed = [
+            r for r in await recipes.list_recipes(AsyncSessionLocal) if r["node_model_id"] == NEMO
+        ]
+        assert len(listed) == 1
+        assert listed[0]["last_node_name"] == "pod-b" and listed[0]["context"] == 262144
+        assert listed[0]["last_used_at"] is not None
+    finally:
+        async with AsyncSessionLocal() as s:
+            await s.execute(
+                sa.delete(CloudModelRecipe).where(CloudModelRecipe.node_model_id == NEMO)
+            )
+            await s.commit()

@@ -1,130 +1,21 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
-import { AlertTriangle, ArrowUpCircle, Cloud, Cpu, KeyRound, Loader2, PackagePlus, Power, Rocket, Settings2, Trash2 } from "lucide-react"
+import { AlertTriangle, ArrowUpCircle, Cloud, Cpu, KeyRound, Loader2, PackagePlus, Power, RefreshCw, Rocket, Settings2, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api, request } from "@/api/client"
 import { VolumesPanel } from "./VolumesPanel"
+import { EMPTY_PICK, ModelPicker, pickCount } from "./ModelPicker"
 import type {
   CloudDataCenter,
   CloudGpuType,
   CloudVolume,
   CloudNode,
   CloudPreloadItem,
+  CloudPreloadPick,
   CloudProviderInfo,
-  CloudReplicableModel,
   CloudSettings,
 } from "@/types"
 
-const gb = (bytes: number | null | undefined) =>
-  bytes ? `${(bytes / 1024 ** 3).toFixed(bytes > 10 * 1024 ** 3 ? 0 : 1)} GB` : "—"
-
-/**
- * Our models a cloud node can carry. Loaded-here first; the ones that can't
- * be replicated (files that only exist on this server) are shown greyed out
- * with the reason, so nothing offered can be rejected at launch.
- */
-function ModelPicker({
-  picked,
-  onChange,
-  exclude = [],
-  gpuMemoryGb,
-}: {
-  picked: string[]
-  onChange: (ids: string[]) => void
-  exclude?: string[]
-  gpuMemoryGb?: number | null
-}) {
-  const [models, setModels] = useState<CloudReplicableModel[] | null>(null)
-  const [filter, setFilter] = useState("")
-  useEffect(() => {
-    api.federation.cloud
-      .replicableModels()
-      .then(setModels)
-      .catch(() => setModels([]))
-  }, [])
-  const shown = (models ?? []).filter(
-    (m) =>
-      !exclude.includes(m.model_id) &&
-      (!filter ||
-        `${m.display_name} ${m.model_id} ${m.backend_type === "diffusers" ? "imagen" : ""}`
-          .toLowerCase()
-          .includes(filter.toLowerCase())),
-  )
-  const totalBytes = (models ?? [])
-    .filter((m) => picked.includes(m.model_id))
-    .reduce((acc, m) => acc + (m.size_bytes ?? 0), 0)
-  const tooBig = gpuMemoryGb != null && totalBytes / 1024 ** 3 > gpuMemoryGb
-
-  return (
-    <div className="rounded-md border border-border">
-      <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
-        <span className="text-sm font-medium">Modelos a llevar</span>
-        <span className="text-xs text-muted-foreground">
-          {picked.length === 0
-            ? "ninguno: el nodo arranca vacío"
-            : `${picked.length} elegidos · ${gb(totalBytes)} en disco`}
-        </span>
-        <input
-          className="ml-auto w-40 rounded-md border border-border bg-background px-2 py-1 text-xs"
-          placeholder="Filtrar…"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
-      </div>
-      {tooBig && (
-        <div className="border-b border-border bg-amber-500/10 px-3 py-1.5 text-xs text-amber-700 dark:text-amber-300">
-          Juntos ocupan más que la memoria de la GPU elegida: se cargarán de uno en uno y el nodo
-          irá sacando el anterior para meter el siguiente.
-        </div>
-      )}
-      <div className="max-h-56 overflow-y-auto">
-        {models == null ? (
-          <div className="flex items-center gap-2 px-3 py-3 text-sm text-muted-foreground">
-            <Loader2 size={14} className="animate-spin" /> Cargando modelos…
-          </div>
-        ) : shown.length === 0 ? (
-          <div className="px-3 py-3 text-sm text-muted-foreground">No hay modelos que llevar.</div>
-        ) : (
-          shown.map((m) => {
-            const on = picked.includes(m.model_id)
-            return (
-              <label
-                key={m.model_id}
-                title={m.reason ?? m.model_id}
-                className={`flex items-center gap-2 border-b border-border/50 px-3 py-1.5 text-sm last:border-b-0 ${
-                  m.replicable ? "cursor-pointer hover:bg-muted" : "cursor-not-allowed opacity-50"
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  disabled={!m.replicable}
-                  checked={on}
-                  onChange={() =>
-                    onChange(on ? picked.filter((x) => x !== m.model_id) : [...picked, m.model_id])
-                  }
-                />
-                <span className="truncate">{m.display_name}</span>
-                {m.backend_type === "diffusers" && (
-                  <span className="rounded-full border border-violet-500/40 px-1.5 text-[10px] text-violet-600 dark:text-violet-300">
-                    imagen
-                  </span>
-                )}
-                {m.loaded && (
-                  <span className="rounded-full border border-emerald-500/40 px-1.5 text-[10px] text-emerald-600 dark:text-emerald-300">
-                    cargado aquí
-                  </span>
-                )}
-                <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
-                  {m.replicable ? gb(m.size_bytes) : "no replicable"}
-                </span>
-              </label>
-            )
-          })
-        )}
-      </div>
-    </div>
-  )
-}
 
 function AddModelsDialog({
   node,
@@ -135,10 +26,10 @@ function AddModelsDialog({
   onOpenChange: (v: boolean) => void
   onDone: () => void
 }) {
-  const [picked, setPicked] = useState<string[]>([])
+  const [picked, setPicked] = useState<CloudPreloadPick>(EMPTY_PICK)
   const [busy, setBusy] = useState(false)
   useEffect(() => {
-    if (node) setPicked([])
+    if (node) setPicked(EMPTY_PICK)
   }, [node])
   return (
     <Dialog.Root open={node !== null} onOpenChange={onOpenChange}>
@@ -147,11 +38,11 @@ function AddModelsDialog({
         <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[95vw] max-w-xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-card p-5">
           <Dialog.Title className="text-lg font-semibold">Llevar modelos a {node?.name}</Dialog.Title>
           <Dialog.Description className="mt-1 text-sm text-muted-foreground">
-            Se descargan en el nodo y se cargan, con la misma configuración que aquí.
+            Se descargan en el nodo y se cargan (o solo se descargan), con la configuración que tenían.
           </Dialog.Description>
           <div className="mt-4">
             <ModelPicker
-              picked={picked}
+              value={picked}
               onChange={setPicked}
               exclude={(node?.preload_models ?? []).filter((p) => p.status !== "error").map((p) => p.model_id)}
             />
@@ -161,13 +52,16 @@ function AddModelsDialog({
             <button
               type="button"
               className={primaryBtnCls}
-              disabled={busy || picked.length === 0 || !node}
+              disabled={busy || pickCount(picked) === 0 || !node}
               onClick={async () => {
                 if (!node) return
                 setBusy(true)
                 try {
-                  await api.federation.cloud.addModels(node.id, picked)
-                  toast.success("Modelos en cola: se descargarán y cargarán en el nodo")
+                  await api.federation.cloud.addModels(node.id, picked.models, {
+                    recipes: picked.recipes,
+                    download_only: picked.downloadOnly,
+                  })
+                  toast.success("Modelos en cola en el nodo")
                   onOpenChange(false)
                   onDone()
                 } catch (err) {
@@ -397,16 +291,47 @@ function SettingsDialog({
   )
 }
 
+/** «Relanzar»: an earlier node's setup, to launch the same again. */
+export interface LaunchPreset {
+  nodeName: string
+  gpuId: string
+  count: number
+  cloudType: "COMMUNITY" | "SECURE"
+  volumeId: string
+  zeroData: boolean
+  pick: CloudPreloadPick
+}
+
+export function presetFromNode(node: CloudNode): LaunchPreset {
+  const items = node.preload_models ?? []
+  const key = (i: CloudPreloadItem) => i.recipe_id ?? i.model_id
+  return {
+    nodeName: node.name,
+    gpuId: node.gpu_type_id,
+    count: node.gpu_count,
+    cloudType: node.cloud_type === "SECURE" ? "SECURE" : "COMMUNITY",
+    volumeId: node.network_volume_id ?? "",
+    zeroData: node.privacy_mode === "zero_data",
+    pick: {
+      models: items.filter((i) => !i.recipe_id).map((i) => i.model_id),
+      recipes: items.filter((i) => i.recipe_id).map((i) => i.recipe_id as string),
+      downloadOnly: items.filter((i) => i.load === false).map(key),
+    },
+  }
+}
+
 function LaunchDialog({
   open,
   onOpenChange,
   info,
   onLaunched,
+  preset,
 }: {
   open: boolean
   onOpenChange: (v: boolean) => void
   info: CloudProviderInfo
   onLaunched: () => void
+  preset?: LaunchPreset | null
 }) {
   const [gpus, setGpus] = useState<CloudGpuType[] | null>(null)
   const [gpuId, setGpuId] = useState("")
@@ -416,7 +341,7 @@ function LaunchDialog({
   const [idle, setIdle] = useState(info.settings.default_idle_minutes)
   const [name, setName] = useState("")
   const [busy, setBusy] = useState(false)
-  const [picked, setPicked] = useState<string[]>([])
+  const [picked, setPicked] = useState<CloudPreloadPick>(EMPTY_PICK)
   const [volumes, setVolumes] = useState<CloudVolume[]>([])
   const [dataCenters, setDataCenters] = useState<CloudDataCenter[]>([])
   const [volumeId, setVolumeId] = useState("")
@@ -424,15 +349,16 @@ function LaunchDialog({
 
   useEffect(() => {
     if (!open) return
-    setPicked([])
-    setVolumeId("")
-    setZeroData(false)
+    setPicked(preset?.pick ?? EMPTY_PICK)
+    setVolumeId(preset?.volumeId ?? "")
+    setZeroData(preset?.zeroData ?? false)
     api.federation.cloud.volumes().then(setVolumes).catch(() => setVolumes([]))
     api.federation.cloud.dataCenters().then(setDataCenters).catch(() => setDataCenters([]))
-    setCloudType(info.settings.cloud_type)
+    setCloudType(preset?.cloudType ?? info.settings.cloud_type)
     setTtl(info.settings.default_ttl_minutes)
     setIdle(info.settings.default_idle_minutes)
-    setCount(1)
+    setCount(preset?.count ?? 1)
+    setGpuId(preset?.gpuId ?? "")
     setName("")
     setGpus(null)
     api.federation.cloud
@@ -482,7 +408,9 @@ function LaunchDialog({
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
         <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[95vw] max-w-2xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-border bg-card p-5">
-          <Dialog.Title className="text-lg font-semibold">Lanzar nodo en RunPod</Dialog.Title>
+          <Dialog.Title className="text-lg font-semibold">
+            {preset ? `Relanzar como ${preset.nodeName}` : "Lanzar nodo en RunPod"}
+          </Dialog.Title>
           <Dialog.Description className="mt-1 text-sm text-muted-foreground">
             Se une solo a esta federación en modo enjambre y descarga y carga los modelos que elijas.
           </Dialog.Description>
@@ -605,9 +533,10 @@ function LaunchDialog({
 
           <div className="mt-3">
             <ModelPicker
-              picked={picked}
+              value={picked}
               onChange={setPicked}
               gpuMemoryGb={chosen?.memory_gb != null ? chosen.memory_gb * count : null}
+              autoRecipesFrom={open ? (preset?.nodeName ?? null) : null}
             />
           </div>
 
@@ -644,7 +573,9 @@ function LaunchDialog({
                     max_runtime_minutes: ttl,
                     idle_shutdown_minutes: idle,
                     name: name.trim() || undefined,
-                    models: picked,
+                    models: picked.models,
+                    recipes: picked.recipes,
+                    download_only: picked.downloadOnly,
                   })
                   toast.success(`${node.name} lanzado: tardará unos minutos en unirse`)
                   onOpenChange(false)
@@ -675,6 +606,7 @@ function PreloadChip({ item }: { item: CloudPreloadItem }) {
     downloading: `descargando${pct}${steps}`,
     loading: "cargando",
     loaded: "listo",
+    ready: "descargado",
     error: "error",
   }[item.status]
   const cls = {
@@ -684,11 +616,14 @@ function PreloadChip({ item }: { item: CloudPreloadItem }) {
     downloading: "border-sky-500/40 text-sky-700 dark:text-sky-300",
     loading: "border-sky-500/40 text-sky-700 dark:text-sky-300",
     loaded: "border-emerald-500/40 text-emerald-600 dark:text-emerald-300",
+    ready: "border-emerald-500/30 text-muted-foreground",
     error: "border-red-500/40 text-red-600 dark:text-red-300",
   }[item.status]
   return (
     <span title={item.error ?? item.phase ?? undefined} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${cls}`}>
-      {item.status !== "pending" && item.status !== "loaded" && item.status !== "error" && <Loader2 size={10} className="animate-spin" />}
+      {item.status !== "pending" && item.status !== "loaded" && item.status !== "ready" && item.status !== "error" && (
+        <Loader2 size={10} className="animate-spin" />
+      )}
       <span className="font-mono">{item.model_id.split("/").pop()}</span> · {label}
     </span>
   )
@@ -698,10 +633,12 @@ function NodeRow({
   node,
   onChanged,
   onAddModels,
+  onRelaunch,
 }: {
   node: CloudNode
   onChanged: () => void
   onAddModels?: (node: CloudNode) => void
+  onRelaunch?: (node: CloudNode) => void
 }) {
   const [busy, setBusy] = useState(false)
   const st = STATUS[node.status] ?? STATUS.error
@@ -732,6 +669,16 @@ function NodeRow({
         </div>
       )}
       {node.error && <span className="w-full text-xs text-red-600 dark:text-red-300">{node.error}</span>}
+      {!live && onRelaunch && (
+        <button
+          type="button"
+          className={`${btnCls} ml-auto`}
+          title="Misma GPU, disco, privacidad y modelos (también los que se le pusieron a mano)"
+          onClick={() => onRelaunch(node)}
+        >
+          <RefreshCw size={12} /> Relanzar
+        </button>
+      )}
       {live && onAddModels && (
         <button type="button" className={`${btnCls} ml-auto`} onClick={() => onAddModels(node)}>
           <PackagePlus size={12} /> Llevar modelos
@@ -801,6 +748,7 @@ export function CloudSection() {
   const [info, setInfo] = useState<CloudProviderInfo | null>(null)
   const [nodes, setNodes] = useState<CloudNode[]>([])
   const [launchOpen, setLaunchOpen] = useState(false)
+  const [launchPreset, setLaunchPreset] = useState<LaunchPreset | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showOld, setShowOld] = useState(false)
   const [addingTo, setAddingTo] = useState<CloudNode | null>(null)
@@ -929,7 +877,18 @@ export function CloudSection() {
                   {showOld ? "Ocultar" : "Ver"} terminados ({old.length})
                 </button>
               )}
-              {showOld && old.map((n) => <NodeRow key={n.id} node={n} onChanged={() => void load()} />)}
+              {showOld &&
+                old.map((n) => (
+                  <NodeRow
+                    key={n.id}
+                    node={n}
+                    onChanged={() => void load()}
+                    onRelaunch={(node) => {
+                      setLaunchPreset(presetFromNode(node))
+                      setLaunchOpen(true)
+                    }}
+                  />
+                ))}
             </div>
           </>
         )}
@@ -939,7 +898,16 @@ export function CloudSection() {
 
       {info.has_api_key && (
         <>
-          <LaunchDialog open={launchOpen} onOpenChange={setLaunchOpen} info={info} onLaunched={() => void load()} />
+          <LaunchDialog
+            open={launchOpen}
+            onOpenChange={(v) => {
+              setLaunchOpen(v)
+              if (!v) setLaunchPreset(null)
+            }}
+            info={info}
+            onLaunched={() => void load()}
+            preset={launchPreset}
+          />
           <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} info={info} onSaved={() => void load()} />
           <AddModelsDialog node={addingTo} onOpenChange={(v) => !v && setAddingTo(null)} onDone={() => void load()} />
         </>

@@ -1936,6 +1936,8 @@ export interface CloudNode {
   last_active_at: string | null;
   terminated_at: string | null;
   terminate_reason: string | null;
+  /** What it was launched with (null for nodes launched before 0.101). */
+  privacy_mode?: "functional" | "zero_data" | null;
 }
 
 export interface CloudReplicableModel {
@@ -1950,8 +1952,13 @@ export interface CloudReplicableModel {
 
 export interface CloudPreloadItem {
   model_id: string;
-  status: "pending" | "installing" | "downloading" | "registering" | "loading" | "loaded" | "error";
+  /** ready: downloaded and registered, not loaded («solo descargar»). */
+  status: "pending" | "installing" | "downloading" | "registering" | "loading" | "loaded" | "ready" | "error";
   progress?: number;
+  /** A model captured from an earlier pod (not one of ours). */
+  recipe_id?: string;
+  /** false: download only, load when asked for. */
+  load?: boolean;
   error?: string;
   node_model_id?: string;
   /** Replication steps (backend install, downloads, register, load). */
@@ -1969,9 +1976,39 @@ export interface CloudNodeLaunch {
   idle_shutdown_minutes?: number;
   name?: string;
   models?: string[];
+  /** Models captured from earlier pods (GET /cloud/recipes ids). */
+  recipes?: string[];
+  /** Ids from models/recipes to download but not load. */
+  download_only?: string[];
   /** Network volume to mount as the node's model/backend cache. */
   volume_id?: string;
   privacy_mode?: "functional" | "zero_data";
+}
+
+/** A model a pod had (set up there, e.g. by hand in its panel), offered again. */
+export interface CloudRecipe {
+  id: string;
+  node_model_id: string;
+  display_name: string;
+  backend_type: string;
+  /** "huggingface: repo · file", "ollama: tag". */
+  source: string | null;
+  size_bytes: number | null;
+  context: number | null;
+  parallel: number | null;
+  vram_estimate_mb: number | null;
+  last_node_name: string | null;
+  last_gpu_type_id: string | null;
+  last_used_at: string | null;
+  captured_at: string;
+}
+
+/** What the launch dialog takes along: our models and pod recipes. */
+export interface CloudPreloadPick {
+  models: string[];
+  recipes: string[];
+  /** Ids (of either) to download but not load. */
+  downloadOnly: string[];
 }
 
 export interface CloudVolume {

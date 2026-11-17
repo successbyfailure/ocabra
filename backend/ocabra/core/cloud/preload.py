@@ -478,27 +478,41 @@ async def drive(
     key = (peer.peer_id, active["model_id"])
     try:
         if active["status"] == "pending" or "steps" not in active:
-            rows = await load_model_rows(fm.session_factory, [active["model_id"]])
-            row = rows.get(active["model_id"])
-            if row is None:
-                raise CloudError("El modelo ya no existe aquí", 400)
-            plan = await asyncio.to_thread(plan_replication, row, _node_gpu_total(peer))
-            need = plan.get("min_node_version")
-            have = _node_version(peer)
-            if need and have is not None and have < tuple(need):
-                raise CloudError(
-                    "El nodo es de una versión anterior que no sabe copiar este modelo "
-                    f"(tiene {'.'.join(map(str, have))}); lánzalo de nuevo con la imagen actual",
-                    409,
-                )
-            active.update(steps=plan["steps"], step=0, node_model_id=plan["node_model_id"])
+            if active.get("recipe_steps"):
+                # A recipe captured from a pod (core/cloud/recipes.py): its
+                # own steps, no model of ours behind it.
+                plan = {
+                    "steps": copy.deepcopy(active["recipe_steps"]),
+                    "node_model_id": active["model_id"],
+                }
+            else:
+                rows = await load_model_rows(fm.session_factory, [active["model_id"]])
+                row = rows.get(active["model_id"])
+                if row is None:
+                    raise CloudError("El modelo ya no existe aquí", 400)
+                plan = await asyncio.to_thread(plan_replication, row, _node_gpu_total(peer))
+                need = plan.get("min_node_version")
+                have = _node_version(peer)
+                if need and have is not None and have < tuple(need):
+                    raise CloudError(
+                        "El nodo es de una versión anterior que no sabe copiar este modelo "
+                        f"(tiene {'.'.join(map(str, have))}); lánzalo de nuevo con la imagen actual",
+                        409,
+                    )
+            steps = plan["steps"]
+            if active.get("load") is False:
+                # «Solo descargar»: on the node, ready, loaded when asked for.
+                steps = [s for s in steps if s["kind"] != "load"]
+            active.update(steps=steps, step=0, node_model_id=plan["node_model_id"])
             done = await _start_step(fm, peer, active, tasks, key)
         else:
             done = await _poll_step(fm, peer, active, tasks, key)
         while done:
             active["step"] += 1
             if active["step"] >= len(active["steps"]):
-                active.update(status="loaded", phase=None)
+                active.update(
+                    status="loaded" if active.get("load") is not False else "ready", phase=None
+                )
                 active.pop("progress", None)
                 break
             done = await _start_step(fm, peer, active, tasks, key)

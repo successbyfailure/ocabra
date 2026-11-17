@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class CloudSettingsUpdate(BaseModel):
@@ -52,6 +52,16 @@ class CloudNodeLaunch(BaseModel):
         max_length=10,
         description="Our model ids to download and load on the node once it joins",
     )
+    recipes: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Recipe ids (GET /cloud/recipes): models captured from earlier pods",
+    )
+    download_only: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Ids from models/recipes to download but not load (loaded when asked for)",
+    )
     privacy_mode: str = Field(
         default="functional",
         pattern=r"^(functional|zero_data)$",
@@ -91,7 +101,15 @@ class CloudNodeModels(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    models: list[str] = Field(..., min_length=1, max_length=10)
+    models: list[str] = Field(default_factory=list, max_length=10)
+    recipes: list[str] = Field(default_factory=list, max_length=10)
+    download_only: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> CloudNodeModels:
+        if not self.models and not self.recipes:
+            raise ValueError("Elige al menos un modelo")
+        return self
 
 
 class CloudNodeImageUpdate(BaseModel):

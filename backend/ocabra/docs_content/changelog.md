@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.101.0 — 2026-11-17
+
+### Nuevo
+
+- **Recetas de modelos para nodos en la nube.** El servidor recuerda los
+  modelos que han tenido los pods (también los descargados y configurados a
+  mano en su panel): de dónde salen y con qué configuración. Los guarda cada
+  10 minutos y justo antes de terminar un pod o cambiarle la imagen.
+  `GET /ocabra/cloud/recipes` los lista (los más usados recientemente,
+  primero) y `DELETE /ocabra/cloud/recipes/{id}` olvida uno.
+- `POST /ocabra/cloud/nodes` y `POST /ocabra/cloud/nodes/{id}/models` aceptan
+  `recipes` (ids de esas recetas) y `download_only` (ids de modelos o recetas
+  que solo se descargan, sin cargarlos al arrancar; se cargan cuando se
+  piden). La precarga de esos queda en el estado nuevo `ready`.
+- Los nodos dicen con qué modo de privacidad se lanzaron (`privacy_mode`).
+
+### Cambios
+
+- Al cambiar la imagen de un pod (`update-image`), vuelve a tener también los
+  modelos que se le pusieron a mano, no solo los de su precarga.
+
+---
+
 ## 0.100.0 — 2026-11-17
 
 ### Cambios

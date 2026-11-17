@@ -278,9 +278,63 @@ async def add_node_models(
         The node with its updated ``preload_models``.
     """
     try:
-        return await _cloud(request).add_models(node_id, body.models)
+        return await _cloud(request).add_models(
+            node_id, body.models, recipes=body.recipes, download_only=body.download_only
+        )
     except Exception as exc:
         raise _err(exc) from exc
+
+
+# ── model recipes (core/cloud/recipes.py) ────────────────────────
+
+
+@router.get(
+    "/cloud/recipes",
+    summary="Models captured from earlier cloud nodes",
+    description=(
+        "Models that pods downloaded and set up (e.g. by hand in their panel), with "
+        "where they come from and their config, so a new pod can get them again. "
+        "Most recently used first. Pass their ids as `recipes` when launching."
+    ),
+)
+async def list_recipes(
+    request: Request, _user: UserContext = Depends(require_role("system_admin"))
+) -> list[dict]:
+    """List model recipes.
+
+    Returns:
+        ``[{id, node_model_id, display_name, backend_type, source, size_bytes,
+        context, parallel, last_node_name, last_used_at, captured_at}]``.
+    """
+    from ocabra.core.cloud import recipes
+
+    return await recipes.list_recipes(_cloud(request).fm.session_factory)
+
+
+@router.delete(
+    "/cloud/recipes/{recipe_id}",
+    summary="Forget a model recipe",
+    responses={404: {"description": "Not found"}},
+)
+async def delete_recipe(
+    recipe_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Delete a recipe (it comes back if a live pod still has the model).
+
+    Returns:
+        ``{"ok": True}``.
+    """
+    from ocabra.core.cloud import recipes
+
+    try:
+        ok = await recipes.delete_recipe(_cloud(request).fm.session_factory, recipe_id)
+    except ValueError:
+        ok = False
+    if not ok:
+        raise HTTPException(status_code=404, detail="Receta no encontrada")
+    return {"ok": True}
 
 
 # ── network volumes ──────────────────────────────────────────────

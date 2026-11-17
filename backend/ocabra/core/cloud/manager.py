@@ -34,6 +34,10 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 RECONCILE_INTERVAL_S = 30
+# Recipes of what a live node has (core/cloud/recipes.py): captured this often,
+# plus right before terminating or restarting it.
+RECIPE_SNAPSHOT_EVERY_S = 600
+RECIPE_SNAPSHOT_TIMEOUT_S = 30
 STARTUP_DELAY_S = 15
 POD_NAME_PREFIX = "ocabra-"
 # A pod that has been running this long without joining us is broken (bad
@@ -167,6 +171,9 @@ class CloudNodeManager:
         # the pod's start. In memory: after a hub restart it counts from the
         # start again, which at worst terminates a node that failed to rejoin.
         self._rejoin_since: dict[str, datetime] = {}
+        # node id → monotonic time of its last recipe capture.
+        self._recipes_at: dict[str, float] = {}
+        self._recipe_tasks: set[asyncio.Task] = set()
 
     @staticmethod
     def _default_client_factory(provider: str, api_key: str) -> CloudProviderClient:
@@ -431,6 +438,7 @@ class CloudNodeManager:
             "last_active_at": row.last_active_at,
             "terminated_at": row.terminated_at,
             "terminate_reason": row.terminate_reason,
+            "privacy_mode": row.privacy_mode,
         }
 
     async def list_nodes(self, *, include_terminated: bool = True) -> list[dict[str, Any]]:
@@ -458,17 +466,22 @@ class CloudNodeManager:
         provider: str = "runpod",
         volume_id: str | None = None,
         privacy_mode: str = "functional",
+        recipes: list[str] | None = None,
+        download_only: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a pod that joins us as a swarm peer. Returns the node.
 
         *models* are our model ids to replicate there once it joins
         (see core/cloud/preload.py); they are validated before renting anything.
+        *recipes* are models captured from earlier pods (core/cloud/recipes.py).
+        *download_only*: ids (of either) to download but not load.
         """
         from ocabra.core.cloud import preload
         from ocabra.db.cloud import CloudNode
 
         models = list(dict.fromkeys(models or []))
         await preload.validate_models(self.fm.session_factory, models)
+        preload_items = await self._preload_items(models, recipes or [], download_only or [])
 
         cfg = (await self.get_provider(provider))["settings"]
         hub_url = (cfg.get("hub_url") or getattr(self.fm.settings, "public_url", "") or "").rstrip(
@@ -566,9 +579,10 @@ class CloudNodeManager:
                 idle_shutdown_minutes=idle or None,
                 invite_id=uuid.UUID(invite["id"]),
                 started_at=_now(),
-                preload_models=[{"model_id": m, "status": "pending"} for m in models] or None,
+                preload_models=preload_items or None,
                 network_volume_id=volume_id,
                 data_center_id=data_center,
+                privacy_mode=privacy_mode,
             )
             session.add(row)
             await session.commit()
@@ -582,13 +596,45 @@ class CloudNodeManager:
         )
         return out
 
-    async def add_models(self, node_id: str, models: list[str]) -> dict[str, Any]:
-        """Queue more of our models for a node that is already running."""
+    async def _preload_items(
+        self, models: list[str], recipe_ids: list[str], download_only: list[str]
+    ) -> list[dict[str, Any]]:
+        """Preload entries for our *models* and captured *recipe_ids*."""
+        from ocabra.core.cloud import recipes as recipes_mod
+
+        skip_load = set(download_only)
+        items: list[dict[str, Any]] = [
+            {"model_id": m, "status": "pending", "load": m not in skip_load} for m in models
+        ]
+        rows = await recipes_mod.load_recipes(
+            self.fm.session_factory, list(dict.fromkeys(recipe_ids))
+        )
+        missing = [r for r in recipe_ids if r not in rows]
+        if missing:
+            raise CloudError("Esa receta de modelo ya no existe", 400)
+        taken = {m for m in models}
+        for rid in dict.fromkeys(recipe_ids):
+            row = rows[rid]
+            if row.node_model_id in taken:
+                continue
+            taken.add(row.node_model_id)
+            items.append(recipes_mod.preload_item(row, load=rid not in skip_load))
+        return items
+
+    async def add_models(
+        self,
+        node_id: str,
+        models: list[str],
+        recipes: list[str] | None = None,
+        download_only: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Queue more of our models (or captured recipes) for a running node."""
         from ocabra.core.cloud import preload
         from ocabra.db.cloud import CloudNode
 
         models = list(dict.fromkeys(models))
         await preload.validate_models(self.fm.session_factory, models)
+        new_items = await self._preload_items(models, recipes or [], download_only or [])
         async with self.fm.session_factory() as session:
             row = await session.get(CloudNode, uuid.UUID(node_id))
             if row is None:
@@ -597,16 +643,38 @@ class CloudNodeManager:
                 raise CloudError("El nodo ya no está en marcha", 409)
             items = list(row.preload_models or [])
             present = {i["model_id"] for i in items if i.get("status") != "error"}
+            wanted = {i["model_id"] for i in new_items}
             # A model that failed before can be retried by adding it again.
             items = [
-                i for i in items if not (i["model_id"] in models and i.get("status") == "error")
+                i for i in items if not (i["model_id"] in wanted and i.get("status") == "error")
             ]
-            items += [{"model_id": m, "status": "pending"} for m in models if m not in present]
+            items += [i for i in new_items if i["model_id"] not in present]
             row.preload_models = items
             await session.commit()
             out = self._node_out(row)
-        logger.info("cloud_node_models_added", node=out["name"], models=models)
+        logger.info("cloud_node_models_added", node=out["name"], models=sorted(wanted))
         return out
+
+    async def _capture_recipes(
+        self, *, peer_id: Any, node_name: str, gpu_type_id: str | None
+    ) -> None:
+        """Keep the recipes of the models a live node has (core/cloud/recipes.py)."""
+        from ocabra.core.cloud import recipes
+
+        peer = (
+            next((p for p in self.fm.get_all_peers() if p.peer_id == str(peer_id)), None)
+            if peer_id is not None
+            else None
+        )
+        if peer is None or not peer.online:
+            return
+        try:
+            await asyncio.wait_for(
+                recipes.snapshot(self.fm, peer, node_name=node_name, gpu_type_id=gpu_type_id),
+                timeout=RECIPE_SNAPSHOT_TIMEOUT_S,
+            )
+        except Exception as exc:  # noqa: BLE001 — a recipe is never worth failing for
+            logger.warning("cloud_recipes_capture_failed", node=node_name, error=str(exc))
 
     async def update_image(self, node_id: str, version: str | None = None) -> dict[str, Any]:
         """Point a running pod at another ``ocabra-node`` image and restart it.
@@ -629,6 +697,9 @@ class CloudNodeManager:
                 raise CloudError("El nodo no está en marcha", 409)
             pod_id, provider, name = row.provider_pod_id, row.provider, row.name
             old_peer, old_invite = row.peer_id, row.invite_id
+            gpu_type_id = row.gpu_type_id
+        # Its disk is about to be wiped: keep what it has so it comes back.
+        await self._capture_recipes(peer_id=old_peer, node_name=name, gpu_type_id=gpu_type_id)
         cfg = (await self.get_provider(provider))["settings"]
         repo = (
             str(cfg["image"]).rsplit(":", 1)[0]
@@ -676,12 +747,42 @@ class CloudNodeManager:
             row.peer_id = None
             row.status = "starting"
             row.error = None
-            row.preload_models = [
-                {"model_id": i["model_id"], "status": "pending"} for i in (row.preload_models or [])
-            ] or None
+            row.preload_models = (
+                await self._requeue_after_wipe(row.preload_models or [], node_name=name) or None
+            )
             await session.commit()
             out = self._node_out(row)
         logger.info("cloud_node_image_updated", node=name, image=image)
+        return out
+
+    async def _requeue_after_wipe(
+        self, items: list[dict[str, Any]], *, node_name: str
+    ) -> list[dict[str, Any]]:
+        """Preload after the node's disk was wiped: what it had queued, plus the
+        models captured from it (set up by hand in its panel) that weren't."""
+        import sqlalchemy as sa
+
+        from ocabra.core.cloud import recipes as recipes_mod
+        from ocabra.db.cloud import CloudModelRecipe
+
+        keep = ("model_id", "recipe_id", "recipe_steps", "load")
+        out = [{**{k: i[k] for k in keep if k in i}, "status": "pending"} for i in items]
+        have = {i["model_id"] for i in out}
+        async with self.fm.session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        sa.select(CloudModelRecipe).where(
+                            CloudModelRecipe.last_node_name == node_name
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for row in rows:
+            if row.node_model_id not in have:
+                out.append(recipes_mod.preload_item(row, load=True))
         return out
 
     async def terminate(self, node_id: str, *, reason: str = "manual") -> dict[str, Any]:
@@ -695,6 +796,10 @@ class CloudNodeManager:
             pod_id, provider = row.provider_pod_id, row.provider
             peer_id, invite_id = row.peer_id, row.invite_id
             already = row.status == "terminated"
+            name, gpu_type_id = row.name, row.gpu_type_id
+        if not already:
+            # Last chance to learn what it had (models set up by hand in it).
+            await self._capture_recipes(peer_id=peer_id, node_name=name, gpu_type_id=gpu_type_id)
         if not already and pod_id:
             client = await self._client(provider)
             try:
@@ -846,6 +951,21 @@ class CloudNodeManager:
                         # copy (backend install + tens of GB) outlasts the
                         # idle timeout.
                         row.last_active_at = now
+                    if (
+                        peer is not None
+                        and peer.online
+                        and time.monotonic() - self._recipes_at.get(str(row.id), 0.0)
+                        >= RECIPE_SNAPSHOT_EVERY_S
+                    ):
+                        self._recipes_at[str(row.id)] = time.monotonic()
+                        task = asyncio.create_task(
+                            self._capture_recipes(
+                                peer_id=row.peer_id, node_name=row.name, gpu_type_id=row.gpu_type_id
+                            ),
+                            name=f"cloud-recipes-{row.name}",
+                        )
+                        self._recipe_tasks.add(task)
+                        task.add_done_callback(self._recipe_tasks.discard)
                     if peer is not None and peer.last_proxied_at:
                         active = datetime.fromtimestamp(peer.last_proxied_at, UTC)
                         if row.last_active_at is None or active > row.last_active_at:

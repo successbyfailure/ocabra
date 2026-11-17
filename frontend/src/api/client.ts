@@ -3825,8 +3825,21 @@ export const api = {
         request<CloudNode>("DELETE", `/ocabra/cloud/nodes/${encodeURIComponent(id)}`),
       replicableModels: async (): Promise<CloudReplicableModel[]> =>
         request<CloudReplicableModel[]>("GET", "/ocabra/cloud/replicable-models"),
-      addModels: async (id: string, models: string[]): Promise<CloudNode> =>
-        request<CloudNode>("POST", `/ocabra/cloud/nodes/${encodeURIComponent(id)}/models`, { models }),
+      addModels: async (
+        id: string,
+        models: string[],
+        opts: { recipes?: string[]; download_only?: string[] } = {},
+      ): Promise<CloudNode> =>
+        request<CloudNode>("POST", `/ocabra/cloud/nodes/${encodeURIComponent(id)}/models`, {
+          models,
+          ...opts,
+        }),
+      /** Models captured from earlier pods (core/cloud/recipes.py). */
+      recipes: async (): Promise<import("@/types").CloudRecipe[]> =>
+        request<import("@/types").CloudRecipe[]>("GET", "/ocabra/cloud/recipes"),
+      deleteRecipe: async (id: string): Promise<void> => {
+        await request<unknown>("DELETE", `/ocabra/cloud/recipes/${encodeURIComponent(id)}`)
+      },
       volumes: async (): Promise<import("@/types").CloudVolume[]> =>
         request<import("@/types").CloudVolume[]>("GET", "/ocabra/cloud/volumes"),
       dataCenters: async (): Promise<import("@/types").CloudDataCenter[]> =>
