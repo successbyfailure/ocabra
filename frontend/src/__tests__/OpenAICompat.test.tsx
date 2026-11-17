@@ -53,6 +53,18 @@ function jsonResponse(body: unknown) {
   return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))
 }
 
+/** The first voice row's select, once the profile options are rendered.
+ *  Waiting for the API call is not enough: setting a <select> to a value it
+ *  has no <option> for is ignored, and on a slow runner (GitHub CI) the
+ *  options were not there yet, so nothing was saved. */
+async function firstRowSelectWithOption(value: string): Promise<HTMLSelectElement> {
+  return waitFor(() => {
+    const select = screen.getAllByRole("combobox")[0] as HTMLSelectElement
+    expect(select.querySelector(`option[value="${value}"]`)).not.toBeNull()
+    return select
+  })
+}
+
 describe("OpenAICompat", () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -80,9 +92,7 @@ describe("OpenAICompat", () => {
     api.openaiTtsCompat.upsert.mockResolvedValue(entry("tts-1", "alloy", "piper-es-mx-claude-high"))
 
     render(<OpenAICompat />)
-    await waitFor(() => expect(api.profiles.listAll).toHaveBeenCalled())
-
-    const alloyRowSelect = screen.getAllByRole("combobox")[0]
+    const alloyRowSelect = await firstRowSelectWithOption("piper-es-mx-claude-high")
     fireEvent.change(alloyRowSelect, { target: { value: "piper-es-mx-claude-high" } })
 
     await waitFor(() =>
@@ -96,9 +106,9 @@ describe("OpenAICompat", () => {
     api.openaiTtsCompat.delete.mockResolvedValue(undefined)
 
     render(<OpenAICompat />)
-    await waitFor(() => expect(api.openaiTtsCompat.list).toHaveBeenCalled())
-
-    const alloyRowSelect = screen.getAllByRole("combobox")[0]
+    // The pinned value must be selected first, or going back to "" is no change.
+    const alloyRowSelect = await firstRowSelectWithOption("piper-es-mx-claude-high")
+    await waitFor(() => expect(alloyRowSelect.value).toBe("piper-es-mx-claude-high"))
     fireEvent.change(alloyRowSelect, { target: { value: "" } })
 
     await waitFor(() => expect(api.openaiTtsCompat.delete).toHaveBeenCalledWith("tts-1", "alloy"))
