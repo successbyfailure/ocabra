@@ -32,11 +32,9 @@ no requests in flight, no active batches, no downloads — for
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 import shlex
-import socket
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -95,33 +93,20 @@ class Deployment:
         return self.kind == "compose"
 
 
-async def _run(*args: str, timeout: float = 30.0) -> tuple[int, str, str]:  # noqa: ASYNC109
-    proc = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return 124, "", "timeout"
-    return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
-
-
 async def detect_deployment() -> Deployment:
     """How this API runs, read from its own container's compose labels."""
     if os.environ.get("OCABRA_NODE_IMAGE") == "1":
         return Deployment("node", "Imagen ocabra-node: se reemplaza desde el hub.")
-    if not os.path.exists("/var/run/docker.sock"):  # noqa: ASYNC240 — one stat
+    from ocabra.core import docker_ops
+
+    if not docker_ops.available():
         return Deployment("manual", "Sin acceso a Docker (no hay /var/run/docker.sock).")
-    container = socket.gethostname()
-    code, out, err = await _run("docker", "inspect", container)
-    if code != 0:
-        return Deployment("manual", f"No se pudo inspeccionar el contenedor: {err.strip()[:200]}")
-    try:
-        info = json.loads(out)[0]
-    except (ValueError, IndexError):
-        return Deployment("manual", "Respuesta inesperada de docker inspect.")
+    result = await docker_ops.call("self.deployment")
+    return Deployment(**result["deployment"])
+
+
+def deployment_from_inspect(info: dict, fallback_name: str) -> Deployment:
+    """A :class:`Deployment` from the ``docker inspect`` of the api container."""
     labels = (info.get("Config") or {}).get("Labels") or {}
     project = labels.get("com.docker.compose.project")
     working_dir = labels.get("com.docker.compose.project.working_dir")
@@ -136,7 +121,7 @@ async def detect_deployment() -> Deployment:
         project=project,
         working_dir=working_dir,
         config_files=files,
-        container=info.get("Name", "").lstrip("/") or container,
+        container=info.get("Name", "").lstrip("/") or fallback_name,
         api_image=image,
     )
     repo = settings.self_update_image_repo.rstrip("/") + "/ocabra-api"
@@ -147,6 +132,38 @@ async def detect_deployment() -> Deployment:
             f"OCABRA_API_IMAGE y OCABRA_FRONTEND_IMAGE tienen que apuntar a {repo}."
         )
     return dep
+
+
+def updater_launch_argv(dep: Deployment, target: str, current: str) -> list[str]:
+    """``docker run`` argv that starts the two-stage updater for ``target``.
+
+    Two stages. This image only pulls the target release and hands over to
+    it: the update itself runs with the *new* image's docker compose. With the
+    running one, a node whose compose was too old for the new
+    docker-compose.yml (v2.31 vs `gpus: all`) could never update itself.
+    """
+    script = updater_script(dep, target, current)
+    new_image = image_for("api", target)
+    mounts = (
+        f"-v /var/run/docker.sock:/var/run/docker.sock "
+        f"-v {shlex.quote(str(dep.working_dir))}:{shlex.quote(str(dep.working_dir))} "
+        f"-w {shlex.quote(str(dep.working_dir))}"
+    )
+    stage1 = (
+        f'echo "[ocabra-updater] descargando {new_image}"; '
+        f"docker pull -q {shlex.quote(new_image)} 2>&1 || "
+        f'{{ echo "[ocabra-updater] ERROR: no se pudo descargar {new_image}"; exit 5; }}; '
+        f"exec docker run --rm --label org.ocabra.updater=2 {mounts} "
+        f"--entrypoint sh {shlex.quote(new_image)} -c {shlex.quote(script)}"
+    )
+    return [
+        "docker", "run", "-d", "--name", UPDATER_NAME,
+        "--label", "org.ocabra.updater=1",
+        "-v", "/var/run/docker.sock:/var/run/docker.sock",
+        "--entrypoint", "sh",
+        str(dep.api_image),
+        "-c", stage1,
+    ]  # fmt: skip
 
 
 # ── idle check ───────────────────────────────────────────────────
@@ -342,25 +359,9 @@ class SelfUpdater:
         return out
 
     async def _updater_status(self) -> dict[str, Any] | None:
-        code, out, _ = await _run(
-            "docker", "inspect", "--format", "{{json .State}}", UPDATER_NAME, timeout=10
-        )
-        if code != 0:
-            return None
-        try:
-            st = json.loads(out)
-        except ValueError:
-            return None
-        # stderr too: an updater started by an older version did not merge it
-        # and its compose errors were only there.
-        _, out, err = await _run("docker", "logs", "--tail", "40", UPDATER_NAME, timeout=10)
-        logs = out + (("\n" + err) if err.strip() else "")
-        return {
-            "running": st.get("Running"),
-            "exit_code": st.get("ExitCode"),
-            "finished_at": st.get("FinishedAt"),
-            "log": logs.splitlines()[-40:],
-        }
+        from ocabra.core import docker_ops
+
+        return (await docker_ops.call("updater.status")).get("status")
 
     async def apply(self, version: str | None = None, *, force: bool = False) -> dict[str, Any]:
         """Start the updater container. Raises ``RuntimeError`` with the reason
@@ -380,35 +381,13 @@ class SelfUpdater:
             status = await self._updater_status()
             if status and status.get("running"):
                 raise RuntimeError("Ya hay una actualización en marcha.")
-            await _run("docker", "rm", "-f", UPDATER_NAME, timeout=20)
-            script = updater_script(dep, target, APP_VERSION)
-            # Two stages. This image only pulls the target release and hands
-            # over to it: the update itself runs with the *new* image's docker
-            # compose. With the running one, a node whose compose was too old
-            # for the new docker-compose.yml (v2.31 vs `gpus: all`) could
-            # never update itself.
-            new_image = image_for("api", target)
-            mounts = (
-                f"-v /var/run/docker.sock:/var/run/docker.sock "
-                f"-v {shlex.quote(str(dep.working_dir))}:{shlex.quote(str(dep.working_dir))} "
-                f"-w {shlex.quote(str(dep.working_dir))}"
+            from ocabra.core import docker_ops
+
+            await docker_ops.call("updater.remove")
+            result = await docker_ops.call(
+                "updater.launch", version=target, current=APP_VERSION
             )
-            stage1 = (
-                f'echo "[ocabra-updater] descargando {new_image}"; '
-                f"docker pull -q {shlex.quote(new_image)} 2>&1 || "
-                f'{{ echo "[ocabra-updater] ERROR: no se pudo descargar {new_image}"; exit 5; }}; '
-                f"exec docker run --rm --label org.ocabra.updater=2 {mounts} "
-                f"--entrypoint sh {shlex.quote(new_image)} -c {shlex.quote(script)}"
-            )
-            args = [
-                "docker", "run", "-d", "--name", UPDATER_NAME,
-                "--label", "org.ocabra.updater=1",
-                "-v", "/var/run/docker.sock:/var/run/docker.sock",
-                "--entrypoint", "sh",
-                str(dep.api_image),
-                "-c", stage1,
-            ]  # fmt: skip
-            code, out, err = await _run(*args, timeout=60)
+            code, out, err = result["code"], result.get("stdout", ""), result.get("stderr", "")
             if code != 0:
                 self.state.phase = "failed"
                 self.state.message = f"No se pudo lanzar el actualizador: {err.strip()[:300]}"

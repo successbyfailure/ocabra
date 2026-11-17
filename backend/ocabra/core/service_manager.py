@@ -559,8 +559,8 @@ class ServiceManager:
         if not state.docker_container_name:
             return
         try:
-            code, out, _err = await self._run_docker_command(
-                "stats", "--no-stream", "--format", "{{json .}}", state.docker_container_name
+            code, out, _err = await self._docker(
+                "container.stats", container=state.docker_container_name
             )
             if code != 0 or not out:
                 return
@@ -1064,41 +1064,39 @@ class ServiceManager:
 
     # ── Docker helpers ────────────────────────────────────────────────────
 
-    async def _run_docker_command(self, *args: str) -> tuple[int, str, str]:
-        """Run the docker CLI; exit 127 (never raises) when it isn't installed.
+    async def _docker(self, op: str, **args: str) -> tuple[int, str, str]:
+        """Run a Docker operation (through the docker agent when there is one).
 
-        A node without the CLI (the ``ocabra-node`` image on a rented GPU has
-        no docker socket by design) used to crash the whole API on startup:
-        ``start()`` checks every service's container and the FileNotFoundError
-        escaped. Callers already treat a non-zero code as "not running" /
-        "couldn't do it", which is exactly right without docker.
+        Never raises: callers treat a non-zero code as "not running" / "couldn't
+        do it". Exit 127 when Docker is not reachable at all (the ``ocabra-node``
+        image on a rented GPU has no socket by design: ``start()`` checks every
+        service's container and used to crash the API on startup); 2 when the
+        operation rejected its arguments.
         """
+        from ocabra.core import docker_ops
+
         try:
-            process = await asyncio.create_subprocess_exec(
-                "docker",
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            result = await docker_ops.call(op, **args)
+        except docker_ops.OpError as exc:
+            logger.warning("docker_op_rejected", op=op, error=str(exc))
+            return 2, "", str(exc)
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            logger.warning("docker_op_failed", op=op, error=str(exc))
+            return 1, "", str(exc)
+        code = int(result.get("code") or 0)
+        if code == 127 and not getattr(self, "_docker_missing_logged", False):
+            self._docker_missing_logged = True
+            logger.warning(
+                "docker_cli_not_available", hint="services that run in containers are disabled"
             )
-        except FileNotFoundError:
-            if not getattr(self, "_docker_missing_logged", False):
-                self._docker_missing_logged = True
-                logger.warning(
-                    "docker_cli_not_available",
-                    hint="services that run in containers are disabled",
-                )
-            return 127, "", "docker CLI not available"
-        stdout, stderr = await process.communicate()
-        return (
-            process.returncode or 0,
-            stdout.decode("utf-8", errors="ignore").strip(),
-            stderr.decode("utf-8", errors="ignore").strip(),
-        )
+        return code, result.get("stdout", ""), result.get("stderr", "")
 
     async def _stop_container(self, state: ServiceState) -> None:
         if not state.docker_container_name:
             return
-        code, _out, err = await self._run_docker_command("stop", state.docker_container_name)
+        code, _out, err = await self._docker(
+            "container.action", container=state.docker_container_name, action="stop"
+        )
         if code == 0:
             state.service_alive = False
             state.status = "unreachable"
@@ -1113,8 +1111,8 @@ class ServiceManager:
     async def _is_container_running(self, state: ServiceState) -> bool:
         if not state.docker_container_name:
             return False
-        code, out, _err = await self._run_docker_command(
-            "inspect", "-f", "{{.State.Running}}", state.docker_container_name
+        code, out, _err = await self._docker(
+            "container.inspect", container=state.docker_container_name, field="running"
         )
         if code != 0:
             return False
@@ -1130,7 +1128,9 @@ class ServiceManager:
     async def _restart_container(self, state: ServiceState) -> None:
         if not state.docker_container_name:
             return
-        code, _out, err = await self._run_docker_command("restart", state.docker_container_name)
+        code, _out, err = await self._docker(
+            "container.action", container=state.docker_container_name, action="restart"
+        )
         if code == 0:
             state.service_alive = False
             state.status = "starting"
@@ -1148,7 +1148,9 @@ class ServiceManager:
         """Start a container, trying docker start first, then docker compose up."""
         # Try plain `docker start` first (container already exists)
         if state.docker_container_name:
-            code, _out, _err = await self._run_docker_command("start", state.docker_container_name)
+            code, _out, _err = await self._docker(
+                "container.action", container=state.docker_container_name, action="start"
+            )
             if code == 0:
                 logger.info("container_started", container=state.docker_container_name)
                 return
@@ -1166,14 +1168,9 @@ class ServiceManager:
 
     async def _compose_up(self, state: ServiceState) -> None:
         """Run `docker compose up -d <service>` (builds if image missing)."""
-        compose_dir = settings.compose_project_dir
-        args = [
-            "--profile", "services",
-            "-f", f"{compose_dir}/docker-compose.yml",
-            "--env-file", f"{compose_dir}/.env",
-            "up", "-d", "--build", "--pull", "missing", state.compose_service_name,
-        ]
-        code, _out, err = await self._run_docker_compose(*args)
+        code, _out, err = await self._docker(
+            "compose.up_service", service=state.compose_service_name
+        )
         if code == 0:
             logger.info("compose_up_ok", service=state.compose_service_name)
             return
@@ -1188,8 +1185,8 @@ class ServiceManager:
             # Phase 1 — check if container exists and can be started quickly
             container_exists = False
             if state.docker_container_name:
-                code, _out, _err = await self._run_docker_command(
-                    "inspect", "-f", "{{.State.Status}}", state.docker_container_name,
+                code, _out, _err = await self._docker(
+                    "container.inspect", container=state.docker_container_name, field="status"
                 )
                 container_exists = code == 0
 
@@ -1197,7 +1194,9 @@ class ServiceManager:
                 state.status = "starting"
                 state.detail = "starting container"
                 await self._publish_state(state, "service_starting")
-                code, _out, _err = await self._run_docker_command("start", state.docker_container_name)
+                code, _out, _err = await self._docker(
+                    "container.action", container=state.docker_container_name, action="start"
+                )
                 if code != 0:
                     logger.warning(
                         "container_start_failed",
@@ -1254,20 +1253,6 @@ class ServiceManager:
             state.detail = f"start failed: {exc}"
             logger.error("service_start_failed", service_id=state.service_id, error=str(exc))
             await self._publish_state(state, "health_checked")
-
-    async def _run_docker_compose(self, *args: str) -> tuple[int, str, str]:
-        process = await asyncio.create_subprocess_exec(
-            "docker", "compose",
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
-        return (
-            process.returncode or 0,
-            stdout.decode("utf-8", errors="ignore").strip(),
-            stderr.decode("utf-8", errors="ignore").strip(),
-        )
 
     # ── Redis persistence ─────────────────────────────────────────────────
 

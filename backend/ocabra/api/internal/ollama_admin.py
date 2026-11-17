@@ -145,12 +145,6 @@ async def _run_server_update() -> None:
         _update_state.to_version = None
 
         try:
-            compose_dir = settings.compose_project_dir
-            compose_args_base = (
-                "-f", f"{compose_dir}/docker-compose.yml",
-                "--env-file", f"{compose_dir}/.env",
-            )
-
             # Services that layer a local Dockerfile over ``ollama/ollama``
             # (e.g. adding ffmpeg for the 0.32+ multimodal path) can't be
             # updated with ``compose pull`` — the target ``ocabra-ollama``
@@ -160,16 +154,12 @@ async def _run_server_update() -> None:
             # rebrings the stale local image. Detect ``build:`` and switch
             # to ``compose build --pull`` which refreshes the base image
             # and rebuilds the layer.
-            uses_build = await _service_uses_build_key(compose_args_base, "ollama")
+            uses_build = await _service_uses_build_key()
             if uses_build:
-                code, stdout, stderr = await _run_compose(
-                    *compose_args_base, "build", "--pull", "ollama"
-                )
+                code, stdout, stderr = await _docker("ollama.build_pull")
                 fail_verb = "build"
             else:
-                code, stdout, stderr = await _run_compose(
-                    *compose_args_base, "pull", "ollama"
-                )
+                code, stdout, stderr = await _docker("ollama.pull")
                 fail_verb = "pull"
             if code != 0:
                 _update_state.status = "error"
@@ -186,10 +176,7 @@ async def _run_server_update() -> None:
 
             _update_state.status = "restarting"
             _update_state.detail = "recreating container"
-            code, stdout, stderr = await _run_compose(
-                *compose_args_base,
-                "up", "-d", "--no-deps", "--force-recreate", "ollama",
-            )
+            code, stdout, stderr = await _docker("ollama.recreate")
             if code != 0:
                 _update_state.status = "error"
                 _update_state.detail = (stderr or stdout or f"docker compose up exit_code={code}")[:1000]
@@ -220,39 +207,30 @@ async def _run_server_update() -> None:
             logger.exception("ollama_update_unexpected_error")
 
 
-async def _service_uses_build_key(compose_args: tuple[str, ...], service: str) -> bool:
-    """Return whether ``service`` in the resolved compose config has a
-    ``build:`` key (as opposed to only ``image:``).
+async def _service_uses_build_key() -> bool:
+    """Whether the ollama service has a ``build:`` key (as opposed to only ``image:``).
 
     Used by the Ollama updater to decide between ``compose pull`` (upstream
     image) and ``compose build --pull`` (local Dockerfile that layers on top
-    of an upstream base). Returns ``False`` on any parse/exec error — the
-    caller falls back to plain pull, which matches the previous behaviour.
+    of an upstream base). ``False`` on any error — the caller falls back to
+    plain pull, which matches the previous behaviour. The docker agent answers
+    only the boolean, not the resolved compose config (which carries every
+    service's secrets).
     """
-    code, stdout, _ = await _run_compose(*compose_args, "config", "--format=json")
-    if code != 0 or not stdout:
-        return False
+    from ocabra.core import docker_ops
+
     try:
-        cfg = json.loads(stdout)
-    except (ValueError, json.JSONDecodeError):
+        return bool((await docker_ops.call("ollama.uses_build")).get("uses_build"))
+    except Exception:  # noqa: BLE001 - see docstring
         return False
-    svc = (cfg.get("services") or {}).get(service) or {}
-    return "build" in svc
 
 
-async def _run_compose(*args: str) -> tuple[int, str, str]:
-    process = await asyncio.create_subprocess_exec(
-        "docker", "compose",
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await process.communicate()
-    return (
-        process.returncode or 0,
-        stdout.decode("utf-8", errors="ignore").strip(),
-        stderr.decode("utf-8", errors="ignore").strip(),
-    )
+async def _docker(op: str) -> tuple[int, str, str]:
+    """Run an Ollama Docker operation (through the docker agent when there is one)."""
+    from ocabra.core import docker_ops
+
+    result = await docker_ops.call(op)
+    return int(result.get("code") or 0), result.get("stdout", ""), result.get("stderr", "")
 
 
 # ── Global server settings (one shared daemon) ──────────────────────────────
@@ -312,24 +290,11 @@ def parse_ollama_env(env: list[str]) -> dict[str, int | None]:
 
 async def _running_ollama_env() -> dict[str, int | None] | None:
     """What the live ollama container was started with (docker inspect)."""
-    compose_dir = settings.compose_project_dir
-    code, out, _err = await _run_compose(
-        "-f", f"{compose_dir}/docker-compose.yml", "--env-file", f"{compose_dir}/.env",
-        "ps", "-q", "ollama",
-    )
-    container = out.splitlines()[0].strip() if code == 0 and out else ""
-    if not container:
-        return None
-    process = await asyncio.create_subprocess_exec(
-        "docker", "inspect", "-f", "{{json .Config.Env}}", container,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, _ = await process.communicate()
-    if process.returncode:
+    code, stdout, _err = await _docker("ollama.env")
+    if code:
         return None
     try:
-        return parse_ollama_env(json.loads(stdout.decode() or "[]"))
+        return parse_ollama_env(json.loads(stdout or "[]"))
     except ValueError:
         return None
 
@@ -388,11 +353,7 @@ async def _run_apply_settings() -> None:
         _apply_state.detail = "writing settings and recreating the container"
         try:
             write_ollama_env_file(settings.ollama_num_parallel, settings.ollama_max_context)
-            compose_dir = settings.compose_project_dir
-            code, stdout, stderr = await _run_compose(
-                "-f", f"{compose_dir}/docker-compose.yml", "--env-file", f"{compose_dir}/.env",
-                "up", "-d", "--no-deps", "--force-recreate", "ollama",
-            )
+            code, stdout, stderr = await _docker("ollama.recreate")
             if code != 0:
                 _apply_state.status = "error"
                 _apply_state.detail = (stderr or stdout or f"exit_code={code}")[:1000]

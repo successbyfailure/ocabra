@@ -16,6 +16,30 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.106.0 — 2026-11-17
+
+### Cambios de comportamiento
+
+- **Acción:** `POST /ocabra/trtllm/compile` valida `engine_name`: solo letras,
+  dígitos, `.`, `_` y `-`, empezando por letra o dígito. Antes se aceptaba
+  cualquier cadena, y un `../` escribía el motor fuera de su carpeta. Un
+  nombre no válido responde `422`.
+- En los modelos de TensorRT-LLM con `launch_mode: docker`, la imagen, el
+  binario de Docker y los montajes salen ahora solo de la configuración del
+  servidor (`TENSORRT_LLM_DOCKER_*`). Ya no se pueden fijar por modelo, y el
+  editor ya no los ofrece. Ningún modelo los tenía fijados.
+
+### Novedades
+
+- Las operaciones de Docker de oCabra pasan por un servicio aparte,
+  `docker-agent`, que es el único que tiene el socket de Docker y solo
+  ejecuta las operaciones de oCabra: arrancar y parar servicios, actualizar
+  Ollama, la autoactualización y la compilación de TensorRT-LLM. Para quien
+  usa la API no cambia nada.
+
+
+---
+
 ## 0.105.2 — 2026-11-17
 
 ### Cambios

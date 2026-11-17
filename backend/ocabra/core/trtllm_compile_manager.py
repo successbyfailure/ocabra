@@ -310,43 +310,41 @@ class TrtllmCompileManager:
         await self._save_to_db(state)
         await self._publish_progress(state)
 
-        cmd = self._build_docker_cmd(state, phase)
-        logger.info(
-            "trtllm_compile_phase_start",
-            job_id=state.job_id,
-            phase=phase,
-            cmd=" ".join(cmd),
-        )
+        from ocabra.core import docker_ops
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+        logger.info("trtllm_compile_phase_start", job_id=state.job_id, phase=phase)
+        # Through the docker agent when there is one: it builds the same
+        # `docker run` (build_trtllm_docker_cmd) from these validated fields,
+        # with the image and mounts of its own config.
+        lines = docker_ops.stream(
+            "trtllm.phase",
+            phase=phase,
+            engine_name=state.engine_name,
+            source_model=state.source_model,
+            dtype=state.dtype,
+            gpu_indices=list(state.gpu_indices),
+            config=dict(state.config or {}),
         )
 
         # Stream output lines, publish to Redis, watch for cancel
         lines_buf: list[str] = []
-        assert proc.stdout is not None
+        rc: int | None = None
         try:
-            async for raw_line in proc.stdout:
+            async for line in lines:
+                if line.startswith(docker_ops.EXIT_MARKER):
+                    rc = int(line[len(docker_ops.EXIT_MARKER) :])
+                    break
                 if state._cancel_event.is_set():
-                    proc.kill()
-                    await proc.wait()
-                    return
+                    return  # closing the stream (finally) kills the container run
 
-                line = raw_line.decode("utf-8", errors="replace").rstrip()
                 lines_buf.append(line)
                 if len(lines_buf) > 200:
                     lines_buf = lines_buf[-200:]
 
                 await self._publish_log_line(state, phase, line)
+        finally:
+            await lines.aclose()
 
-        except asyncio.CancelledError:
-            proc.kill()
-            await proc.wait()
-            raise
-
-        rc = await proc.wait()
         if rc != 0:
             tail = "\n".join(lines_buf[-40:])
             raise RuntimeError(
@@ -416,13 +414,17 @@ class TrtllmCompileManager:
     }
 
     def _build_docker_cmd(self, state: CompileJobState, phase: str) -> list[str]:
+        return build_trtllm_docker_cmd(state, phase)
+
+    @classmethod
+    def _docker_cmd_for(cls, state: Any, phase: str) -> list[str]:
         docker_bin = settings.tensorrt_llm_docker_bin or "docker"
         image = settings.tensorrt_llm_docker_image or "nvcr.io/nvidia/tensorrt-llm/release:latest"
         models_host = settings.tensorrt_llm_docker_models_mount_host or "/docker/ai-models/ocabra/models"
         models_container = settings.tensorrt_llm_docker_models_mount_container or "/data/models"
 
         tp_size = len(state.gpu_indices)
-        dtype_trtllm = self._DTYPE_MAP.get(state.dtype, state.dtype)
+        dtype_trtllm = cls._DTYPE_MAP.get(state.dtype, state.dtype)
         # Docker requires quoted value "device=0,1" for multiple GPU IDs;
         # single GPU can use bare device=N format.
         gpu_ids = ",".join(str(i) for i in state.gpu_indices)
@@ -460,7 +462,7 @@ class TrtllmCompileManager:
             # TRT-LLM 1.0: no trtllm-convert binary — use Python API via python3 -c
             return base_cmd + [
                 image,
-                "python3", "-c", self._CONVERT_SCRIPT,
+                "python3", "-c", cls._CONVERT_SCRIPT,
                 "--model_dir", model_dir,
                 "--output_dir", ckpt_dir,
                 "--dtype", dtype_trtllm,
@@ -660,3 +662,13 @@ class TrtllmCompileManager:
                 logger.warning(
                     "trtllm_compile_stale_jobs_recovered", count=len(rows)
                 )
+
+
+def build_trtllm_docker_cmd(job: Any, phase: str) -> list[str]:
+    """``docker run`` argv of one compile phase (``convert`` or ``build``).
+
+    ``job`` needs ``engine_name``, ``gpu_indices``, ``dtype``, ``source_model``
+    and ``config``. Shared by the compile manager and the docker agent
+    (:mod:`ocabra.docker_agent`), which validates those fields first.
+    """
+    return TrtllmCompileManager._docker_cmd_for(job, phase)

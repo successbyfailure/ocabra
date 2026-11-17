@@ -278,13 +278,15 @@ async def test_start_disabled_service_raises(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_compose_up_uses_services_profile_and_pull(monkeypatch) -> None:
+    """The argv is built by the docker agent's operation, not by the manager."""
     called_args: list[str] = []
 
-    async def fake_run_docker_compose(self, *args: str):
-        called_args.extend(args)
-        return 0, "ok", ""
+    async def fake_exec(argv, timeout=120.0):  # noqa: ASYNC109
+        called_args.extend(argv)
+        return {"code": 0, "stdout": "ok", "stderr": ""}
 
-    monkeypatch.setattr(ServiceManager, "_run_docker_compose", fake_run_docker_compose)
+    monkeypatch.setattr("ocabra.docker_agent.ops._exec", fake_exec)
+    monkeypatch.setattr("ocabra.core.docker_ops.settings.docker_agent_url", "")
 
     manager = ServiceManager()
     state = await manager.get_state("hunyuan")
@@ -292,11 +294,13 @@ async def test_compose_up_uses_services_profile_and_pull(monkeypatch) -> None:
 
     await manager._compose_up(state)
 
+    assert called_args[:2] == ["docker", "compose"]
     assert "--profile" in called_args
     assert "services" in called_args
     assert "--pull" in called_args
     assert "missing" in called_args
     assert "--build" in called_args
+    assert called_args[-1] == state.compose_service_name
 
 
 @pytest.mark.asyncio
@@ -307,12 +311,12 @@ async def test_start_container_bg_rebuilds_on_failed_docker_start(monkeypatch) -
     async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
         _ = key, data, ttl
 
-    async def fake_run_docker_command(self, *args: str):
-        if args[0] == "inspect":
+    async def fake_docker(self, op: str, **args: str):
+        if op == "container.inspect":
             return 0, "exited", ""
-        if args[0] == "start":
+        if op == "container.action" and args["action"] == "start":
             return 1, "", "failed to start"
-        raise AssertionError(f"unexpected docker command: {args}")
+        raise AssertionError(f"unexpected docker operation: {op} {args}")
 
     compose_up_calls: list[str] = []
 
@@ -324,7 +328,7 @@ async def test_start_container_bg_rebuilds_on_failed_docker_start(monkeypatch) -
 
     monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
     monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
-    monkeypatch.setattr(ServiceManager, "_run_docker_command", fake_run_docker_command)
+    monkeypatch.setattr(ServiceManager, "_docker", fake_docker)
     monkeypatch.setattr(ServiceManager, "_compose_up", fake_compose_up)
     monkeypatch.setattr(ServiceManager, "_check_service_alive", fake_check_service_alive)
 

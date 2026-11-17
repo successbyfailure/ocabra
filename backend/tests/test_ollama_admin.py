@@ -19,6 +19,34 @@ import pytest
 
 from ocabra.api.internal import ollama_admin
 
+
+def _compose(fake):
+    """Patch the Docker layer so ``docker compose <args>`` calls ``fake(*args)``.
+
+    The compose argv is built by the docker agent's operations
+    (ocabra.docker_agent.ops); these tests run them locally (no agent) and
+    look at what reaches ``docker compose``.
+    """
+
+    async def fake_exec(argv, timeout=120.0):  # noqa: ASYNC109
+        assert argv[:2] == ["docker", "compose"], argv
+        code, out, err = await fake(*argv[2:])
+        return {"code": code, "stdout": out, "stderr": err}
+
+    return patch("ocabra.docker_agent.ops._exec", new=fake_exec)
+
+
+def _compose_returns(result):
+    async def fake(*_args):
+        return result
+
+    return _compose(fake)
+
+
+@pytest.fixture(autouse=True)
+def _no_docker_agent(monkeypatch):
+    monkeypatch.setattr("ocabra.core.docker_ops.settings.docker_agent_url", "")
+
 # ── _service_uses_build_key ─────────────────────────────────
 
 
@@ -33,26 +61,18 @@ class TestServiceUsesBuildKey:
                 }
             }
         }
-        with patch.object(
-            ollama_admin,
-            "_run_compose",
-            new=AsyncMock(return_value=(0, json.dumps(payload), "")),
-        ):
+        with _compose_returns((0, json.dumps(payload), "")):
             assert (
-                await ollama_admin._service_uses_build_key(("-f", "compose.yml"), "ollama")
+                await ollama_admin._service_uses_build_key()
                 is True
             )
 
     @pytest.mark.asyncio
     async def test_returns_false_when_service_only_has_image(self):
         payload = {"services": {"ollama": {"image": "ollama/ollama:latest"}}}
-        with patch.object(
-            ollama_admin,
-            "_run_compose",
-            new=AsyncMock(return_value=(0, json.dumps(payload), "")),
-        ):
+        with _compose_returns((0, json.dumps(payload), "")):
             assert (
-                await ollama_admin._service_uses_build_key(("-f", "compose.yml"), "ollama")
+                await ollama_admin._service_uses_build_key()
                 is False
             )
 
@@ -61,38 +81,26 @@ class TestServiceUsesBuildKey:
         """Any parse or subprocess failure must degrade to ``False`` so the
         caller falls back to plain pull (previous behaviour) instead of
         blowing up the update flow."""
-        with patch.object(
-            ollama_admin,
-            "_run_compose",
-            new=AsyncMock(return_value=(1, "", "boom")),
-        ):
+        with _compose_returns((1, "", "boom")):
             assert (
-                await ollama_admin._service_uses_build_key(("-f", "compose.yml"), "ollama")
+                await ollama_admin._service_uses_build_key()
                 is False
             )
 
     @pytest.mark.asyncio
     async def test_returns_false_on_unparseable_json(self):
-        with patch.object(
-            ollama_admin,
-            "_run_compose",
-            new=AsyncMock(return_value=(0, "not json at all", "")),
-        ):
+        with _compose_returns((0, "not json at all", "")):
             assert (
-                await ollama_admin._service_uses_build_key(("-f", "compose.yml"), "ollama")
+                await ollama_admin._service_uses_build_key()
                 is False
             )
 
     @pytest.mark.asyncio
     async def test_returns_false_when_service_absent(self):
         payload = {"services": {"api": {"image": "foo"}}}
-        with patch.object(
-            ollama_admin,
-            "_run_compose",
-            new=AsyncMock(return_value=(0, json.dumps(payload), "")),
-        ):
+        with _compose_returns((0, json.dumps(payload), "")):
             assert (
-                await ollama_admin._service_uses_build_key(("-f", "compose.yml"), "ollama")
+                await ollama_admin._service_uses_build_key()
                 is False
             )
 
@@ -134,7 +142,7 @@ class TestRunServerUpdateDispatch:
         registry_mock = AsyncMock()
         registry_mock.get_version = AsyncMock(return_value="0.32.0")
         with (
-            patch.object(ollama_admin, "_run_compose", side_effect=fake_run_compose),
+            _compose(fake_run_compose),
             patch.object(ollama_admin, "_registry", registry_mock),
         ):
             await ollama_admin._run_server_update()
@@ -167,7 +175,7 @@ class TestRunServerUpdateDispatch:
         registry_mock = AsyncMock()
         registry_mock.get_version = AsyncMock(return_value="0.32.0")
         with (
-            patch.object(ollama_admin, "_run_compose", side_effect=fake_run_compose),
+            _compose(fake_run_compose),
             patch.object(ollama_admin, "_registry", registry_mock),
         ):
             await ollama_admin._run_server_update()
@@ -204,7 +212,7 @@ class TestRunServerUpdateDispatch:
         registry_mock = AsyncMock()
         registry_mock.get_version = AsyncMock(return_value="0.32.0")
         with (
-            patch.object(ollama_admin, "_run_compose", side_effect=fake_run_compose),
+            _compose(fake_run_compose),
             patch.object(ollama_admin, "_registry", registry_mock),
         ):
             await ollama_admin._run_server_update()

@@ -119,53 +119,17 @@ class TensorRTLLMBackend(BackendInterface):
             ).strip()
             or settings.tensorrt_llm_serve_module
         )
-        docker_bin = (
-            str(
-                self._get_option(extra_config, "docker_bin", settings.tensorrt_llm_docker_bin)
-            ).strip()
-            or settings.tensorrt_llm_docker_bin
-        )
-        docker_image = (
-            str(
-                self._get_option(extra_config, "docker_image", settings.tensorrt_llm_docker_image)
-            ).strip()
-            or settings.tensorrt_llm_docker_image
-        )
-        docker_models_mount_host = (
-            str(
-                self._get_option(
-                    extra_config,
-                    "docker_models_mount_host",
-                    settings.tensorrt_llm_docker_models_mount_host,
-                )
-            ).strip()
-            or settings.tensorrt_llm_docker_models_mount_host
-        )
-        docker_models_mount_container = (
-            str(
-                self._get_option(
-                    extra_config,
-                    "docker_models_mount_container",
-                    settings.tensorrt_llm_docker_models_mount_container,
-                )
-            ).strip()
-            or settings.tensorrt_llm_docker_models_mount_container
-        )
-        docker_hf_cache_mount_host = self._get_option(
-            extra_config,
-            "docker_hf_cache_mount_host",
-            settings.tensorrt_llm_docker_hf_cache_mount_host,
-        )
-        docker_hf_cache_mount_container = (
-            str(
-                self._get_option(
-                    extra_config,
-                    "docker_hf_cache_mount_container",
-                    settings.tensorrt_llm_docker_hf_cache_mount_container,
-                )
-            ).strip()
-            or settings.tensorrt_llm_docker_hf_cache_mount_container
-        )
+        # Image, binary and mounts of the docker launch mode come from the
+        # server's settings only. They used to be per-model options, so anyone
+        # who could edit a model (model_manager) could start any image with any
+        # host path mounted — root on the host through the Docker socket
+        # (SEG-03/SEG-04, docs/REVISION-2026-11-16.md). No model set them.
+        docker_bin = settings.tensorrt_llm_docker_bin
+        docker_image = settings.tensorrt_llm_docker_image
+        docker_models_mount_host = settings.tensorrt_llm_docker_models_mount_host
+        docker_models_mount_container = settings.tensorrt_llm_docker_models_mount_container
+        docker_hf_cache_mount_host = settings.tensorrt_llm_docker_hf_cache_mount_host
+        docker_hf_cache_mount_container = settings.tensorrt_llm_docker_hf_cache_mount_container
 
         cmd = [
             sys.executable,
@@ -611,56 +575,22 @@ class TensorRTLLMBackend(BackendInterface):
             entry.log_file.close()
 
     async def _list_host_trt_process_groups(self) -> set[int]:
-        output = await self._run_host_helper("ps", "-eo", "pid=,pgid=,args=")
-        groups: set[int] = set()
-        if not output:
-            return groups
-        for line in output.splitlines():
-            parsed = self._parse_host_ps_line(line)
-            if parsed is None:
-                continue
-            _pid, pgid, args = parsed
-            if not self._is_orphaned_trt_command(args):
-                continue
-            groups.add(pgid)
-        return groups
+        """Host process groups of orphaned ``trtllm-serve`` runs (via the docker agent)."""
+        from ocabra.core import docker_ops
+
+        result = await docker_ops.call("trtllm.host_orphans")
+        if result.get("code"):
+            raise RuntimeError(f"host helper failed: {result.get('stderr') or result['code']}")
+        return {int(pgid) for pgid in result.get("pgids") or []}
 
     async def _kill_host_process_groups(self, pgids: set[int]) -> None:
+        """Kill those groups. The agent re-checks that each one is still an
+        orphaned TRT run before touching it, whatever this asks for."""
         if not pgids:
             return
-        targets = " ".join(f"-{pgid}" for pgid in sorted(pgids))
-        script = (
-            f"kill -TERM -- {targets} 2>/dev/null || true; "
-            "sleep 2; "
-            f"kill -KILL -- {targets} 2>/dev/null || true"
-        )
-        await self._run_host_helper("sh", "-lc", script)
+        from ocabra.core import docker_ops
 
-    async def _run_host_helper(self, entrypoint: str, *args: str) -> str:
-        helper_image = str(settings.tensorrt_llm_host_helper_image).strip() or "ocabra-api:slim"
-        docker_bin = str(settings.tensorrt_llm_docker_bin).strip() or "docker"
-        process = await asyncio.create_subprocess_exec(
-            docker_bin,
-            "run",
-            "--rm",
-            "--pid=host",
-            "--entrypoint",
-            entrypoint,
-            helper_image,
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
-        if (process.returncode or 0) != 0:
-            raise RuntimeError(
-                "host helper failed: "
-                + (
-                    stderr.decode("utf-8", errors="ignore").strip()
-                    or f"exit_code={process.returncode}"
-                )
-            )
-        return stdout.decode("utf-8", errors="ignore")
+        await docker_ops.call("trtllm.kill_orphans", pgids=sorted(pgids))
 
     @staticmethod
     def _parse_host_ps_line(line: str) -> tuple[int, int, str] | None:
@@ -670,7 +600,8 @@ class TensorRTLLMBackend(BackendInterface):
         pid, pgid, args = match.groups()
         return int(pid), int(pgid), args
 
-    def _is_orphaned_trt_command(self, args: str) -> bool:
+    @staticmethod
+    def _is_orphaned_trt_command(args: str) -> bool:
         if "trtllm-serve serve" not in args:
             return False
         port_match = re.search(r"--port\s+(\d+)", args)

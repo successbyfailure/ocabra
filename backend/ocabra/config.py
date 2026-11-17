@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.105.2"
+APP_VERSION = "0.106.0"
 
 
 class Settings(BaseSettings):
@@ -696,6 +696,13 @@ class Settings(BaseSettings):
 
     # Docker Compose project directory (for `docker compose up -d <service>`)
     compose_project_dir: str = "/opt/ocabra"
+    # Docker agent (SEG-03): the container that holds the Docker socket and
+    # runs only oCabra's own operations (ocabra.docker_agent). Empty URL = no
+    # agent, Docker operations run in this process (needs the socket).
+    docker_agent_url: str = ""
+    docker_agent_port: int = 8790
+    # Written by the agent at startup (a fresh token each time), read by the api.
+    docker_agent_token_file: str = "/run/ocabra-agent/token"
 
     # Langfuse observability (desactivado por defecto)
     langfuse_enabled: bool = False

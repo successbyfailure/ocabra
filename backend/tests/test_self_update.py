@@ -44,10 +44,12 @@ async def test_a_stack_on_release_images_can_update_itself(monkeypatch):
     monkeypatch.setattr(su.os.path, "exists", lambda p: True)
     monkeypatch.delenv("OCABRA_NODE_IMAGE", raising=False)
 
-    async def run(*args, timeout=30.0):  # noqa: ASYNC109
-        return 0, _inspect("ghcr.io/successbyfailure/ocabra-api:0.95.6"), ""
+    async def fake_exec(argv, timeout=120.0):  # noqa: ASYNC109
+        assert argv[:2] == ["docker", "inspect"], argv
+        return {"code": 0, "stdout": _inspect("ghcr.io/successbyfailure/ocabra-api:0.95.6"), "stderr": ""}
 
-    monkeypatch.setattr(su, "_run", run)
+    monkeypatch.setattr("ocabra.docker_agent.ops._exec", fake_exec)
+    monkeypatch.setattr("ocabra.core.docker_ops.settings.docker_agent_url", "")
     dep = await su.detect_deployment()
     assert dep.kind == "compose" and dep.can_apply
     assert dep.working_dir == "/docker/ocabra" and dep.project == "ocabra"
@@ -58,10 +60,12 @@ async def test_a_stack_building_its_own_images_only_gets_told(monkeypatch):
     monkeypatch.setattr(su.os.path, "exists", lambda p: True)
     monkeypatch.delenv("OCABRA_NODE_IMAGE", raising=False)
 
-    async def run(*args, timeout=30.0):  # noqa: ASYNC109
-        return 0, _inspect("ocabra-api:slim"), ""
+    async def fake_exec(argv, timeout=120.0):  # noqa: ASYNC109
+        assert argv[:2] == ["docker", "inspect"], argv
+        return {"code": 0, "stdout": _inspect("ocabra-api:slim"), "stderr": ""}
 
-    monkeypatch.setattr(su, "_run", run)
+    monkeypatch.setattr("ocabra.docker_agent.ops._exec", fake_exec)
+    monkeypatch.setattr("ocabra.core.docker_ops.settings.docker_agent_url", "")
     dep = await su.detect_deployment()
     assert dep.kind == "local_build" and not dep.can_apply
     assert "OCABRA_API_IMAGE" in dep.reason

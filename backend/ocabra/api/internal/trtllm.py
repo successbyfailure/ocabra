@@ -50,7 +50,13 @@ class CompileJobCreate(BaseModel):
     max_seq_len: Annotated[int, Field(ge=256)] = 4096
     engine_name: str = Field(
         ...,
-        description="Name for the compiled engine (used as directory name)",
+        description=(
+            "Name for the compiled engine (used as directory name): letters, digits, "
+            "'.', '_' and '-' only"
+        ),
+        # It becomes a path under the models volume: a '../' used to write
+        # the engine anywhere on that volume (SEG-22).
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
     )
 
 

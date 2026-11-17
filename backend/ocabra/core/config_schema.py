@@ -462,18 +462,6 @@ _TRT_FIELDS: list[Field] = [
        default_setting="tensorrt_llm_serve_bin"),
     _f(_T, "serve_module", "string", "Módulo de serve", "runtime", advanced=True,
        default_setting="tensorrt_llm_serve_module"),
-    _f(_T, "docker_bin", "string", "Docker", "runtime", advanced=True,
-       default_setting="tensorrt_llm_docker_bin"),
-    _f(_T, "docker_image", "string", "Imagen Docker", "runtime", advanced=True,
-       default_setting="tensorrt_llm_docker_image"),
-    _f(_T, "docker_models_mount_host", "string", "Modelos (host)", "runtime", advanced=True,
-       default_setting="tensorrt_llm_docker_models_mount_host"),
-    _f(_T, "docker_models_mount_container", "string", "Modelos (contenedor)", "runtime",
-       advanced=True, default_setting="tensorrt_llm_docker_models_mount_container"),
-    _f(_T, "docker_hf_cache_mount_host", "string", "Cache HF (host)", "runtime",
-       advanced=True, default_setting="tensorrt_llm_docker_hf_cache_mount_host"),
-    _f(_T, "docker_hf_cache_mount_container", "string", "Cache HF (contenedor)", "runtime",
-       advanced=True, default_setting="tensorrt_llm_docker_hf_cache_mount_container"),
 ]
 
 

@@ -794,8 +794,11 @@ async def test_service_manager_survives_missing_docker_cli(monkeypatch):
         raise FileNotFoundError("docker")
 
     monkeypatch.setattr(_asyncio, "create_subprocess_exec", _no_docker)
-    sm = ServiceManager.__new__(ServiceManager)
-    assert await sm._run_docker_command("inspect", "x") == (127, "", "docker CLI not available")
+    monkeypatch.setattr("ocabra.core.docker_ops.settings.docker_agent_url", "")
+    sm = ServiceManager()
+    container = next(s.docker_container_name for s in sm._states.values() if s.docker_container_name)
+    code, _out, err = await sm._docker("container.inspect", container=container, field="running")
+    assert (code, err) == (127, "docker CLI not available")
 
 
 def test_remote_load_and_unload_accept_canonical_ids_with_slash():
