@@ -121,6 +121,15 @@ RUN chmod +x /app/docker-entrypoint.sh
 FROM base AS production
 COPY . .
 RUN chmod +x /app/docker-entrypoint.sh
+# The api runs as this uid (docker-compose.yml `user:`). A new named volume
+# (backends_data) takes its owner from the mount point in the image: without
+# these folders it was root's and a fresh install could not install any
+# backend. Same uid as compose's OCABRA_UID, passed as a build argument.
+ARG OCABRA_UID=1000
+ARG OCABRA_GID=1000
+RUN mkdir -p /data/backends /data/models /data/hf_cache /data/openai_files \
+        /data/image_outputs /opt/ocabra/data/ollama \
+    && chown -R "${OCABRA_UID}:${OCABRA_GID}" /data /opt/ocabra
 
 EXPOSE 8000
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

@@ -159,6 +159,14 @@ set_env_value DATABASE_URL \
 AI_MODELS_ROOT="$(env_value AI_MODELS_ROOT)"; AI_MODELS_ROOT="${AI_MODELS_ROOT:-/docker/ai-models}"
 ACESTEP_ROOT="$(env_value ACESTEP_ROOT)"; ACESTEP_ROOT="${ACESTEP_ROOT:-/docker/ACE-Step-1.5}"
 
+# The api runs as this uid (not root, since v0.106.2) and must own what it
+# writes: the folders below, created by this script as the current user.
+if [ -z "$(env_value OCABRA_UID)" ]; then
+    set_env_value OCABRA_UID "$(id -u)"
+    set_env_value OCABRA_GID "$(id -g)"
+fi
+OCABRA_UID="$(env_value OCABRA_UID)"
+
 info "Creating data directories..."
 dirs=(
     ./data/postgres_data ./data/openai_files ./data/image_outputs ./data/ollama
@@ -169,11 +177,20 @@ dirs=(
 for directory in "${dirs[@]}"; do
     mkdir -p "$directory" || fatal "Cannot create $directory; choose writable AI_MODELS_ROOT/ACESTEP_ROOT paths in .env."
 done
+foreign=()
+for directory in "${dirs[@]}"; do
+    case "$directory" in ./data/postgres_data|./caddy/*|"$AI_MODELS_ROOT/ollama") continue ;; esac
+    [ "$(stat -c %u "$directory")" = "$OCABRA_UID" ] || foreign+=("$directory")
+done
+if [ "${#foreign[@]}" -gt 0 ]; then
+    warn "Not owned by uid $OCABRA_UID, the api cannot write there: ${foreign[*]}"
+    warn "Fix it with: backend/scripts/chown-api-data.sh   (after the first build)"
+fi
 ok "Data directories ready"
 
 "${COMPOSE[@]}" config -q || fatal "docker-compose.yml is not valid with the current .env."
 
-CORE_SERVICES=(api frontend postgres redis hw-monitor ollama caddy)
+CORE_SERVICES=(api docker-agent frontend postgres redis hw-monitor ollama caddy)
 BUILD_SERVICES=(api frontend hw-monitor ollama)
 START_SERVICES=("${CORE_SERVICES[@]}")
 

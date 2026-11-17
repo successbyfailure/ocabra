@@ -7,6 +7,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.slim
+      args:
+        OCABRA_UID: ${OCABRA_UID:-1000}
+        OCABRA_GID: ${OCABRA_GID:-1000}
     # Self-update (backend/ocabra/core/self_update.py): a node that pulls the
     # releases sets OCABRA_API_IMAGE / OCABRA_FRONTEND_IMAGE in .env to
     # ghcr.io/successbyfailure/ocabra-{api,frontend}:X.Y.Z and the updater
@@ -119,6 +122,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # Every Docker operation goes through it: `up -d api` starts it too
+      # (a fresh install, or setup.sh, used to leave it out).
+      docker-agent:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -139,6 +146,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.slim
+      args:
+        OCABRA_UID: ${OCABRA_UID:-1000}
+        OCABRA_GID: ${OCABRA_GID:-1000}
     image: ${OCABRA_API_IMAGE:-ocabra-api:slim}
     entrypoint: ["python", "-m", "ocabra.docker_agent"]
     env_file: .env
