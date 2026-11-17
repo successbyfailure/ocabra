@@ -1599,6 +1599,9 @@ async def resolve_federated(
                     model_id = target.base_model_id
                     if resolved is not None:
                         resolved["profile"] = target
+                    # Stats attribute a proxied router request to what was
+                    # chosen (the local path sets this on request.state).
+                    note_federation(router=profile.profile_id, router_target=target.profile_id)
             elif profile.base_model_id is not None:
                 model_id = profile.base_model_id
 

@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.98.6 — 2026-11-17
+
+### Errores corregidos
+
+- Una petición a un router cuyo destino elegido estaba en otro nodo (por
+  ejemplo, `recomendado-sota` con el modelo de un pod en primer lugar) se
+  apuntaba al primer destino de **este** nodo: en las estadísticas salía como
+  ese modelo y sin el router, y en la admisión contaba contra su límite de
+  peticiones simultáneas, así que podía dar **429** a quien usaba ese modelo
+  directamente. Ahora cuenta como el modelo que la sirvió y con su router.
+
+---
+
 ## 0.98.5 — 2026-11-17
 
 ### Errores corregidos

@@ -1032,10 +1032,13 @@ class StatsMiddleware(BaseHTTPMiddleware):
             # override so ``/stats/routing`` and ``request_stats`` reflect
             # reality for the 99% of traffic that uses stream=true.
             model_id = _extract_model_id(request=request, body=request_payload)
-            resolved_model_id = getattr(request.state, "resolved_model_id", None)
+            fed_target, fed_router = _federated_router_attribution(request)
+            resolved_model_id = getattr(request.state, "resolved_model_id", None) or fed_target
             if resolved_model_id:
                 model_id = resolved_model_id
-            via_router_profile_id = getattr(request.state, "via_router_profile_id", None)
+            via_router_profile_id = (
+                getattr(request.state, "via_router_profile_id", None) or fed_router
+            )
             status_code = response.status_code
             original_iterator = response.body_iterator
 
@@ -1187,7 +1190,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
         # profile that actually served the traffic as ``model_id``. That
         # way ``request_stats.model_id`` reflects reality and the
         # /stats/routing view breaks down redirects by real target.
-        resolved_model_id = getattr(request.state, "resolved_model_id", None)
+        fed_target, fed_router = _federated_router_attribution(request)
+        resolved_model_id = getattr(request.state, "resolved_model_id", None) or fed_target
         if resolved_model_id:
             model_id = resolved_model_id
         if model_id:
@@ -1219,13 +1223,16 @@ class StatsMiddleware(BaseHTTPMiddleware):
             header_audio_s = getattr(request.state, "audio_seconds", None)
             if request_kind == "audio_transcription" and isinstance(header_audio_s, (int, float)):
                 if not (isinstance(work_size_meta, dict) and work_size_meta.get("audio_seconds")):
-                    work_size_meta = {**(work_size_meta or {}), "audio_seconds": float(header_audio_s)}
+                    work_size_meta = {
+                        **(work_size_meta or {}),
+                        "audio_seconds": float(header_audio_s),
+                    }
             # Bloque 20 — router attribution. ``resolve_profile`` stashes
             # the router profile_id on ``request.state`` (BaseHTTPMiddleware
             # breaks contextvar propagation across ``call_next``, but
             # request.state is shared). NULL when the request didn't go
             # through a router — most direct calls.
-            via_router = getattr(request.state, "via_router_profile_id", None)
+            via_router = getattr(request.state, "via_router_profile_id", None) or fed_router
             spawn(
                 _record_stat(
                     request=request,
@@ -1372,6 +1379,7 @@ async def _resolve_inflight_model_id(request: Request, requested: str | None) ->
                 profile = alias_target[0] if alias_target is not None else None
             if profile is not None and profile.enabled:
                 if getattr(profile, "profile_kind", "execution") == "router":
+                    fm = getattr(request.app.state, "federation_manager", None)
                     for target_id in profile.routing_targets or []:
                         target = await registry.get(target_id)
                         if target is not None and target.enabled and target.base_model_id:
@@ -1379,6 +1387,14 @@ async def _resolve_inflight_model_id(request: Request, requested: str | None) ->
                                 target.base_model_id,
                                 target.load_overrides,
                             )
+                        if target is None and fm is not None:
+                            # A target only a peer has (a pod first in
+                            # ``recomendado-sota``): its own id, not the next
+                            # local target's — that charged the pod's requests
+                            # to ornith here (in-flight, admission, stats).
+                            remote_id = fm.remote_model_for(str(target_id))
+                            if remote_id is not None:
+                                return remote_id
                     return None
                 return compute_worker_key(profile.base_model_id, profile.load_overrides)
 
@@ -1823,6 +1839,20 @@ async def record_realtime_request(
         client_addr=None if privacy.zero_data() else _client_addr(websocket),  # type: ignore[arg-type]
         error=None if privacy.zero_data() else error_message,
     )
+
+
+def _federated_router_attribution(request: Request) -> tuple[str | None, str | None]:
+    """``(target, router)`` when a router request was proxied to a peer.
+
+    The local path sets ``resolved_model_id``/``via_router_profile_id`` on
+    ``request.state``; a request a peer served never reaches it, so the stats
+    recorded the router's first *local* target (ornith for the pod's
+    nemotron) and no router. ``resolve_federated`` notes both instead.
+    """
+    info = getattr(request.state, "federation_info", None) or {}
+    if info.get("decision") != "remote":
+        return None, None
+    return info.get("router_target"), info.get("router")
 
 
 def _federation_fields(

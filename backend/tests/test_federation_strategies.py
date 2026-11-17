@@ -341,3 +341,71 @@ async def test_heartbeat_only_warm_when_the_peer_may_not_load(monkeypatch):
         _hb_request(PeerRules(allow_loads=False)), _user=SimpleNamespace(user_id="u")
     )
     assert [m.model_id for m in hb.models] == [EMB]
+
+
+# ── stats attribution of router requests a peer served ──────────
+
+
+async def test_inflight_of_a_router_whose_first_target_is_on_a_pod_is_the_pod_model():
+    """recomendado-sota = [pod's nemotron, ornith]: the in-flight entry (and
+    admission) belonged to ornith, the first *local* target."""
+    from ocabra.stats.collector import _resolve_inflight_model_id
+
+    router = SimpleNamespace(
+        profile_id="recomendado-sota",
+        profile_kind="router",
+        enabled=True,
+        routing_targets=[BIG, "ornith"],
+    )
+    ornith = SimpleNamespace(
+        profile_id="ornith",
+        profile_kind="execution",
+        enabled=True,
+        base_model_id="llamacpp_mks/ornith",
+        load_overrides=None,
+    )
+    profiles = {"recomendado-sota": router, "ornith": ornith}
+
+    class _Registry:
+        async def get(self, pid):
+            return profiles.get(pid)
+
+        async def resolve_alias(self, pid):
+            return None
+
+    pod = _make_peer(peer_id="pod", name="pod", models=[{"model_id": BIG, "status": "loaded"}])
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                profile_registry=_Registry(), federation_manager=_make_fm_with_peers(pod)
+            )
+        )
+    )
+    assert await _resolve_inflight_model_id(request, "recomendado-sota") == BIG
+    # Pod offline: the next target, as before.
+    request.app.state.federation_manager = _make_fm_with_peers()
+    assert await _resolve_inflight_model_id(request, "recomendado-sota") == "llamacpp_mks/ornith"
+
+
+async def test_a_proxied_router_request_is_recorded_as_its_target_and_router():
+    from ocabra.core.federation import federation_request_info
+    from ocabra.stats.collector import _federated_router_attribution
+
+    pod = _make_peer(
+        peer_id="pod",
+        name="pod",
+        models=[{"model_id": BIG, "status": "loaded", "profiles": ["kimi-k3"]}],
+    )
+    info: dict = {}
+    token = federation_request_info.set(info)
+    try:
+        await resolve_federated(
+            "recomendado-sota", _FakeModelManager(), _make_fm_with_peers(pod), _sota_registry()
+        )
+    finally:
+        federation_request_info.reset(token)
+    request = SimpleNamespace(state=SimpleNamespace(federation_info=info))
+    assert _federated_router_attribution(request) == ("kimi-k3", "recomendado-sota")
+    # Served here: the local path's own attribution wins (nothing from here).
+    info["decision"] = "local"
+    assert _federated_router_attribution(request) == (None, None)
