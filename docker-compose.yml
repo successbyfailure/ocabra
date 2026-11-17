@@ -215,9 +215,10 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://ocabra:ocabra@postgres:5432/ocabra}
       NVIDIA_VISIBLE_DEVICES: all
       THERMAL_CAP_ENABLED: ${THERMAL_CAP_ENABLED:-true}
-    volumes:
-      - /sys/class/powercap:/sys/class/powercap:ro
-      - /sys/class/hwmon:/sys/class/hwmon:ro
+    # No bind mounts of /sys/class/{powercap,hwmon}: a privileged container
+    # already sees the host's sysfs (RAPL energy and sensors read the same,
+    # checked 2026-11-17). Mounting them broke WSL2, where /sys/class/powercap
+    # doesn't exist: «mkdir /sys/class/powercap: operation not permitted».
     depends_on:
       postgres:
         condition: service_healthy
