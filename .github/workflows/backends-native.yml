@@ -1,0 +1,105 @@
+# Publish the prebuilt native backends (llama.cpp, the Makespace fork,
+# whisper.cpp) to ghcr.io/<owner>/ocabra-backends: CUDA for sm 75–120 with PTX,
+# portable CPU code, CUDA runtime next to the binaries (Dockerfile.backend-native).
+#
+# Runs when the build recipe changes on main, or by hand for one backend and,
+# optionally, another commit than the default of publish-native-backends.sh
+# (the one production runs).
+name: native backends
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - backend/Dockerfile.backend-native
+      - backend/scripts/publish-native-backends.sh
+      - backend/scripts/install_llama_cpp.sh
+      - backend/scripts/install_whispercpp.sh
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: "Backend to publish"
+        type: choice
+        options: [all, llamacpp_mks, llama_cpp, whisper_cpp]
+        default: all
+      git_ref:
+        description: "Commit to build (only with a single backend; empty = default)"
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: native-backends-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      backends: ${{ steps.p.outputs.backends }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: p
+        env:
+          INPUT_BACKEND: ${{ inputs.backend }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then
+            case "$INPUT_BACKEND" in
+              all|"") list='["llamacpp_mks","llama_cpp","whisper_cpp"]' ;;
+              llamacpp_mks|llama_cpp|whisper_cpp) list="[\"$INPUT_BACKEND\"]" ;;
+              *) echo "unknown backend" >&2; exit 1 ;;
+            esac
+          else
+            changed=$(git diff --name-only HEAD~1 HEAD)
+            items=()
+            if echo "$changed" | grep -Eq 'Dockerfile.backend-native|publish-native-backends.sh'; then
+              items=(llamacpp_mks llama_cpp whisper_cpp)
+            else
+              echo "$changed" | grep -q install_llama_cpp.sh && items+=(llamacpp_mks llama_cpp)
+              echo "$changed" | grep -q install_whispercpp.sh && items+=(whisper_cpp)
+            fi
+            list=$(printf '%s\n' "${items[@]}" | python3 -c 'import json,sys;print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
+          fi
+          echo "backends=$list" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: plan
+    if: needs.plan.outputs.backends != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: ${{ fromJson(needs.plan.outputs.backends) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space (CUDA devel image is large)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Build and publish
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          BACKEND_OCI_REPOSITORY: ghcr.io/${{ github.repository_owner }}/ocabra-backends
+          BACKEND: ${{ matrix.backend }}
+          INPUT_REF: ${{ inputs.git_ref }}
+          INPUT_BACKEND: ${{ inputs.backend }}
+        run: |
+          export BACKEND_OCI_REPOSITORY="${BACKEND_OCI_REPOSITORY,,}"
+          if [ -n "${INPUT_REF}" ] && [ "${INPUT_BACKEND}" = "${BACKEND}" ]; then
+            if ! printf '%s' "${INPUT_REF}" | grep -Eq '^[0-9a-f]{7,40}$'; then
+              echo "git_ref must be a commit hash" >&2; exit 1
+            fi
+            case "$BACKEND" in
+              llamacpp_mks) export LLAMACPP_MKS_REF="${INPUT_REF}" ;;
+              llama_cpp) export LLAMA_CPP_REF="${INPUT_REF}" ;;
+              whisper_cpp) export WHISPER_CPP_REF="${INPUT_REF}" ;;
+            esac
+          fi
+          bash backend/scripts/publish-native-backends.sh "$BACKEND"

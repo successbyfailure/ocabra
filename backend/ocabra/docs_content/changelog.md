@@ -16,6 +16,27 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.96.0 — 2026-11-17
+
+### Nuevo
+
+- Releases publicadas: cada versión es una etiqueta `vX.Y.Z` y se publican las
+  imágenes `ghcr.io/successbyfailure/ocabra-api`, `ocabra-frontend` y
+  `ocabra-node` con ese número (y `latest`), con sus notas como release de
+  GitHub. Los backends nativos (llama.cpp, el fork, whisper.cpp) se publican
+  desde CI cuando cambia su receta.
+- oCabra se actualiza solo: `GET /ocabra/system/update` (versión, última
+  publicada, política y estado), `POST /ocabra/system/update/check`,
+  `POST /ocabra/system/update/apply` y `PATCH /ocabra/system/update/policy`
+  (`off`, `notify` —por defecto— o `auto`, que instala cuando el nodo lleva
+  `idleMinutes` sin peticiones, batches ni descargas). Un nodo con
+  `OCABRA_API_IMAGE`/`OCABRA_FRONTEND_IMAGE` apuntando a GHCR avanza su copia
+  de git hasta la etiqueta, descarga las imágenes, recrea api y frontend y, si
+  la API nueva no arranca con esa versión, vuelve sola a la anterior. Durante
+  la actualización la API está caída alrededor de un minuto.
+
+---
+
 ## 0.95.6 — 2026-11-17
 
 ### Corregido

@@ -184,6 +184,30 @@ class RegistryClient:
             raise OciError(f"{self.ref.with_tag(ref)}: {resp.status_code}")
         return resp.headers.get("docker-content-digest")
 
+    async def tags(self) -> list[str]:
+        """Every tag of the repository (follows ``Link`` pagination)."""
+        out: list[str] = []
+        url: str | None = f"{self._base}/tags/list?n=1000"
+        while url:
+            resp = await self._request("GET", url)
+            if resp.status_code == 404:
+                return out
+            if resp.status_code >= 400:
+                raise OciError(f"Tags of {self.ref.repository}: {resp.status_code}")
+            out.extend(resp.json().get("tags") or [])
+            link = resp.headers.get("link", "")
+            match = re.search(r"<([^>]+)>", link)
+            url = (
+                (
+                    match.group(1)
+                    if match.group(1).startswith("http")
+                    else f"https://{self.ref.registry}{match.group(1)}"
+                )
+                if match
+                else None
+            )
+        return out
+
     async def blob_json(self, digest: str) -> dict[str, Any]:
         resp = await self._request("GET", f"{self._base}/blobs/{digest}")
         if resp.status_code >= 400:

@@ -7,7 +7,11 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.slim
-    image: ocabra-api:slim
+    # Self-update (backend/ocabra/core/self_update.py): a node that pulls the
+    # releases sets OCABRA_API_IMAGE / OCABRA_FRONTEND_IMAGE in .env to
+    # ghcr.io/successbyfailure/ocabra-{api,frontend}:X.Y.Z and the updater
+    # moves them. Unset, the stack builds and runs its own images as before.
+    image: ${OCABRA_API_IMAGE:-ocabra-api:slim}
     gpus: all
     ipc: host
     shm_size: "8gb"
@@ -123,6 +127,7 @@ services:
     restart: unless-stopped
 
   frontend:
+    image: ${OCABRA_FRONTEND_IMAGE:-ocabra-frontend:latest}
     build:
       context: ./frontend
       dockerfile: Dockerfile

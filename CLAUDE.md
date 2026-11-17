@@ -69,6 +69,44 @@ Si el cambio que motiva el bump lo puede notar alguien que use la API, anota
 también la entrada en el changelog que sirve el servidor (ver la sección
 siguiente). Hay un test que falla si subes de versión sin hacerlo.
 
+## Publicar una versión (y cómo se actualizan los nodos)
+
+Una versión publicada es una **etiqueta git `vX.Y.Z`** igual a `APP_VERSION` y
+a `frontend/package.json`. Al hacer push de la etiqueta,
+`.github/workflows/release.yml` comprueba que las tres coinciden, publica
+`ghcr.io/successbyfailure/ocabra-{api,frontend,node}:X.Y.Z` (y `latest`) y
+crea la release de GitHub con la sección del changelog:
+
+```bash
+git tag v0.96.0 && git push origin v0.96.0
+```
+
+No etiquetes sin que el usuario lo pida: publicar una etiqueta es lo que hace
+que los nodos con política `auto` se actualicen solos.
+
+Cómo se actualiza cada tipo de nodo (`backend/ocabra/core/self_update.py`):
+
+- **Stack compose con imágenes de GHCR** (`OCABRA_API_IMAGE` y
+  `OCABRA_FRONTEND_IMAGE` en `.env` apuntando a
+  `ghcr.io/successbyfailure/ocabra-*:X.Y.Z`): se actualiza solo según su
+  política (Ajustes → General → Actualizaciones). El actualizador es un
+  contenedor de un solo uso (`ocabra-updater`) que hace `git merge --ff-only`
+  hasta la etiqueta, cambia esas dos líneas del `.env`, `pull` + `up -d` de api
+  y frontend, y vuelve atrás si `/health` no da la versión nueva. Si la copia
+  de git tiene cambios locales, no avanza y no toca nada.
+- **Stack que compila sus imágenes** (el hub, sin esas variables): solo avisa;
+  se sigue desplegando como hasta ahora (build desde un worktree limpio).
+- **Imagen `ocabra-node`** (pods): no se actualiza desde dentro.
+- Para pasar un nodo a imágenes publicadas: añade al `.env`
+  `OCABRA_API_IMAGE=ghcr.io/successbyfailure/ocabra-api:X.Y.Z` y
+  `OCABRA_FRONTEND_IMAGE=ghcr.io/successbyfailure/ocabra-frontend:X.Y.Z` y haz
+  `docker compose pull api frontend && docker compose up -d api frontend`.
+
+Los backends nativos se publican con `.github/workflows/backends-native.yml`
+(al cambiar su receta en `main`, o a mano); los Python pesados (vLLM, torch…)
+se siguen publicando desde el hub copiando la instalación de producción
+(`python -m ocabra.core.oci_registry publish`).
+
 ## Documentación que sirve el propio servidor
 
 Además del Swagger en `/docs`, oCabra publica dos páginas en prosa dirigidas a

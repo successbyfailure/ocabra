@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.95.6"
+APP_VERSION = "0.96.0"
 
 
 class Settings(BaseSettings):
@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     # Prebuilt backends (see core/oci_registry.py): one public repository, one
     # tag per backend. Empty disables OCI installs (source only).
     backend_oci_repository: str = "ghcr.io/successbyfailure/ocabra-backends"
+    # Self-update (core/self_update.py): releases are ocabra-api /
+    # ocabra-frontend images tagged X.Y.Z under this repository prefix.
+    self_update_image_repo: str = "ghcr.io/successbyfailure"
+    # off | notify (show it, apply on request) | auto (apply once idle).
+    self_update_policy: str = "notify"
+    self_update_idle_minutes: int = 10
+    self_update_check_interval_s: int = 3600
     # True on the fat image (all backends pre-installed): unknown backends
     # without metadata.json are reported as "built-in" so they stay usable.
     # Set to False on the slim image so the same backends show as

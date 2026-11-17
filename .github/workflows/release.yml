@@ -1,0 +1,127 @@
+# Publish an oCabra release: push a tag vX.Y.Z (equal to APP_VERSION in
+# backend/ocabra/config.py and "version" in frontend/package.json).
+#
+#   git tag v0.96.0 && git push origin v0.96.0
+#
+# Builds and pushes, each tagged X.Y.Z and latest:
+#   ghcr.io/<owner>/ocabra-api       (backend/Dockerfile.slim)
+#   ghcr.io/<owner>/ocabra-frontend  (frontend/Dockerfile)
+#   ghcr.io/<owner>/ocabra-node      (backend/Dockerfile.node, rented GPUs)
+# and opens a GitHub release with that version's changelog section. Nodes with
+# OCABRA_API_IMAGE / OCABRA_FRONTEND_IMAGE pointing at GHCR see the new tag
+# and update themselves according to their policy (core/self_update.py).
+name: release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)publish, e.g. v0.96.0"
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      owner: ${{ steps.v.outputs.owner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: v
+        name: Tag must match APP_VERSION and package.json
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "not a release tag: $tag" >&2; exit 1
+          fi
+          version="${tag#v}"
+          app=$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' backend/ocabra/config.py)
+          front=$(python3 -c 'import json;print(json.load(open("frontend/package.json"))["version"])')
+          if [ "$app" != "$version" ] || [ "$front" != "$version" ]; then
+            echo "tag $version, APP_VERSION $app, package.json $front: they must match" >&2; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+  images:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ocabra-api
+            context: backend
+            file: backend/Dockerfile.slim
+          - name: ocabra-frontend
+            context: frontend
+            file: frontend/Dockerfile
+          - name: ocabra-node
+            context: backend
+            file: backend/Dockerfile.node
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Free disk space (CUDA images are large)
+        if: matrix.name != 'ocabra-frontend'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: true
+          tags: |
+            ghcr.io/${{ needs.version.outputs.owner }}/${{ matrix.name }}:${{ needs.version.outputs.version }}
+            ghcr.io/${{ needs.version.outputs.owner }}/${{ matrix.name }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  github-release:
+    needs: [version, images]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Release notes from the changelog
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## " v " " {on=1; next}
+            on && /^---$/ {exit}
+            on {print}
+          ' backend/ocabra/docs_content/changelog.md > notes.md
+          [ -s notes.md ] || echo "Ver /docs/changelog." > notes.md
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release edit "v$VERSION" --notes-file notes.md
+          else
+            gh release create "v$VERSION" --title "oCabra $VERSION" --notes-file notes.md
+          fi

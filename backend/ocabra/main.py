@@ -624,6 +624,16 @@ async def lifespan(app: FastAPI):
         _schedule_maintenance_loop(gpu_scheduler, schedule_maintenance_stop),
         name="schedule-maintenance-loop",
     )
+    # oCabra updating itself (core/self_update.py): looks for releases and,
+    # with policy "auto", applies one once the node is idle.
+    from ocabra.core.self_update import SelfUpdater
+
+    self_updater = SelfUpdater(app)
+    app.state.self_updater = self_updater
+    self_update_stop = asyncio.Event()
+    self_update_task = asyncio.create_task(
+        self_updater.run(self_update_stop), name="self-update-loop"
+    )
     ollama_inventory_stop = asyncio.Event()
     # ollama_inventory_task created after profile_registry (below)
     service_idle_stop = asyncio.Event()
@@ -862,6 +872,11 @@ async def lifespan(app: FastAPI):
     schedule_maintenance_task.cancel()
     with suppress(asyncio.CancelledError):
         await schedule_maintenance_task
+
+    self_update_stop.set()
+    self_update_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await self_update_task
 
     ollama_inventory_stop.set()
     ollama_inventory_task.cancel()
@@ -1459,6 +1474,7 @@ from ocabra.api.internal.ollama_admin import router as ollama_admin_router  # no
 from ocabra.api.internal.registry import router as registry_router  # noqa: E402
 from ocabra.api.internal.services import router as services_router  # noqa: E402
 from ocabra.api.internal.status import router as status_router  # noqa: E402
+from ocabra.api.internal.system_update import router as system_update_router  # noqa: E402
 from ocabra.api.internal.video import router as video_router  # noqa: E402
 from ocabra.api.internal.ws import router as ws_router  # noqa: E402
 
@@ -1479,6 +1495,7 @@ from ocabra.api.internal.openai_tts_compat import router as openai_tts_compat_ro
 app.include_router(openai_tts_compat_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(openai_image_compat_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(system_update_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(logical_models_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(models_update_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(ws_router, prefix="/ocabra", include_in_schema=False)

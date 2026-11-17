@@ -130,7 +130,8 @@ ENV DATABASE_URL=postgresql+asyncpg://ocabra:ocabra@127.0.0.1:5432/ocabra \
     OLLAMA_ENABLED=false \
     FEDERATION_ENABLED=true \
     FEDERATION_LOCAL_URL=http://127.0.0.1:8000 \
-    BACKENDS_FAT_IMAGE=false
+    BACKENDS_FAT_IMAGE=false \
+    OCABRA_NODE_IMAGE=1
 
 ENTRYPOINT ["/app/node-entrypoint.sh"]
 CMD ["uvicorn", "ocabra.main:app", "--host", "127.0.0.1", "--port", "8000", "--workers", "1"]

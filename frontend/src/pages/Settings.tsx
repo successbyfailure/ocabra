@@ -24,6 +24,7 @@ import { LiteLLMSettings } from "@/components/settings/LiteLLMSettings"
 import { PrioritySettings } from "@/components/settings/PrioritySettings"
 import { RoutingSettings } from "@/components/settings/RoutingSettings"
 import { StorageSettings } from "@/components/settings/StorageSettings"
+import { SelfUpdateSettings } from "@/components/settings/SelfUpdateSettings"
 import type { GPUState, LocalModel, ServerConfig } from "@/types"
 
 const EMPTY_CONFIG: ServerConfig = {
@@ -225,6 +226,7 @@ export function Settings() {
               <GeneralSettings config={config} onSave={savePatch} />
               <ApiAccessSettings config={config} onSave={savePatch} />
               <PrivacySettings config={config} onSave={savePatch} />
+              <SelfUpdateSettings />
             </div>
           </Tabs.Content>
 
