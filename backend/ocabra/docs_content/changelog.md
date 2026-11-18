@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.107.2 — 2026-11-18
+
+### Corregido
+
+- La vista previa podía decir «cabe» para una carga que luego fallaba por
+  memoria. Si otro modelo se cargaba a la vez (un embedding que vuelve con una
+  petición), su proceso podía atribuirse al que se medía, y la calibración
+  aprendía que ocupaba 1 GB menos. Ahora solo se asocia un proceso cuya VRAM
+  se parece a la de esa carga, y una medida que se aleja más de un 15 % (o
+  400 MB) de la proyección se descarta. El ajuste queda limitado a ±512 MB.
+- El sondeo en modo «contexto objetivo» (`target_context`) ya no exige
+  `LLAMA_CPP_LIVE_CONTEXT_ENABLED`: carga cada candidato a ese contexto y no
+  necesita ampliarlo en caliente.
+
+---
+
 ## 0.107.1 — 2026-11-18
 
 ### Corregido

@@ -353,7 +353,11 @@ class GPUManager:
         return out
 
     def adopt_new_processes(
-        self, gpu_indices: list[int], before: set[int], worker_pid: int | None
+        self,
+        gpu_indices: list[int],
+        before: set[int],
+        worker_pid: int | None,
+        expected_mb: int | None = None,
     ) -> int | None:
         """Map the NVML PID a load just created to its worker, if it needs it.
 
@@ -369,6 +373,25 @@ class GPUManager:
         nvml_pid = next(iter(new))
         if nvml_pid == worker_pid or os.path.exists(f"/proc/{nvml_pid}/status"):
             return None
+        if expected_mb and expected_mb > 0:
+            # Another model that loaded at the same moment (an embedding
+            # reloaded by a request) would be the only new PID too: only adopt
+            # one whose VRAM looks like this load's.
+            held = sum(
+                int(p.used_vram_mb)
+                for g in gpu_indices
+                for p in (self._read_local_processes(g) or [])
+                if p.pid == nvml_pid
+            )
+            if held and not (0.5 * expected_mb <= held <= 1.5 * expected_mb):
+                logger.info(
+                    "gpu_pid_alias_skipped",
+                    nvml_pid=nvml_pid,
+                    worker_pid=worker_pid,
+                    held_mb=held,
+                    expected_mb=expected_mb,
+                )
+                return None
         self._pid_alias[nvml_pid] = int(worker_pid)
         logger.info("gpu_pid_alias", nvml_pid=nvml_pid, worker_pid=worker_pid)
         return nvml_pid

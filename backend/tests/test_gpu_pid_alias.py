@@ -38,3 +38,22 @@ def test_two_new_pids_are_ambiguous(monkeypatch):
     gm = _gm(monkeypatch, {1, 2})
     monkeypatch.setattr("os.path.exists", lambda p: False)
     assert gm.adopt_new_processes([0], set(), 4242) is None
+
+
+def test_a_new_pid_that_does_not_look_like_this_load_is_not_adopted(monkeypatch):
+    # The only new PID is an embedding (3058 MB) reloaded at the same moment
+    # as qwen3:30b (expected ~4400 MB): not adopted.
+    gm = _gm(monkeypatch, {985})
+    monkeypatch.setattr("os.path.exists", lambda p: False)
+    monkeypatch.setattr(
+        gm,
+        "_read_local_processes",
+        lambda g: [SimpleNamespace(pid=985, used_vram_mb=1198, process_type="compute")],
+    )
+    assert gm.adopt_new_processes([0], set(), 4242, expected_mb=4416) is None
+    monkeypatch.setattr(
+        gm,
+        "_read_local_processes",
+        lambda g: [SimpleNamespace(pid=985, used_vram_mb=4262, process_type="compute")],
+    )
+    assert gm.adopt_new_processes([0], set(), 4242, expected_mb=4416) == 985

@@ -169,6 +169,9 @@ def test_calibration_offset_follows_real_loads():
     assert lf.record_measurement(f, 0, 3376, 3568) == round((-153 + -192) / 2)
     assert lf.calibration_offset_mb(f, 1) == 0  # per GPU
     assert lf.record_measurement(f, 0, 0, 3568) == lf.calibration_offset_mb(f, 0)  # no reading
-    lf.record_measurement("/x.gguf", 0, 99999, 100)
-    assert lf.calibration_offset_mb("/x.gguf", 0) == 1024  # clamped
+    # An embedding (3058 MB) attributed to qwen3:30b (projected 4416) is a
+    # wrong reading, not a projection error: ignored.
+    lf._offsets.clear()
+    assert lf.record_measurement(f, 0, 3058, 4416) == 0
+    assert lf.calibration_offset_mb(f, 0) == 0
     lf._offsets.clear()

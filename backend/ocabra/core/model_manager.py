@@ -2527,7 +2527,12 @@ class ModelManager:
                             adopt = getattr(self._gpu_manager, "adopt_new_processes", None)
                             if callable(adopt) and actual_gpu_indices:
                                 with suppress(Exception):
-                                    adopt(actual_gpu_indices, raw_before, worker_info.pid)
+                                    adopt(
+                                        actual_gpu_indices,
+                                        raw_before,
+                                        worker_info.pid,
+                                        expected_mb=int(vram_needed or 0) or None,
+                                    )
                             if model_id in self._last_projection and actual_gpu_indices:
                                 spawn(
                                     self._calibrate_after_load(

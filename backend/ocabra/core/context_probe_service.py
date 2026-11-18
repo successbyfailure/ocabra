@@ -214,10 +214,17 @@ class ContextProbeService:
             raise ProbeError(f"preset '{job.preset_key}' not found in '{job.profile_id}'")
         base_state = await self._mm.get_state(profile.base_model_id)
         backend = self._pool._backends.get(getattr(base_state, "backend_type", ""))
-        if not getattr(backend, "SUPPORTS_LIVE_CONTEXT", False):
-            raise ProbeError("only llama.cpp fork models can change their context live")
-        if not settings.llama_cpp_live_context_enabled:
-            raise ProbeError("live context is disabled (LLAMA_CPP_LIVE_CONTEXT_ENABLED)")
+        if job.target_context:
+            # Each candidate split is loaded at the target context: no live
+            # resize, so any llama.cpp backend that can project memory works
+            # (Mapache runs with live context off).
+            if not callable(getattr(backend, "project_memory", None)):
+                raise ProbeError("only llama.cpp models can be split between GPU and RAM")
+        else:
+            if not getattr(backend, "SUPPORTS_LIVE_CONTEXT", False):
+                raise ProbeError("only llama.cpp fork models can change their context live")
+            if not settings.llama_cpp_live_context_enabled:
+                raise ProbeError("live context is disabled (LLAMA_CPP_LIVE_CONTEXT_ENABLED)")
 
         plan = await plan_profile_runtime(
             profile,

@@ -275,8 +275,15 @@ def args_from_options(model_file: str, options: dict[str, Any]) -> list[str]:
 # later projections add it. Averaged over the last loads, clamped, in memory
 # (a restart starts from the plain projection again).
 
-_OFFSET_CLAMP_MB = 1024
+_OFFSET_CLAMP_MB = 512
 _OFFSET_WEIGHT = 0.5  # new measurement vs history
+#: A measurement further than this from the projection is not a projection
+#: error but a wrong reading (another process attributed to the worker, a
+#: load still allocating): ignored. Real errors measured on Mapache were
+#: within ±200 MB; a misattributed embedding (3 GB) taught qwen3:30b −1024 MB
+#: and its projection then admitted a load that ran out of memory.
+_PLAUSIBLE_FRACTION = 0.15
+_PLAUSIBLE_MIN_MB = 400
 _offsets: dict[tuple[str, int], float] = {}
 
 
@@ -288,7 +295,17 @@ def record_measurement(model_file: str, gpu: int, measured_mb: int, raw_projecte
     """Fold one load's real VRAM on ``gpu`` into its offset; returns the new one."""
     if measured_mb <= 0 or raw_projected_mb <= 0:
         return calibration_offset_mb(model_file, gpu)
-    delta = max(-_OFFSET_CLAMP_MB, min(_OFFSET_CLAMP_MB, measured_mb - raw_projected_mb))
+    raw_delta = measured_mb - raw_projected_mb
+    if abs(raw_delta) > max(_PLAUSIBLE_MIN_MB, raw_projected_mb * _PLAUSIBLE_FRACTION):
+        logger.warning(
+            "llama_fit_calibration_ignored",
+            model_file=model_file,
+            gpu=gpu,
+            measured_mb=measured_mb,
+            projected_mb=raw_projected_mb,
+        )
+        return calibration_offset_mb(model_file, gpu)
+    delta = max(-_OFFSET_CLAMP_MB, min(_OFFSET_CLAMP_MB, raw_delta))
     key = (str(model_file), int(gpu))
     previous = _offsets.get(key)
     _offsets[key] = (
