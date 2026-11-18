@@ -16,6 +16,38 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.107.0 — 2026-11-18
+
+### Nuevo
+
+- Sondeo de contexto en modo «contexto objetivo, lo más rápido» para modelos
+  repartidos entre GPU y RAM: `POST /ocabra/profiles/{id}/runtime-presets/{key}/context-probe`
+  con `target_context` busca las menos capas en RAM (expertos MoE, o capas
+  enteras en modelos densos) con las que cabe ese contexto, cargando de verdad
+  cada candidato. El resultado (`mode: "offload"`, `in_ram`, `placement`,
+  `used_mb`, `ram_need_mb`) se aplica con `.../context-probe/apply`, que deja el
+  peldaño con ese contexto y ese reparto.
+- `POST /ocabra/models/{id}/preview` devuelve `host` para modelos llama.cpp: la
+  RAM total y libre del nodo, la que el borrador deja residente (`needMb`: lo
+  que va a CPU; con `mlock`, el fichero entero) y `fits`; y
+  `estimate.fits_host_ram`.
+
+### Corregido
+
+- La memoria proyectada de llama.cpp se ajusta con lo medido en cargas
+  anteriores del mismo modelo (parte `calibration` del desglose): en una GTX
+  1660, qwen3:30b quedaba ~150 MB por debajo de su proyección en todas las
+  configuraciones y se rechazaban cargas que cabían.
+- En nodos cuyo driver da PID del host dentro del contenedor, oCabra no veía
+  la VRAM real de sus propios modelos (contaba la estimación). Ahora asocia el
+  proceso nuevo de cada carga a su worker.
+- El máximo de contexto por petición de la vista previa contaba 1 petición
+  simultánea en los modelos `llamacpp_mks` (leía mal su configuración).
+- El alta automática avisaba de la RAM contra el 85 % de la total; ahora
+  contra la libre y teniendo en cuenta `mlock`.
+
+---
+
 ## 0.106.4 — 2026-11-17
 
 ### Correcciones

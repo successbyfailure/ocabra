@@ -2017,9 +2017,20 @@ async def preview_model_config(
                 "fits_current_gpu": all(g["mb"] <= room[g["index"]]["availableMb"] for g in used),
                 "fits_after_eviction": all(g["mb"] <= room[g["index"]]["budgetMb"] for g in used),
             }
-            section = materialized.get(state.backend_type)
+            # llamacpp_mks keeps its options under "llama_cpp": reading the
+            # backend type found nothing, so 4 slots counted as 1 (Mapache's
+            # gemma4 showed 20k per request for a 48k pool).
+            from ocabra.core.artifacts import config_section_for
+
+            section = materialized.get(config_section_for(state.backend_type))
             slots = (section or {}).get("parallel_slots") if isinstance(section, dict) else None
             estimate = _max_context_within_budget(estimate, used, room, slots)
+
+    host = None
+    if is_llama_cpp_family(state.backend_type):
+        host = await _preview_host(state, materialized, estimate)
+        if host is not None:
+            estimate = {**estimate, "fits_host_ram": host["fits"]}
 
     return {
         "errors": errors,
@@ -2028,7 +2039,58 @@ async def preview_model_config(
         "gpuIndices": gpu_indices,
         "gpus": gpus,
         "capacity": capacity,
+        "host": host,
         "launch": launch,
+    }
+
+
+async def _preview_host(state: Any, materialized: dict, estimate: dict) -> dict | None:
+    """Host RAM against what this llama.cpp draft keeps resident in it.
+
+    ``needMb`` is the CPU side of the load (llama-fit-params' Host figure, or
+    the formula's experts in RAM); with ``mlock`` the whole GGUF, which it
+    pins. ``availableMb`` is MemAvailable, plus this model's own resident
+    copy when it is loaded (a reload gives it back first). ``fits`` leaves
+    ``RAM_MARGIN_MB`` for everything else. The editor had no notion of RAM at
+    all: on Mapache a split MoE that fit the GPU could still not fit the host.
+    """
+    from ocabra.core import host_memory
+    from ocabra.core.artifacts import config_section_for
+
+    mem = await asyncio.to_thread(host_memory.read_host_memory)
+    if mem is None:
+        return None
+    section = materialized.get(config_section_for(state.backend_type)) or {}
+    if not isinstance(section, dict):
+        section = {}
+    mlock_opt = section.get("mlock")
+    mlock = bool(settings.llama_cpp_mlock if mlock_opt is None else mlock_opt)
+    model_file = section.get("model_path")
+    file_mb = await asyncio.to_thread(host_memory.file_mb, model_file)
+    projected = int(estimate.get("host_ram_mb") or estimate.get("cpu_mb") or 0)
+    if not projected and not mlock:
+        need = 0
+    else:
+        need = host_memory.llama_ram_need_mb(projected, model_file_mb=file_mb, mlock=mlock)
+    own = 0
+    if (
+        getattr(state, "status", None) is not None
+        and str(getattr(state.status, "value", state.status)) == "loaded"
+    ):
+        # A loaded copy comes back first on a reload. Without mlock its pages
+        # are reclaimable cache, already inside MemAvailable; with it they are
+        # pinned (the whole file), and RSS is only recorded for CPU-only loads.
+        own = int(getattr(state, "ram_used_mb", 0) or 0) or (file_mb if mlock else 0)
+    available = int(mem["available_mb"]) + own
+    return {
+        "totalMb": int(mem["total_mb"]),
+        "availableMb": available,
+        "needMb": need,
+        "projectedMb": projected,
+        "modelFileMb": file_mb,
+        "mlock": mlock,
+        "marginMb": host_memory.RAM_MARGIN_MB,
+        "fits": need + host_memory.RAM_MARGIN_MB <= available if need else True,
     }
 
 
@@ -2903,6 +2965,9 @@ def _estimate_llama_cpp_memory(
                 else None
             ),
             "model_loading_memory_mb": total_mb,
+            # CPU side of a MoE split (experts left in RAM), so the preview can
+            # weigh it against the host's RAM like a llama-fit projection.
+            "host_ram_mb": int(moe_cpu_mb) or None,
             "fits_current_gpu": (total_mb <= total_vram_mb if total_vram_mb is not None else None),
             "source": "gguf_header",
             "notes": notes,

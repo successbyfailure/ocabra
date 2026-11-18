@@ -187,6 +187,7 @@ export function BaseLlamaWorkbench(props: SectionProps & { onCreatePreset?: () =
       gpus={gpus}
       liveVramByGpu={liveVramByGpu}
       memory={memory}
+      host={editor.preview?.host ?? null}
       cap={cap}
       native={cap?.arch?.native_context ?? (Number(editor.model?.capabilities?.native_context_length) || null)}
       allowMax={false}

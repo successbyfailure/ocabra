@@ -270,6 +270,17 @@ class ContextProbeRequest(BaseModel):
         default=True,
         description="Load the vision projector at the end to measure what it costs.",
     )
+    target_context: int | None = Field(
+        default=None,
+        ge=4096,
+        le=1048576,
+        description=(
+            "Instead of the largest context: the context wanted (the preset's "
+            "own meaning, pool or per request) and find the fewest layers in RAM "
+            "(MoE experts, or whole layers for dense models) that fit it — the "
+            "fastest split for that context. Validated by loading each candidate."
+        ),
+    )
 
 
 class RuntimePresetBenchmarkRequest(BaseModel):

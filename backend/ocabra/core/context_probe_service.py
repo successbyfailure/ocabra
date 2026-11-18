@@ -50,6 +50,9 @@ class ProbeJob:
     preset_key: str
     full_validation: bool
     measure_vision: bool
+    # Set: "target context, fastest split" mode — find the fewest expert
+    # layers (MoE) or layers (dense) in RAM that fit this context.
+    target_context: int | None = None
     status: str = (
         "pending"  # preparing, loading, probing, validating, vision, restoring, done, error
     )
@@ -89,7 +92,13 @@ class ContextProbeService:
         return self._jobs.get(job_id) if job_id else None
 
     def start(
-        self, profile_id: str, preset_key: str, *, full_validation: bool, measure_vision: bool
+        self,
+        profile_id: str,
+        preset_key: str,
+        *,
+        full_validation: bool,
+        measure_vision: bool,
+        target_context: int | None = None,
     ) -> ProbeJob:
         if self.busy():
             raise RuntimeError("another context probe is running")
@@ -99,6 +108,7 @@ class ContextProbeService:
             preset_key=preset_key,
             full_validation=full_validation,
             measure_vision=measure_vision,
+            target_context=int(target_context) if target_context else None,
         )
         self._jobs[job.job_id] = job
         self._latest[(profile_id, preset_key)] = job.job_id
@@ -124,6 +134,11 @@ class ContextProbeService:
                 held_pins = self._hold_pin_reloads()
                 await self._wait_for_loads(gpus)
                 pinned_evicted = await self._clear_gpus(job, gpus, keep=probe_key)
+
+                if job.target_context:
+                    job.result = await self._run_offload(job, base_id, overrides, gpus)
+                    job.status = "done"
+                    return
 
                 job.status = "loading"
                 from ocabra.api.openai._deps import ensure_worker_loaded
@@ -246,6 +261,228 @@ class ContextProbeService:
         job.context_is_pool = pool
         job.parallelism = parallel
         return profile, overrides, gpus, start
+
+    # -- target context, fastest split --------------------------------------
+
+    async def _run_offload(self, job: ProbeJob, base_id: str, overrides: dict, gpus: list[int]):
+        """Fewest layers in RAM that fit ``job.target_context``, validated by loading.
+
+        The projection (llama-fit-params, with the calibration of earlier
+        loads) picks the first candidate; then each candidate is loaded for
+        real at the target context and measured. With room for another layer
+        on the GPUs it tries one fewer in RAM; when a load does not fit, one
+        more. Every measurement calibrates the next projections at once.
+        The host RAM the candidate keeps resident is checked before loading.
+        """
+        from ocabra.core import auto_setup, host_memory, llama_fit
+        from ocabra.core import vram_planner as vp
+
+        base_state = await self._mm.get_state(base_id)
+        backend = self._pool._backends.get(getattr(base_state, "backend_type", ""))
+        if not callable(getattr(backend, "project_memory", None)):
+            raise ProbeError("this backend cannot project memory")
+        section = overrides.get("llama_cpp") or {}
+        model_file = section.get("model_path") or (
+            auto_setup.materialized_extra(base_state).get("llama_cpp") or {}
+        ).get("model_path")
+        arch = vp.arch_from_gguf(model_file) if model_file else None
+        layers = int(getattr(arch, "layers", 0) or 0)
+        if layers <= 0:
+            raise ProbeError("cannot read the model's layers from its GGUF")
+        moe = bool(getattr(arch, "expert_mb_by_layer", ()))
+        target = int(job.target_context or 0)
+        pool_tokens = target if job.context_is_pool else target * max(1, job.parallelism)
+        pool_tokens = max(GRANULARITY, pool_tokens // GRANULARITY * GRANULARITY)
+
+        keep = (
+            "parallel_slots",
+            "cache_type_k",
+            "cache_type_v",
+            "kv_unified",
+            "flash_attn",
+            "batch_size",
+            "ubatch_size",
+            "split_mode",
+            "tensor_split",
+            "mlock",
+            "vision_mode",
+        )
+        base = {k: section[k] for k in keep if section.get(k) is not None}
+        project = auto_setup._Projector(backend, base_state)
+        limits = self._free_limits(gpus)
+
+        job.status = "planning"
+        first, first_proj = await auto_setup.min_offload(
+            project, gpus, limits, pool_tokens, base=base, layers=layers, moe=moe
+        )
+        if first is None:
+            raise ProbeError(
+                f"{pool_tokens // 1024}k no cabe en GPU {gpus} ni con todas las capas en RAM"
+            )
+        mlock_opt = section.get("mlock")
+        mlock = bool(settings.llama_cpp_mlock if mlock_opt is None else mlock_opt)
+        file_mb = host_memory.file_mb(model_file)
+        mem = host_memory.read_host_memory()
+
+        def ram_need(proj: dict | None) -> int:
+            return host_memory.llama_ram_need_mb(
+                int((proj or {}).get("host_mb") or 0), model_file_mb=file_mb, mlock=mlock
+            )
+
+        if mem and ram_need(first_proj) + host_memory.RAM_MARGIN_MB > mem["available_mb"]:
+            raise ProbeError(
+                f"necesita {ram_need(first_proj) / 1024:.1f} GB de RAM y hay "
+                f"{mem['available_mb'] / 1024:.1f} GB libres"
+                + (" (con mlock bloquea el fichero entero)" if mlock else "")
+            )
+
+        tried: dict[int, dict] = {}
+        best: int | None = None
+        n = int(first)
+        for _ in range(8):
+            if n in tried or n < 0 or n > layers:
+                break
+            job.status = "loading"
+            step = await self._try_offload(
+                job, base_id, overrides, gpus, n, pool_tokens, layers=layers, moe=moe
+            )
+            proj = await project(
+                gpus,
+                {
+                    **base,
+                    **auto_setup.offload_overrides(n, layers=layers, moe=moe),
+                    "ctx_size": pool_tokens,
+                },
+            )
+            raw = (proj or {}).get("raw_vram_by_gpu") or {}
+            for gpu, mb in (step.get("used_mb") or {}).items():
+                if int(gpu) in raw and mb:
+                    llama_fit.record_measurement(
+                        str(model_file), int(gpu), int(mb), int(raw[int(gpu)])
+                    )
+            step["projected_mb"] = {
+                str(g): int(v) for g, v in ((proj or {}).get("vram_by_gpu") or {}).items()
+            }
+            step["ram_need_mb"] = ram_need(proj)
+            tried[n] = step
+            job.steps.append(step)
+            if step["fits"]:
+                best = n
+                if n == 0:
+                    break
+                # Room for one more layer on the GPUs? (what the projection
+                # says the next one costs, with the calibration just learned)
+                fewer = await project(
+                    gpus,
+                    {
+                        **base,
+                        **auto_setup.offload_overrides(n - 1, layers=layers, moe=moe),
+                        "ctx_size": pool_tokens,
+                    },
+                )
+                if fewer is None or not auto_setup._fits(fewer, limits) or (n - 1) in tried:
+                    break
+                n -= 1
+            else:
+                if best is not None:
+                    break
+                n += 1
+        if best is None:
+            raise ProbeError(
+                f"ningún reparto probado cabe con {pool_tokens // 1024}k: {sorted(tried)}"
+            )
+        chosen = tried[best]
+        return {
+            "mode": "offload",
+            "target_context": target,
+            "pool_tokens": pool_tokens,
+            "moe": moe,
+            "layers": layers,
+            "in_ram": best,
+            "placement": {
+                k: v
+                for k, v in auto_setup.offload_overrides(best, layers=layers, moe=moe).items()
+                if v is not None and not (k == "gpu_layers" and v >= 999)
+            },
+            "used_mb": chosen["used_mb"],
+            "limit_mb": {str(g): int(v) for g, v in limits.items()},
+            "ram_need_mb": chosen.get("ram_need_mb"),
+            "ram_available_mb": (mem or {}).get("available_mb"),
+            "mlock": mlock,
+            "first_guess": int(first),
+            "margin_mb": int(settings.vram_buffer_mb),
+            "measured_at": time.time(),
+        }
+
+    def _free_limits(self, gpus: list[int]) -> dict[int, int]:
+        """What a worker may hold on each (already cleared) GPU."""
+        gm = self._mm._gpu_manager
+        limits: dict[int, int] = {}
+        for gpu in gpus:
+            ceiling = gm.admission_ceiling_mb(gpu, physical=False)
+            if ceiling is None:
+                raise ProbeError(f"cannot read GPU {gpu}'s reserved memory")
+            foreign = sum(gm.get_process_vram_mb(gpu).values())
+            limits[gpu] = int(ceiling) - int(foreign)
+        return limits
+
+    async def _try_offload(
+        self,
+        job: ProbeJob,
+        base_id: str,
+        overrides: dict,
+        gpus: list[int],
+        n: int,
+        pool_tokens: int,
+        *,
+        layers: int,
+        moe: bool,
+    ) -> dict:
+        """Load one candidate split at the target context, measure, unload."""
+        from ocabra.api.openai._deps import ensure_worker_loaded
+        from ocabra.core import auto_setup
+
+        ov = copy.deepcopy(overrides)
+        section = ov.setdefault("llama_cpp", {})
+        for key, value in auto_setup.offload_overrides(n, layers=layers, moe=moe).items():
+            if value is None:
+                section.pop(key, None)
+            else:
+                section[key] = value
+        section["ctx_size"] = pool_tokens
+        section.pop("launch_ctx_size", None)
+        use_case = ov.setdefault("use_case", {})
+        use_case["context"] = (
+            pool_tokens if job.context_is_pool else max(1, pool_tokens // max(1, job.parallelism))
+        )
+        runtime = ov.setdefault("_runtime", {})
+        runtime["effective_context"] = pool_tokens
+        # The real load is the judge: no validated figure from another split.
+        runtime["capacity_validated"] = False
+        runtime["capacity_vram_mb"] = None
+        key = compute_worker_key(base_id, ov)
+        step: dict[str, Any] = {"in_ram": n, "context": pool_tokens, "fits": False, "used_mb": {}}
+        try:
+            state = await ensure_worker_loaded(
+                self._mm,
+                base_id,
+                key,
+                ov,
+                preferred_gpu=gpus[0] if len(gpus) == 1 else None,
+                load_policy="on_demand",
+            )
+            await asyncio.sleep(3)  # let the allocations settle
+            used = await self._measure(key, gpus)
+            limits = self._limits(gpus, state)
+            step["used_mb"] = {str(g): int(v) for g, v in used.items()}
+            step["fits"] = bool(used) and all(int(used.get(g, 0)) <= int(limits[g]) for g in gpus)
+            if not step["fits"]:
+                step["note"] = "se pasa del límite"
+        except Exception as exc:  # noqa: BLE001 - a candidate that does not load
+            step["note"] = str(exc)[:200]
+        finally:
+            await self._restore(None, key, [])
+        return step
 
     def _hold_pin_reloads(self) -> dict[str, Any]:
         """Keep pinned models from reloading while the probe owns the GPUs.

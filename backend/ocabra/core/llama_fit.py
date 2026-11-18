@@ -262,3 +262,46 @@ def args_from_options(model_file: str, options: dict[str, Any]) -> list[str]:
         tensor_split=options.get("tensor_split"),
         main_gpu=options.get("main_gpu"),
     )
+
+
+# ── calibration from real loads ──────────────────────────────────────────
+#
+# What a process really holds on a GPU differs from the projection by a
+# model-dependent amount: on Mapache's GTX 1660 (2026-11-18) qwen3:30b with
+# experts in RAM came out 150-190 MB *below* its projection in every config,
+# gemma4:26b within ±130. 150 MB on a 6 GB card is a load refused that fits
+# (qwen3:30b with 40 expert layers in RAM: refused by 34 MB). After each load
+# the model manager records measured − projected per model file and GPU, and
+# later projections add it. Averaged over the last loads, clamped, in memory
+# (a restart starts from the plain projection again).
+
+_OFFSET_CLAMP_MB = 1024
+_OFFSET_WEIGHT = 0.5  # new measurement vs history
+_offsets: dict[tuple[str, int], float] = {}
+
+
+def calibration_offset_mb(model_file: str, gpu: int) -> int:
+    return int(round(_offsets.get((str(model_file), int(gpu)), 0.0)))
+
+
+def record_measurement(model_file: str, gpu: int, measured_mb: int, raw_projected_mb: int) -> int:
+    """Fold one load's real VRAM on ``gpu`` into its offset; returns the new one."""
+    if measured_mb <= 0 or raw_projected_mb <= 0:
+        return calibration_offset_mb(model_file, gpu)
+    delta = max(-_OFFSET_CLAMP_MB, min(_OFFSET_CLAMP_MB, measured_mb - raw_projected_mb))
+    key = (str(model_file), int(gpu))
+    previous = _offsets.get(key)
+    _offsets[key] = (
+        float(delta)
+        if previous is None
+        else previous * (1 - _OFFSET_WEIGHT) + delta * _OFFSET_WEIGHT
+    )
+    logger.info(
+        "llama_fit_calibrated",
+        model_file=model_file,
+        gpu=gpu,
+        measured_mb=measured_mb,
+        projected_mb=raw_projected_mb,
+        offset_mb=calibration_offset_mb(model_file, gpu),
+    )
+    return calibration_offset_mb(model_file, gpu)

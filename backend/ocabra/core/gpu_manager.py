@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -43,6 +44,11 @@ _CEILING_SLACK_MB = 64
 class GPUManager:
     def __init__(self) -> None:
         self._states: dict[int, GPUState] = {}
+        # NVML PID → worker PID, for hosts whose driver reports PIDs of the
+        # host's namespace inside the container (Mapache's GTX 1660): the
+        # worker's own PID never matched, so its real VRAM was unknown and
+        # every figure fell back to the estimate. See adopt_new_processes().
+        self._pid_alias: dict[int, int] = {}
         self._locks: dict[int, dict[str, int]] = {}  # gpu_index → {model_id: vram_mb}
         self._poll_task: asyncio.Task | None = None
         self._running: bool = False
@@ -68,7 +74,11 @@ class GPUManager:
             pynvml.nvmlInit()
             self._nvml_available = True
         except pynvml.NVMLError as e:
-            logger.warning("nvml_unavailable", error=str(e), detail="GPU monitoring disabled; relying on hw-monitor")
+            logger.warning(
+                "nvml_unavailable",
+                error=str(e),
+                detail="GPU monitoring disabled; relying on hw-monitor",
+            )
             self._running = True
             return
         count = pynvml.nvmlDeviceGetCount()
@@ -309,8 +319,68 @@ class GPUManager:
             return [self._to_process_info(process, process_type) for process in nvml_processes]
         return []
 
+    def raw_compute_pids(self, gpu_indices: list[int]) -> set[int]:
+        """NVML compute PIDs on these GPUs, untranslated (for adopt_new_processes)."""
+        out: set[int] = set()
+        if not self._nvml_available:
+            # hw-monitor's polled list (already translated): undo the aliases.
+            reverse = {v: k for k, v in self._pid_alias.items()}
+            for index in gpu_indices:
+                state = self._states.get(index)
+                for proc in getattr(state, "processes", None) or []:
+                    if proc.process_type == "compute" and proc.pid:
+                        out.add(reverse.get(proc.pid, proc.pid))
+            return out
+        for index in gpu_indices:
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+            except pynvml.NVMLError:
+                continue
+            for name in (
+                "nvmlDeviceGetComputeRunningProcesses_v3",
+                "nvmlDeviceGetComputeRunningProcesses_v2",
+                "nvmlDeviceGetComputeRunningProcesses",
+            ):
+                query = getattr(pynvml, name, None)
+                if not callable(query):
+                    continue
+                try:
+                    out |= {int(getattr(p, "pid", 0) or 0) for p in query(handle)}
+                    break
+                except pynvml.NVMLError:
+                    continue
+        out.discard(0)
+        return out
+
+    def adopt_new_processes(
+        self, gpu_indices: list[int], before: set[int], worker_pid: int | None
+    ) -> int | None:
+        """Map the NVML PID a load just created to its worker, if it needs it.
+
+        Only when exactly one new compute PID appeared on the load's GPUs and
+        it does not exist in this PID namespace (otherwise NVML already speaks
+        our PIDs and nothing is needed). Returns the adopted NVML PID.
+        """
+        if not worker_pid or not gpu_indices:
+            return None
+        new = self.raw_compute_pids(gpu_indices) - set(before)
+        if len(new) != 1:
+            return None
+        nvml_pid = next(iter(new))
+        if nvml_pid == worker_pid or os.path.exists(f"/proc/{nvml_pid}/status"):
+            return None
+        self._pid_alias[nvml_pid] = int(worker_pid)
+        logger.info("gpu_pid_alias", nvml_pid=nvml_pid, worker_pid=worker_pid)
+        return nvml_pid
+
+    def forget_worker_pid(self, worker_pid: int | None) -> None:
+        if worker_pid:
+            for nvml_pid in [k for k, v in self._pid_alias.items() if v == worker_pid]:
+                self._pid_alias.pop(nvml_pid, None)
+
     def _to_process_info(self, nvml_process, process_type: str) -> GPUProcessInfo:
         pid = int(getattr(nvml_process, "pid", 0) or 0)
+        pid = self._pid_alias.get(pid, pid)
         used_vram_mb = self._normalize_vram_mb(getattr(nvml_process, "usedGpuMemory", 0))
         return GPUProcessInfo(
             pid=pid,
@@ -406,7 +476,10 @@ class GPUManager:
                 if redis_used != self._hw_monitor_active:
                     self._hw_monitor_active = redis_used
                     if redis_used:
-                        logger.info("hw_monitor_detected", detail="Reading GPU state from Redis (hw-monitor)")
+                        logger.info(
+                            "hw_monitor_detected",
+                            detail="Reading GPU state from Redis (hw-monitor)",
+                        )
                     else:
                         logger.info("hw_monitor_lost", detail="Falling back to direct pynvml reads")
 
@@ -428,7 +501,7 @@ class GPUManager:
         try:
             processes = [
                 GPUProcessInfo(
-                    pid=p.get("pid", 0),
+                    pid=self._pid_alias.get(int(p.get("pid", 0) or 0), int(p.get("pid", 0) or 0)),
                     process_name=p.get("process_name"),
                     process_type=p.get("process_type", "compute"),
                     used_vram_mb=p.get("used_vram_mb", 0),
@@ -528,8 +601,7 @@ class GPUManager:
         )
         await publish_system_alert(
             "info",
-            f"GPU {index} recuperado — power limit restaurado a {round(original_w)}W "
-            f"({reason}).",
+            f"GPU {index} recuperado — power limit restaurado a {round(original_w)}W ({reason}).",
         )
 
     def get_state_nowait(self, index: int) -> GPUState | None:
@@ -571,11 +643,7 @@ class GPUManager:
         stopping).  The lock remains authoritative in that short window and
         must still be released.
         """
-        return [
-            gpu_index
-            for gpu_index, locks in self._locks.items()
-            if model_id in locks
-        ]
+        return [gpu_index for gpu_index, locks in self._locks.items() if model_id in locks]
 
     async def get_free_vram(self, gpu_index: int) -> int:
         state = self._states[gpu_index]
@@ -609,9 +677,7 @@ class GPUManager:
         synchronous check meant for the router's "is this GPU usable right now"
         fast path — see RouterResolver.pick().
         """
-        return any(
-            key.startswith("service:") for key in self._locks.get(gpu_index, {})
-        )
+        return any(key.startswith("service:") for key in self._locks.get(gpu_index, {}))
 
     def service_locks(self, gpu_index: int) -> list[str]:
         """service_id(s) currently holding a VRAM reservation on this GPU (see

@@ -156,3 +156,19 @@ def test_modo_tensor_imprime_meta_y_se_reparte_por_proporcion():
     assert p.gpus[0] == {"model": 4000, "context": 400, "compute": 100}
     sin_proporcion = llama_fit.parse_output("Meta() 1000 0 0\n", [0, 1])
     assert sin_proporcion.vram_by_gpu == {0: 500, 1: 500}
+
+
+def test_calibration_offset_follows_real_loads():
+    from ocabra.core import llama_fit as lf
+
+    lf._offsets.clear()
+    f = "/data/models/qwen3-30b.gguf"
+    assert lf.calibration_offset_mb(f, 0) == 0
+    # Mapache: qwen3:30b measured 150-190 MB below its projection.
+    assert lf.record_measurement(f, 0, 1512, 1665) == -153
+    assert lf.record_measurement(f, 0, 3376, 3568) == round((-153 + -192) / 2)
+    assert lf.calibration_offset_mb(f, 1) == 0  # per GPU
+    assert lf.record_measurement(f, 0, 0, 3568) == lf.calibration_offset_mb(f, 0)  # no reading
+    lf.record_measurement("/x.gguf", 0, 99999, 100)
+    assert lf.calibration_offset_mb("/x.gguf", 0) == 1024  # clamped
+    lf._offsets.clear()

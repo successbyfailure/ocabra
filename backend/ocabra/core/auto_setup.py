@@ -238,6 +238,54 @@ def _split(gpus: list[int], budgets: dict[int, int], mode: str = "layer") -> dic
     }
 
 
+def offload_overrides(n: int, *, layers: int, moe: bool) -> dict[str, Any]:
+    """Placement with ``n`` expert layers (MoE) or ``n`` whole layers (dense) in RAM."""
+    return (
+        {"gpu_layers": 999, "n_cpu_moe": n or None}
+        if moe
+        else {"gpu_layers": max(0, layers - n), "n_cpu_moe": None}
+    )
+
+
+async def min_offload(
+    project: _Projector,
+    gpus: list[int],
+    budgets: dict[int, int],
+    context: int,
+    *,
+    base: dict[str, Any],
+    layers: int,
+    moe: bool,
+) -> tuple[int | None, dict | None]:
+    """Fewest expert layers (MoE) or layers (dense) in RAM that fit ``context``.
+
+    The fastest split for that context: every layer left in RAM costs speed.
+    ``(None, None)`` when not even everything in RAM fits.
+    """
+
+    async def _try(n: int) -> dict | None:
+        proj = await project(
+            gpus, {**base, **offload_overrides(n, layers=layers, moe=moe), "ctx_size": context}
+        )
+        return proj if _fits(proj, budgets) else None
+
+    best = await _try(layers)
+    if best is None:
+        return None, None
+    lo, hi = -1, layers  # lo: known not to fit (-1 = untried 0), hi: fits
+    if (proj := await _try(0)) is not None:
+        return 0, proj
+    lo = 0
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        proj = await _try(mid)
+        if proj is not None:
+            hi, best = mid, proj
+        else:
+            lo = mid
+    return hi, best
+
+
 async def _fit_on(
     project: _Projector,
     gpus: list[int],
@@ -256,27 +304,8 @@ async def _fit_on(
     if ctx or not allow_cpu or layers <= 0:
         return ctx, ({"gpu_layers": None, "n_cpu_moe": None} if ctx else {}), proj
     target = min(native, TARGET_CONTEXT)
-
-    async def _fits_with(n: int) -> bool:
-        trial = (
-            {**base, "gpu_layers": 999, "n_cpu_moe": n}
-            if moe
-            else {**base, "gpu_layers": layers - n, "n_cpu_moe": None}
-        )
-        return _fits(await project(gpus, {**trial, "ctx_size": target}), budgets)
-
-    # Fewest experts (MoE) or layers (dense) in RAM that reach the target.
-    lo, hi = 0, layers
-    if not await _fits_with(hi):
-        n_off = layers
-    else:
-        while hi - lo > 1:
-            mid = (lo + hi) // 2
-            if await _fits_with(mid):
-                hi = mid
-            else:
-                lo = mid
-        n_off = hi
+    found, _ = await min_offload(project, gpus, budgets, target, base=base, layers=layers, moe=moe)
+    n_off = layers if found is None else found
     over = (
         {**base, "gpu_layers": 999, "n_cpu_moe": n_off}
         if moe
@@ -332,7 +361,17 @@ async def plan_setup(
 ) -> SetupPlan:
     """Plan the rungs for ``state`` on the selected devices (nothing written)."""
     plan = await _plan_setup(model_manager, backend, state, gpus=gpus, allow_cpu=allow_cpu)
-    warn_ram(plan)
+    section = materialized_extra(state).get("llama_cpp") or {}
+    mlock_opt = section.get("mlock") if isinstance(section, dict) else None
+    from ocabra.core import host_memory
+
+    warn_ram(
+        plan,
+        mlock=bool(settings.llama_cpp_mlock if mlock_opt is None else mlock_opt),
+        model_file_mb=host_memory.file_mb(
+            section.get("model_path") if isinstance(section, dict) else None
+        ),
+    )
     return plan
 
 
@@ -473,28 +512,36 @@ async def _plan_setup(
     return plan
 
 
-def _host_ram_mb() -> int:
-    try:
-        with open("/proc/meminfo", encoding="ascii") as fh:
-            for line in fh:
-                if line.startswith("MemTotal:"):
-                    return int(line.split()[1]) // 1024
-    except (OSError, ValueError):
-        pass
-    return 0
+def warn_ram(plan: SetupPlan, *, mlock: bool = False, model_file_mb: int = 0) -> None:
+    """Flag rungs whose RAM share does not fit in what this host has free.
 
+    Against MemAvailable (reclaimable cache counts as free), keeping
+    ``RAM_MARGIN_MB``; with ``mlock`` the whole GGUF is pinned, not only the
+    experts left in RAM (see core/host_memory.py). Before, it compared the
+    experts with 85 % of the *total* RAM and missed both.
+    """
+    from ocabra.core import host_memory
 
-def warn_ram(plan: SetupPlan) -> None:
-    """Flag rungs whose RAM share would not fit in this machine's memory."""
-    total = _host_ram_mb()
-    if not total:
+    mem = host_memory.read_host_memory()
+    if not mem:
         return
+    free = int(mem["available_mb"])
     for rung in plan.rungs:
-        if rung.host_mb > total * 0.85:
-            plan.warnings.append(
-                f"«{rung.label}» deja {rung.host_mb // 1024} GB en RAM y la máquina "
-                f"tiene {total // 1024} GB: puede no caber junto al resto."
+        if not rung.host_mb and not mlock:
+            continue
+        need = host_memory.llama_ram_need_mb(rung.host_mb, model_file_mb=model_file_mb, mlock=mlock)
+        if need + host_memory.RAM_MARGIN_MB <= free:
+            continue
+        text = (
+            f"«{rung.label}» necesita {need / 1024:.1f} GB de RAM y ahora hay "
+            f"{free / 1024:.1f} GB libres (de {mem['total_mb'] // 1024} GB)"
+        )
+        if mlock and model_file_mb > rung.host_mb:
+            text += (
+                f": con mlock bloquea el fichero entero; sin él bastarían "
+                f"{rung.host_mb / 1024:.1f} GB"
             )
+        plan.warnings.append(text + ".")
 
 
 async def apply_setup(registry: Any, profile: Any, plan: SetupPlan) -> list[str]:

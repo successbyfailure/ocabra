@@ -5,7 +5,7 @@ import { fmtContext } from "@/components/dashboard/format"
 import { cn } from "@/lib/cn"
 import type { GPUState } from "@/types"
 import { PART_META, fmtMb } from "../../PreviewPanel"
-import type { CapacityInfo } from "../../types"
+import type { CapacityInfo, PreviewHost } from "../../types"
 import { Callout, Hint, Panel, Segmented } from "../../ui"
 import { HATCH_IMPOSSIBLE, HATCH_SYSTEM, gpuOccupancy } from "./occupancy"
 
@@ -51,6 +51,7 @@ export function Workbench({
   liveVramByGpu,
   memory,
   memoryNote,
+  host,
   cap,
   native,
   allowMax,
@@ -71,6 +72,8 @@ export function Workbench({
   liveVramByGpu: Record<string, number>
   memory: MemoryShare[] | null
   memoryNote?: ReactNode
+  /** RAM del nodo (vista previa); null sin datos o sin parte en RAM. */
+  host?: PreviewHost | null
   cap: CapacityInfo | null
   native: number | null
   allowMax: boolean
@@ -117,7 +120,7 @@ export function Workbench({
           />
         </div>
         <div className="min-w-0 flex-[1_1_280px] space-y-3">
-          <MemoryBars gpus={gpus} memory={memory} liveVramByGpu={liveVramByGpu} selected={value.gpus} note={memoryNote} />
+          <MemoryBars gpus={gpus} memory={memory} liveVramByGpu={liveVramByGpu} selected={value.gpus} note={memoryNote} host={host} />
           {actions}
         </div>
       </div>
@@ -490,12 +493,14 @@ export function MemoryBars({
   liveVramByGpu,
   selected,
   note,
+  host,
 }: {
   gpus: GPUState[]
   memory: MemoryShare[] | null
   liveVramByGpu: Record<string, number>
   selected?: number[] | null
   note?: ReactNode
+  host?: PreviewHost | null
 }) {
   const shares = new Map((memory ?? []).map((m) => [m.gpu, m]))
   const parts = orderedParts((memory ?? []).flatMap((m) => Object.keys(m.parts).filter((k) => m.parts[k] > 0)))
@@ -523,6 +528,7 @@ export function MemoryBars({
     const used = rows.filter((r) => r.share)
     if (!used.length) return null
     if (used.some((r) => r.impossible > 0)) return "error" as const
+    if (host && host.needMb > 0 && !host.fits) return "error" as const
     if (used.some((r) => r.overflow > 0)) return "warn" as const
     return "ok" as const
   })()
@@ -592,6 +598,7 @@ export function MemoryBars({
           </div>
         )
       })}
+      {host && host.needMb > 0 && <HostRamBar host={host} />}
       <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-border/60 pt-2 text-[10.5px] text-muted-foreground" data-testid="memory-legend">
         <span className="flex items-center gap-1" title="Reserva del driver, contextos CUDA, escritorio y el margen del planificador: ningún modelo puede usarla">
           <span className="h-2 w-2 rounded-sm" style={HATCH_SYSTEM} /> sistema
@@ -618,11 +625,69 @@ export function MemoryBars({
       </div>
       {verdict && (
         <Callout tone={verdict}>
-          {verdict === "ok" ? "Cabe con lo que hay cargado ahora." : verdict === "warn" ? "Cabe, pero desalojando otros modelos." : "No cabe en estas GPUs."}
+          {verdict === "ok"
+            ? "Cabe con lo que hay cargado ahora."
+            : verdict === "warn"
+              ? "Cabe, pero desalojando otros modelos."
+              : host && host.needMb > 0 && !host.fits && !rows.some((r) => r.share && r.impossible > 0)
+                ? "Cabe en la GPU, pero no en la RAM libre del nodo."
+                : "No cabe en estas GPUs."}
         </Callout>
       )}
       {!memory?.length && <Hint>Sin estimación todavía.</Hint>}
       {note}
+    </div>
+  )
+}
+
+/** RAM del nodo: lo que este modelo deja residente frente a lo libre. */
+function HostRamBar({ host }: { host: PreviewHost }) {
+  const total = Math.max(1, host.totalMb)
+  const used = Math.max(0, total - host.availableMb)
+  const scale = Math.max(total, used + host.needMb + host.marginMb)
+  const pct = (v: number) => `${Math.max(0, Math.min(100, (v / scale) * 100))}%`
+  const over = Math.max(0, used + host.needMb + host.marginMb - total)
+  const pinnedExtra = host.mlock ? Math.max(0, host.needMb - host.projectedMb) : 0
+  return (
+    <div className="space-y-1" data-testid="host-ram-bar">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="font-medium text-slate-300">RAM del nodo</span>
+        <span className="tabular-nums text-muted-foreground">
+          <span className={host.fits ? "text-emerald-300" : "text-red-300"}>{fmtMb(host.needMb)}</span> de {fmtMb(host.availableMb)} libres
+          {" "}· {fmtMb(host.totalMb)} en total
+        </span>
+      </div>
+      <div className="relative flex h-4 overflow-hidden rounded-md bg-muted/40">
+        <div className="h-full shrink-0" style={{ width: pct(used), ...HATCH_SYSTEM }} title={`En uso por el sistema y otros procesos: ${fmtMb(used)}`} data-part="host-used" />
+        <div
+          className="h-full shrink-0 border-l border-black/20 bg-slate-400/70"
+          style={{ width: pct(host.needMb - pinnedExtra) }}
+          title={`Lo que va a CPU (expertos en RAM, embeddings): ${fmtMb(host.needMb - pinnedExtra)}`}
+          data-part="host-model"
+        />
+        {pinnedExtra > 0 && (
+          <div
+            className="h-full shrink-0 border-l border-black/20 bg-amber-400/60"
+            style={{ width: pct(pinnedExtra) }}
+            title={`mlock: también bloquea en RAM lo que ya está en la GPU (${fmtMb(pinnedExtra)})`}
+            data-part="host-mlock"
+          />
+        )}
+        {over > 0 && (
+          <div
+            className="absolute inset-y-0 right-0 border-l-2 border-red-400"
+            style={{ width: pct(over), ...HATCH_IMPOSSIBLE }}
+            title={`No cabe en la RAM libre: faltan ${fmtMb(over)} (con ${fmtMb(host.marginMb)} de margen)`}
+            data-part="impossible"
+          />
+        )}
+      </div>
+      {host.mlock && pinnedExtra > 0 && (
+        <p className="text-[10.5px] text-amber-300">
+          Con mlock se bloquea el fichero entero ({fmtMb(host.modelFileMb)}); sin él bastaría con {fmtMb(host.projectedMb)} y el resto es caché
+          que el sistema puede liberar.
+        </p>
+      )}
     </div>
   )
 }
@@ -637,4 +702,5 @@ const PART_LABEL: Record<string, string> = {
   engine: "reserva del motor",
   model: "modelo",
   measured: "medido (todo el modelo)",
+  calibration: "ajuste por lo medido en cargas anteriores",
 }

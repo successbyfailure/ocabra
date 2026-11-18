@@ -23,6 +23,7 @@ from ocabra.backends.llama_cpp_backend import LiveContextUnsupported
 from ocabra.config import settings
 from ocabra.core import artifacts as model_artifacts
 from ocabra.core import observed_vram
+from ocabra.core.background_tasks import spawn
 from ocabra.core.config_keys import normalize_case
 from ocabra.core.model_manager_helpers import (
     estimate_bitnet_vram_from_config,
@@ -433,6 +434,8 @@ class ModelManager:
         # window is a short-lived operational state, not configuration worth
         # persisting across a restart.
         self._maintenance_models: set[str] = set()
+        # Last llama-fit projection per model, for _calibrate_after_load.
+        self._last_projection: dict[str, dict] = {}
         # Shrunk llama.cpp workers with an idle regrow check in flight.
         self._regrow_pending: set[str] = set()
         # Loaded workers that answered "not supported" (started without
@@ -2487,6 +2490,12 @@ class ModelManager:
                                 if backend_gpu_indices and self._gpu_manager
                                 else None
                             )
+                            raw_before = (
+                                self._gpu_manager.raw_compute_pids(backend_gpu_indices)
+                                if backend_gpu_indices
+                                and callable(getattr(self._gpu_manager, "raw_compute_pids", None))
+                                else set()
+                            )
                             try:
                                 worker_info = await backend.load(
                                     state.backend_model_id,
@@ -2515,6 +2524,17 @@ class ModelManager:
                             # GPU badge and VRAM attribution on a GPU card
                             # they never loaded onto.
                             actual_gpu_indices = worker_info.gpu_indices
+                            adopt = getattr(self._gpu_manager, "adopt_new_processes", None)
+                            if callable(adopt) and actual_gpu_indices:
+                                with suppress(Exception):
+                                    adopt(actual_gpu_indices, raw_before, worker_info.pid)
+                            if model_id in self._last_projection and actual_gpu_indices:
+                                spawn(
+                                    self._calibrate_after_load(
+                                        model_id, worker_info.pid, list(actual_gpu_indices)
+                                    ),
+                                    name=f"llama-fit-calibrate:{model_id}",
+                                )
                             state.worker_info = worker_info
                             state.current_gpu = actual_gpu_indices
                             # Prefer the honest pre-load estimate over the backend's
@@ -2721,8 +2741,16 @@ class ModelManager:
         state.current_gpu = []
         state.vram_used_mb = 0
         state.ram_used_mb = 0
+        self._forget_worker_pid(state)
         state.worker_info = None
         state.loaded_at = None
+
+    def _forget_worker_pid(self, state: ModelState) -> None:
+        """Drop the NVML PID alias of a worker that is going away."""
+        forget = getattr(self._gpu_manager, "forget_worker_pid", None)
+        info = getattr(state, "worker_info", None)
+        if callable(forget) and info is not None:
+            forget(getattr(info, "pid", None))
 
     async def _log_cuda_oom_snapshot(self, model_id: str) -> None:
         """Record what every GPU held when admission said a load fit but CUDA
@@ -4795,7 +4823,41 @@ class ModelManager:
             vram_by_gpu=result.get("vram_by_gpu"),
             host_mb=result.get("host_mb"),
         )
+        self._last_projection[state.model_id] = result
         return int(result.get("estimated_vram_mb") or 0)
+
+    async def _calibrate_after_load(
+        self, model_id: str, worker_pid: int | None, gpus: list[int], delay_s: float = 10.0
+    ) -> None:
+        """Compare a llama.cpp worker's real VRAM with its projection.
+
+        Once the load has settled, the NVML usage of the worker's process tree
+        on each GPU is folded into llama_fit's per-file offset, which later
+        projections (preview, admission, automatic setup) add.
+        """
+        from ocabra.core import llama_fit
+        from ocabra.stats.live_activity import _process_tree
+
+        projection = self._last_projection.pop(model_id, None)
+        if not projection or not worker_pid or self._gpu_manager is None:
+            return
+        raw = projection.get("raw_vram_by_gpu") or {}
+        model_file = projection.get("model_file")
+        if not raw or not model_file:
+            return
+        await asyncio.sleep(delay_s)
+        state = self._states.get(model_id)
+        info = getattr(state, "worker_info", None)
+        if info is None or getattr(info, "pid", None) != worker_pid:
+            return
+        tree = await asyncio.to_thread(_process_tree, int(worker_pid))
+        for gpu in gpus:
+            if gpu not in raw:
+                continue
+            usage = self._gpu_manager.get_process_vram_mb(int(gpu))
+            measured = sum(mb for pid, mb in usage.items() if pid in tree)
+            if measured > 0:
+                llama_fit.record_measurement(str(model_file), int(gpu), measured, int(raw[gpu]))
 
     async def release_vision_by_reload(self, model_id: str, request_body: dict | None) -> bool:
         """Reload a worker without its on-demand vision projector.
@@ -5106,6 +5168,7 @@ class ModelManager:
             state.vram_used_mb = 0
             state.vram_estimate_mb = 0
             state.ram_used_mb = 0
+            self._forget_worker_pid(state)
             state.worker_info = None
             state.loaded_at = None
             await self._publish_event(model_id, "status_changed")
@@ -5861,6 +5924,7 @@ class ModelManager:
                 state.vram_used_mb = 0
                 state.vram_estimate_mb = 0
                 state.ram_used_mb = 0
+                self._forget_worker_pid(state)
                 state.worker_info = None
                 state.loaded_at = None
                 state.error_message = None

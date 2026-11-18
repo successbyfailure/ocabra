@@ -115,12 +115,27 @@ export interface MemoryEstimate {
   breakdown_mb?: Record<string, number>
 }
 
+export interface PreviewHost {
+  totalMb: number
+  availableMb: number
+  /** Lo que debe quedar residente: lo que va a CPU (expertos, embeddings);
+   *  con mlock, el fichero entero. */
+  needMb: number
+  projectedMb: number
+  modelFileMb: number
+  mlock: boolean
+  marginMb: number
+  fits: boolean
+}
+
 export interface PreviewResult {
   errors: { key: string; label: string; message: string }[]
   unknownKeys: string[]
   estimate: MemoryEstimate
   gpuIndices: number[]
   gpus: PreviewGpu[]
+  /** RAM del nodo frente a lo que el borrador deja residente (llama.cpp). */
+  host?: PreviewHost | null
   /** Hueco por GPU según el planificador (servidores ≥ 0.95.3). */
   capacity?: ({ index: number; totalMb: number } & import("@/types").GpuCapacity)[]
   launch: { argv?: string[]; env?: Record<string, string>; visibleGpus?: number[]; error?: string } | null

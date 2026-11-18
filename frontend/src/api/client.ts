@@ -816,6 +816,7 @@ export function toContextProbeJob(raw: unknown): ContextProbeJob {
     status: String(data.status ?? "pending") as ContextProbeJob["status"],
     fullValidation: Boolean(data.full_validation),
     measureVision: Boolean(data.measure_vision),
+    targetContext: data.target_context == null ? null : Number(data.target_context),
     gpuIndices: Array.isArray(data.gpu_indices) ? data.gpu_indices.map(Number) : [],
     contextIsPool: data.context_is_pool !== false,
     parallelism: Number(data.parallelism ?? 1),
@@ -826,6 +827,9 @@ export function toContextProbeJob(raw: unknown): ContextProbeJob {
         usedMb: numberMap(row.used_mb),
         fits: Boolean(row.fits),
         note: String(row.note ?? ""),
+        ...(row.in_ram == null ? {} : { inRam: Number(row.in_ram) }),
+        ...(row.projected_mb ? { projectedMb: numberMap(row.projected_mb) } : {}),
+        ...(row.ram_need_mb == null ? {} : { ramNeedMb: Number(row.ram_need_mb) }),
       };
     }),
     evicted: Array.isArray(data.evicted) ? data.evicted.map(String) : [],
@@ -834,7 +838,23 @@ export function toContextProbeJob(raw: unknown): ContextProbeJob {
     finishedAt: data.finished_at == null ? null : Number(data.finished_at),
     result: result
       ? {
-          maxContext: Number(result.max_context ?? 0),
+          maxContext: Number(result.max_context ?? result.pool_tokens ?? 0),
+          offload:
+            result.mode === "offload"
+              ? {
+                  targetContext: Number(result.target_context ?? 0),
+                  poolTokens: Number(result.pool_tokens ?? 0),
+                  inRam: Number(result.in_ram ?? 0),
+                  layers: Number(result.layers ?? 0),
+                  moe: Boolean(result.moe),
+                  placement: numberMap(result.placement),
+                  ramNeedMb: result.ram_need_mb == null ? null : Number(result.ram_need_mb),
+                  ramAvailableMb:
+                    result.ram_available_mb == null ? null : Number(result.ram_available_mb),
+                  mlock: Boolean(result.mlock),
+                  firstGuess: Number(result.first_guess ?? 0),
+                }
+              : null,
           usedMb: numberMap(result.used_mb),
           limitMb: numberMap(result.limit_mb),
           kvMbPer1k: numberMap(result.kv_mb_per_1k),
@@ -2654,7 +2674,7 @@ export const api = {
     startContextProbe: async (
       profileId: string,
       presetKey: string,
-      options: { fullValidation: boolean; measureVision: boolean },
+      options: { fullValidation: boolean; measureVision: boolean; targetContext?: number | null },
     ): Promise<ContextProbeJob> =>
       toContextProbeJob(
         await request<unknown>(
@@ -2663,6 +2683,7 @@ export const api = {
           {
             full_validation: options.fullValidation,
             measure_vision: options.measureVision,
+            ...(options.targetContext ? { target_context: options.targetContext } : {}),
           },
         ),
       ),

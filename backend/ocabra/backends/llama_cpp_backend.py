@@ -401,8 +401,17 @@ class LlamaCppBackend(BackendInterface):
         # once the unified-pool saving is accounted) and qwen3.8 (23422 vs 23448).
         for gpu in breakdown:
             breakdown[gpu]["cuda"] = _CUDA_CONTEXT_MB
+        raw_by_gpu = {g: sum(p.values()) for g, p in breakdown.items()}
+        # What earlier loads of this file measured above or below the
+        # projection (llama_fit.record_measurement), as its own part.
+        for gpu in breakdown:
+            offset = llama_fit.calibration_offset_mb(str(model_file), int(gpu))
+            if offset:
+                breakdown[gpu]["calibration"] = offset
         return {
             "source": "llama_fit",
+            "model_file": str(model_file),
+            "raw_vram_by_gpu": raw_by_gpu,
             "vram_by_gpu": {g: sum(p.values()) for g, p in breakdown.items()},
             "vram_breakdown_by_gpu": breakdown,
             "estimated_vram_mb": sum(sum(p.values()) for p in breakdown.values()),

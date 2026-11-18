@@ -191,6 +191,23 @@ def test_si_no_cabe_por_el_borrador_especulativo_lo_dice():
 
 def test_avisa_si_la_ram_no_da():
     plan = au.SetupPlan(rungs=[au.Rung("normal", "1660 · 40k · RAM", [0], 40960, host_mb=60000)])
-    with patch.object(au, "_host_ram_mb", return_value=32768):
+    with patch(
+        "ocabra.core.host_memory.read_host_memory",
+        return_value={"total_mb": 32768, "available_mb": 20000},
+    ):
         au.warn_ram(plan)
     assert plan.warnings and "RAM" in plan.warnings[0]
+
+
+def test_la_ram_se_mide_contra_la_libre_y_mlock_bloquea_el_fichero():
+    # Mapache: gemma4 con sus 30 capas de expertos en RAM (14,5 GB) cabe en
+    # 21 GB libres; con mlock bloquea el GGUF entero (17,5 GB) y ya no.
+    mem = {"total_mb": 32000, "available_mb": 18000}
+    rung = au.Rung("normal", "1660 · 22k · RAM", [0], 22528, host_mb=14564)
+    with patch("ocabra.core.host_memory.read_host_memory", return_value=mem):
+        plan = au.SetupPlan(rungs=[rung])
+        au.warn_ram(plan, mlock=False, model_file_mb=17900)
+        assert plan.warnings == []
+        plan = au.SetupPlan(rungs=[rung])
+        au.warn_ram(plan, mlock=True, model_file_mb=17900)
+    assert plan.warnings and "mlock" in plan.warnings[0] and "14.2 GB" in plan.warnings[0]

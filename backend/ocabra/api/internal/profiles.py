@@ -409,6 +409,7 @@ async def start_context_probe(
             preset_key,
             full_validation=body.full_validation,
             measure_vision=body.measure_vision,
+            target_context=body.target_context,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -477,6 +478,8 @@ async def apply_context_probe(
     if job.status != "done" or not job.result:
         raise HTTPException(status_code=409, detail=f"The probe is '{job.status}', not done")
     result = job.result
+    if result.get("mode") == "offload":
+        return await _apply_offload_probe(request, profile_id, preset_key, job)
     pool_tokens = int(result["max_context"])
     context_tokens = (
         pool_tokens if job.context_is_pool else max(1, pool_tokens // max(1, job.parallelism))
@@ -518,6 +521,47 @@ async def apply_context_probe(
                 profile_id,
                 preset_key,
                 {"context_mode": "fixed", "context_tokens": context_tokens},
+            )
+            profile = await registry.update(session, profile_id, {"runtime_policy": policy})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _profile_to_dict(profile)
+
+
+async def _apply_offload_probe(request: Request, profile_id: str, preset_key: str, job) -> dict:
+    """Write a "target context, fastest split" result: the preset gets that
+    context (fixed) and the split found (layers in RAM), and the profile
+    policy records the measured VRAM for it."""
+    result = job.result
+    registry = _get_registry(request)
+    profile = await registry.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+    preset = next((p for p in profile.runtime_presets or [] if p.preset_key == preset_key), None)
+    if preset is None:
+        raise HTTPException(status_code=404, detail=f"Preset '{preset_key}' not found")
+    placement = dict(getattr(preset, "placement", None) or {})
+    for key in ("n_cpu_moe", "gpu_layers"):
+        placement.pop(key, None)
+    placement.update(result.get("placement") or {})
+    used = result.get("used_mb") or {}
+    policy = dict(getattr(profile, "runtime_policy", None) or {})
+    validated_ctx = dict(policy.get("validated_context_tokens") or {})
+    validated_vram = dict(policy.get("validated_vram_mb") or {})
+    validated_ctx[preset_key] = int(result["target_context"])
+    validated_vram[preset_key] = int(sum(int(v) for v in used.values()))
+    policy.update(validated_context_tokens=validated_ctx, validated_vram_mb=validated_vram)
+    async with AsyncSessionLocal() as session:
+        try:
+            await registry.update_runtime_preset(
+                session,
+                profile_id,
+                preset_key,
+                {
+                    "context_mode": "fixed",
+                    "context_tokens": int(result["target_context"]),
+                    "placement": placement,
+                },
             )
             profile = await registry.update(session, profile_id, {"runtime_policy": policy})
         except ValueError as exc:
@@ -612,7 +656,6 @@ async def benchmark_runtime_preset(
     ).model_dump(mode="json")
 
 
-
 async def _reject_removing_last_llm_preset(request: Request, profile_id: str) -> None:
     """An LLM always keeps at least one preset: with none, its base would load
     on its own and every rung view would lose its anchor (2026-11-12)."""
@@ -647,6 +690,7 @@ async def _reject_ollama_presets(request: Request, profile_id: str) -> None:
                 "are global settings of the shared Ollama server."
             ),
         )
+
 
 @router.post(
     "/profiles/{profile_id}/runtime-presets",

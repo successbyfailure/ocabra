@@ -1518,6 +1518,25 @@ export interface ContextProbeStep {
   usedMb: Record<string, number>;
   fits: boolean;
   note: string;
+  /** Modo «contexto objetivo»: capas (expertos MoE o capas enteras) en RAM. */
+  inRam?: number | null;
+  /** Lo que proyectaba llama.cpp para ese reparto (ya calibrado). */
+  projectedMb?: Record<string, number>;
+  ramNeedMb?: number | null;
+}
+
+/** Resultado del modo «contexto objetivo, lo más rápido». */
+export interface ContextProbeOffload {
+  targetContext: number;
+  poolTokens: number;
+  inRam: number;
+  layers: number;
+  moe: boolean;
+  placement: Record<string, number>;
+  ramNeedMb: number | null;
+  ramAvailableMb: number | null;
+  mlock: boolean;
+  firstGuess: number;
 }
 
 export interface ContextProbeJob {
@@ -1527,6 +1546,7 @@ export interface ContextProbeJob {
   status:
     | "pending"
     | "preparing"
+    | "planning"
     | "loading"
     | "probing"
     | "validating"
@@ -1536,6 +1556,7 @@ export interface ContextProbeJob {
     | "error";
   fullValidation: boolean;
   measureVision: boolean;
+  targetContext: number | null;
   gpuIndices: number[];
   contextIsPool: boolean;
   parallelism: number;
@@ -1546,6 +1567,8 @@ export interface ContextProbeJob {
   finishedAt: number | null;
   result: {
     maxContext: number;
+    /** Presente cuando el sondeo buscaba el reparto para un contexto objetivo. */
+    offload?: ContextProbeOffload | null;
     usedMb: Record<string, number>;
     limitMb: Record<string, number>;
     kvMbPer1k: Record<string, number>;
