@@ -16,6 +16,45 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.113.0 — 2026-11-18
+
+### Corregido
+
+- **Un modelo que estaba en «cargando» detrás de otra carga larga** acababa en
+  `ERROR` (y respondía `503` sin `Retry-After`) aunque nada se hubiera roto.
+  Ahora, si la espera se agota, el modelo vuelve a su estado anterior y la
+  petición recibe un `503` con `Retry-After`, que se puede reintentar.
+- **Una petición colgada más allá del tiempo máximo** dejaba el modelo en
+  `ERROR` con su proceso vivo y su memoria ocupada: la siguiente petición
+  arrancaba un segundo proceso al lado. Ahora se para el proceso y se libera la
+  memoria; la siguiente petición lo vuelve a cargar. Si otras peticiones de ese
+  mismo modelo siguen avanzando, el proceso se mantiene.
+- **Descargar un modelo mientras se estaba cargando** podía cruzarse con la
+  carga. Ahora la descarga espera a que termine.
+- **Al descargar voxtral, vibeasr o whisper.cpp** quedaban vivos procesos que
+  ellos habían arrancado (por ejemplo, el `vllm serve` de voxtral), con memoria
+  de GPU ocupada hasta reiniciar. Ahora se paran con el modelo.
+- **whisper.cpp** respeta `condition_on_previous_text=false` (salvo que mandes
+  `prompt`, que comparte el mismo presupuesto y gana). Acepta `vad_filter`,
+  pero solo lo aplica si hay un modelo VAD instalado; hoy no lo hay.
+- **Un modelo que solo existe en un nodo federado** cuyo nodo no responde daba
+  `404` «el modelo no existe». Ahora da `503` `peer_unavailable` con
+  `Retry-After`, nombrando el nodo.
+- **`speed` y `temperature`** con `nan` o `inf` dan `400` `invalid_value`.
+- **`/ocabra/stats/recent`** contaba como «en cola» peticiones que estaban
+  ejecutándose en modelos llama.cpp sin presets: ahora usa los slots reales.
+- **Modelos vLLM configurados con claves en camelCase** tenían una estimación
+  de memoria que no contaba la caché KV.
+- **El escalado de vídeo** aparece en la tabla de rendimiento en fotogramas por
+  segundo.
+
+### Cambiado
+
+- `routerFallbackDelayMs` ya no aparece en `GET /ocabra/config`: nunca tuvo
+  efecto. `PATCH` lo sigue aceptando y lo ignora.
+
+---
+
 ## 0.112.0 — 2026-11-18
 
 ### Corregido
