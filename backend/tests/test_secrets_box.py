@@ -104,3 +104,29 @@ async def test_rotation_does_nothing_without_a_dedicated_key(monkeypatch):
     monkeypatch.setattr(settings, "ocabra_secrets_key", "")
 
     assert await secrets_box.rotate_stored_secrets(lambda: pytest.fail("no DB access")) == 0
+
+
+def test_every_encrypted_column_is_rotated():
+    """A new ``*_encrypted`` column left out of the list would stay on the
+    session-secret key (it still decrypts, so nothing would warn)."""
+    import importlib
+    import pkgutil
+
+    import ocabra.db
+    from ocabra.database import Base
+
+    for module in pkgutil.iter_modules(ocabra.db.__path__):
+        importlib.import_module(f"ocabra.db.{module.name}")
+
+    in_models = {
+        (table.name, column.name)
+        for table in Base.metadata.tables.values()
+        for column in table.columns
+        if column.name.endswith("_encrypted")
+    }
+    rotated = {
+        (table, column)
+        for table, _pk, columns in secrets_box._ENCRYPTED_COLUMNS
+        for column in columns
+    }
+    assert in_models == rotated

@@ -34,7 +34,9 @@ _ENCRYPTED_COLUMNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "id",
         ("api_key_encrypted", "local_api_key_encrypted", "join_poll_secret_encrypted"),
     ),
+    ("federation_join_requests", "id", ("token_encrypted",)),
     ("mcp_servers", "id", ("env_encrypted", "auth_value_encrypted")),
+    ("cloud_providers", "provider", ("api_key_encrypted",)),
 )
 
 
