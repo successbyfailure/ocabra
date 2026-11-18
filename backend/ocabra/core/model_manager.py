@@ -122,6 +122,18 @@ def _request_attribution(user) -> dict:
     }
 
 
+class LoadGateTimeoutError(TimeoutError):
+    """Waiting for the global load gate (or a model's own load lock) ran out.
+
+    Retryable: nothing failed, another model's load/eviction is still holding
+    the GPU (a load may legitimately drain busy neighbours for minutes). The
+    waiting load leaves its model as it was instead of marking it ERROR, and
+    the API answers 503 with ``Retry-After`` like any other failed load.
+    Subclasses ``TimeoutError`` so existing ``except TimeoutError`` keep
+    catching it.
+    """
+
+
 class ModelStatus(str, Enum):
     DISCOVERED = "discovered"
     CONFIGURED = "configured"
@@ -448,6 +460,23 @@ class ModelManager:
         # Its diarizer stays loaded until whisper_diarizer_idle_unload_s
         # without use, so within that window its memory is already taken.
         self._whisper_diarized_at: dict[str, float] = {}
+        # Late-bound collaborators (set_session_registry, set_duration_estimator,
+        # set_batch_priority). Declared here so a manager they were never wired
+        # into (tests, degraded startup) reads None instead of relying on
+        # getattr defaults at every use.
+        self._session_registry = None
+        self._duration_estimator = None
+        self._batch_priority = None
+        # Task currently holding ``_backend_load_gate`` / each model's load
+        # lock. Lets a path that already holds one re-enter it (an eviction
+        # inside a load calling unload() or evict_for_whisper) instead of
+        # deadlocking on a non-reentrant asyncio.Lock.
+        self._load_gate_owner: asyncio.Task | None = None
+        self._load_lock_owners: dict[str, asyncio.Task] = {}
+        # model_id -> loop time by which the load of that model must stop
+        # waiting for busy eviction candidates to drain. One budget for the
+        # whole load, not one per candidate (see _drain_wait_budget_s).
+        self._drain_deadlines: dict[str, float] = {}
 
     @asynccontextmanager
     async def _acquire_load_gate(self):
@@ -462,24 +491,74 @@ class ModelManager:
         budget the eviction cascade itself already uses
         (``max_drain_timeout_s``) so a stuck neighbour surfaces as a clear,
         catchable timeout instead of an invisible hang.
+
+        Reentrant for the task that already holds it: evictions running inside
+        a load (and ``evict_for_whisper``, which takes the gate itself) must not
+        deadlock against their own caller.
+
+        Raises:
+            LoadGateTimeoutError: the wait ran out (retryable).
         """
+        current = asyncio.current_task()
+        if current is not None and self._load_gate_owner is current:
+            yield
+            return
         try:
             await asyncio.wait_for(
                 self._backend_load_gate.acquire(),
                 timeout=max(1, int(settings.max_drain_timeout_s)),
             )
         except TimeoutError as exc:
-            raise TimeoutError(
+            raise LoadGateTimeoutError(
                 "Timed out waiting for the GPU load lock — another model's "
-                "load/eviction appears stuck"
+                "load/eviction is still holding it"
             ) from exc
+        self._load_gate_owner = current
         try:
             yield
         finally:
+            self._load_gate_owner = None
             self._backend_load_gate.release()
 
     @asynccontextmanager
-    async def _acquire_model_load_lock(self, model_id: str):
+    async def _try_load_gate(self):
+        """Take the load gate only if no load is running; yields whether held.
+
+        For request-path evictions (``evict_for_whisper``) that must not run
+        while a load is evicting/admitting with its own VRAM figures, but also
+        must not queue behind it: the request is in flight while it waits, and
+        a load draining that very model would wait on it in turn.
+        """
+        if self._holds_load_gate():
+            yield True
+            return
+        if self._backend_load_gate.locked():
+            yield False
+            return
+        # Not wait_for: on 3.11 a timeout racing the acquisition can drop a
+        # lock that was in fact taken; _acquire_lock_unless hands it back.
+        if not await self._acquire_lock_unless(self._backend_load_gate, lambda: False, 1.0):
+            yield False
+            return
+        self._load_gate_owner = asyncio.current_task()
+        try:
+            yield True
+        finally:
+            self._load_gate_owner = None
+            self._backend_load_gate.release()
+
+    def _holds_load_gate(self) -> bool:
+        current = asyncio.current_task()
+        return current is not None and self._load_gate_owner is current
+
+    def _load_gate_busy(self) -> bool:
+        """Some *other* task holds the load gate (a load/eviction is running)."""
+        return self._backend_load_gate.locked() and not self._holds_load_gate()
+
+    @asynccontextmanager
+    async def _acquire_model_load_lock(
+        self, model_id: str, *, abort_if: Callable[[], bool] | None = None
+    ):
         """Acquire this model's own load lock with the same bounded wait
         ``_acquire_load_gate`` already has for the cross-backend gate — see
         that docstring for the failure mode this prevents.
@@ -494,21 +573,90 @@ class ModelManager:
         error, no 503, nothing logged. Only a full process restart (which
         resets every in-memory asyncio lock) cleared it. Bounding this one
         the same way turns that into a catchable, retryable timeout instead.
+
+        Reentrant for the task that already holds it. ``abort_if`` is polled
+        while waiting: when it turns true the wait is abandoned and the
+        context yields ``False`` without holding the lock (``unload`` uses it to
+        give up once the model is LOADING/UNLOADING under someone else — the
+        same no-op it always was for those states, and what keeps an eviction
+        inside the gate from waiting on a load that is itself waiting for the
+        gate). Otherwise yields ``True``.
+
+        Raises:
+            LoadGateTimeoutError: the wait ran out (retryable).
         """
+        current = asyncio.current_task()
+        if current is not None and self._load_lock_owners.get(model_id) is current:
+            yield True
+            return
         lock = self._load_locks.setdefault(model_id, asyncio.Lock())
+        timeout_s = max(1, int(settings.max_drain_timeout_s))
+        if abort_if is None:
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=timeout_s)
+            except TimeoutError as exc:
+                raise LoadGateTimeoutError(
+                    f"Timed out waiting for '{model_id}'s own load lock — a previous "
+                    "load/unload of this model is still holding it"
+                ) from exc
+        else:
+            acquired = await self._acquire_lock_unless(lock, abort_if, timeout_s)
+            if acquired is None:
+                raise LoadGateTimeoutError(
+                    f"Timed out waiting for '{model_id}'s own load lock — a previous "
+                    "load/unload of this model is still holding it"
+                )
+            if not acquired:
+                yield False
+                return
+        if current is not None:
+            self._load_lock_owners[model_id] = current
         try:
-            await asyncio.wait_for(
-                lock.acquire(), timeout=max(1, int(settings.max_drain_timeout_s))
-            )
-        except TimeoutError as exc:
-            raise TimeoutError(
-                f"Timed out waiting for '{model_id}'s own load lock — a previous "
-                "load/unload of this model appears stuck"
-            ) from exc
-        try:
-            yield
+            yield True
         finally:
+            if self._load_lock_owners.get(model_id) is current:
+                self._load_lock_owners.pop(model_id, None)
             lock.release()
+
+    @staticmethod
+    async def _acquire_lock_unless(
+        lock: asyncio.Lock, abort_if: Callable[[], bool], timeout_s: float
+    ) -> bool | None:
+        """Acquire ``lock`` unless ``abort_if()`` turns true first.
+
+        Returns True (held), False (aborted, not held) or None (timed out,
+        not held).
+        """
+        if abort_if():
+            return False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        acquire = asyncio.ensure_future(lock.acquire())
+        aborted = False
+        try:
+            while True:
+                done, _ = await asyncio.wait({acquire}, timeout=0.25)
+                if done:
+                    return True
+                if abort_if():
+                    aborted = True
+                    break
+                if loop.time() >= deadline:
+                    break
+        except BaseException:
+            acquire.cancel()
+            with suppress(asyncio.CancelledError):
+                await acquire
+            if not acquire.cancelled() and acquire.exception() is None:
+                lock.release()
+            raise
+        acquire.cancel()
+        with suppress(asyncio.CancelledError):
+            await acquire
+        if not acquire.cancelled() and acquire.exception() is None:
+            # Got the lock in the same tick we gave up: hand it back.
+            lock.release()
+        return False if aborted else None
 
     def begin_request(self, model_id: str, *, source: str = "api", user=None) -> str:
         """Mark one request as in-flight. Returns request_id.
@@ -1145,80 +1293,113 @@ class ModelManager:
         while True:
             try:
                 await asyncio.sleep(10)
-                inference_timeout_s = max(
-                    30,
-                    int(getattr(settings, "inference_request_timeout_seconds", 900)),
-                )
-                timeout_s = max(
-                    30,
-                    int(getattr(settings, "busy_timeout_seconds", 300)),
-                    inference_timeout_s + 30,
-                )
-                now = time.time()
-                with self._in_flight_lock:
-                    snapshot = list(self._active_requests.values())
-                for req in snapshot:
-                    elapsed = now - req.started_at
-                    # Stale time since the last streamed chunk, not total
-                    # duration — see ActiveRequest.last_activity_at's
-                    # docstring. A long batch job streaming tokens the
-                    # entire time isn't "stuck"; it only counts as timed
-                    # out once chunks stop arriving for timeout_s. For
-                    # non-streaming requests last_activity_at never moves
-                    # past started_at (nothing to tee), so this is
-                    # identical to the old elapsed-based check for them.
-                    stale_s = now - (req.last_activity_at or req.started_at)
-                    if stale_s > timeout_s:
-                        logger.error(
-                            "request_busy_timeout",
-                            request_id=req.request_id,
-                            model_id=req.model_id,
-                            elapsed_s=f"{elapsed:.0f}",
-                            stale_s=f"{stale_s:.0f}",
-                            timeout_s=timeout_s,
-                        )
-                        with self._in_flight_lock:
-                            self._active_requests.pop(req.request_id, None)
-                            count = self._in_flight.get(req.model_id, 0)
-                            if count <= 1:
-                                self._in_flight.pop(req.model_id, None)
-                            else:
-                                self._in_flight[req.model_id] = count - 1
-                        self._timeout_counts[req.model_id] = (
-                            self._timeout_counts.get(req.model_id, 0) + 1
-                        )
-                        action = getattr(settings, "busy_timeout_action", "mark_error")
-                        if action == "restart_worker":
-                            try:
-                                await self.unload(req.model_id, reason="busy_timeout")
-                            except Exception as exc:
-                                logger.warning(
-                                    "busy_timeout_unload_failed",
-                                    model_id=req.model_id,
-                                    error=str(exc),
-                                )
-                        else:  # mark_error
-                            state = self._states.get(req.model_id)
-                            if state:
-                                state.status = ModelStatus.ERROR
-                                state.error_message = (
-                                    f"Request {req.request_id} stuck: no activity "
-                                    f"for {stale_s:.0f}s (running {elapsed:.0f}s total)"
-                                )
-                                await self._publish_event(req.model_id, "busy_timeout")
-                                try:
-                                    await publish_system_alert(
-                                        "warning",
-                                        f"Model '{req.model_id}' marked ERROR: "
-                                        f"request stuck, no activity for {stale_s:.0f}s "
-                                        f"(running {elapsed:.0f}s total)",
-                                    )
-                                except Exception:
-                                    pass
+                await self._check_busy_timeouts()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.warning("busy_watchdog_error", error=str(exc))
+
+    async def _check_busy_timeouts(self) -> None:
+        """One pass of the busy watchdog (see :meth:`_busy_watchdog`)."""
+        inference_timeout_s = max(
+            30,
+            int(getattr(settings, "inference_request_timeout_seconds", 900)),
+        )
+        timeout_s = max(
+            30,
+            int(getattr(settings, "busy_timeout_seconds", 300)),
+            inference_timeout_s + 30,
+        )
+        now = time.time()
+        with self._in_flight_lock:
+            snapshot = list(self._active_requests.values())
+        for req in snapshot:
+            elapsed = now - req.started_at
+            # Stale time since the last streamed chunk, not total
+            # duration — see ActiveRequest.last_activity_at's
+            # docstring. A long batch job streaming tokens the
+            # entire time isn't "stuck"; it only counts as timed
+            # out once chunks stop arriving for timeout_s. For
+            # non-streaming requests last_activity_at never moves
+            # past started_at (nothing to tee), so this is
+            # identical to the old elapsed-based check for them.
+            stale_s = now - (req.last_activity_at or req.started_at)
+            if stale_s <= timeout_s:
+                continue
+            logger.error(
+                "request_busy_timeout",
+                request_id=req.request_id,
+                model_id=req.model_id,
+                elapsed_s=f"{elapsed:.0f}",
+                stale_s=f"{stale_s:.0f}",
+                timeout_s=timeout_s,
+            )
+            with self._in_flight_lock:
+                self._active_requests.pop(req.request_id, None)
+                count = self._in_flight.get(req.model_id, 0)
+                if count <= 1:
+                    self._in_flight.pop(req.model_id, None)
+                else:
+                    self._in_flight[req.model_id] = count - 1
+            self._timeout_counts[req.model_id] = self._timeout_counts.get(req.model_id, 0) + 1
+            with self._in_flight_lock:
+                others_alive = any(
+                    other.model_id == req.model_id
+                    and now - (other.last_activity_at or other.started_at) <= timeout_s
+                    for other in self._active_requests.values()
+                )
+            if others_alive:
+                # Other requests on this worker are still making progress, so
+                # the worker is not wedged: this entry most likely leaked (an
+                # end_request that never ran). Dropping it is enough; stopping
+                # the worker would kill the requests it is serving.
+                logger.warning(
+                    "request_busy_timeout_worker_alive",
+                    request_id=req.request_id,
+                    model_id=req.model_id,
+                )
+                continue
+            action = getattr(settings, "busy_timeout_action", "mark_error")
+            # Both actions stop the worker. ``mark_error`` used to only flip
+            # the status to ERROR with the process still alive: nothing
+            # evicts or unloads an ERROR model (eviction only considers
+            # LOADED ones), so its VRAM stayed taken until someone unloaded
+            # it by hand, and the next request's load started a second
+            # worker next to the wedged one. Now the worker is unloaded
+            # (freeing its VRAM and lock) and, for ``mark_error``, the
+            # model is left in ERROR *without* a process, the same state a
+            # failed load leaves: visible on the dashboard, and the next
+            # request loads it again.
+            try:
+                await self.unload(req.model_id, reason="busy_timeout")
+            except Exception as exc:
+                logger.warning(
+                    "busy_timeout_unload_failed",
+                    model_id=req.model_id,
+                    error=str(exc),
+                )
+            if action == "restart_worker":
+                continue
+            state = self._states.get(req.model_id)
+            if state is None or state.status not in (ModelStatus.UNLOADED, ModelStatus.ERROR):
+                # Not unloaded by us (already reloading, or never loaded):
+                # leave whatever state it is in now.
+                continue
+            state.status = ModelStatus.ERROR
+            state.error_message = (
+                f"Request {req.request_id} stuck: no activity "
+                f"for {stale_s:.0f}s (running {elapsed:.0f}s total); worker stopped"
+            )
+            await self._publish_event(req.model_id, "busy_timeout")
+            try:
+                await publish_system_alert(
+                    "warning",
+                    f"Model '{req.model_id}' marked ERROR and its worker stopped: "
+                    f"request stuck, no activity for {stale_s:.0f}s "
+                    f"(running {elapsed:.0f}s total)",
+                )
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # 11.1 — LRU eviction + VRAM watchdog
@@ -1307,6 +1488,20 @@ class ModelManager:
         )
         return [s.model_id for s in candidates]
 
+    def _drain_wait_budget_s(self, requesting_model_id: str, wanted_s: int) -> int:
+        """Seconds the load of ``requesting_model_id`` may still spend waiting
+        for a busy eviction candidate to drain, capped at ``wanted_s``.
+
+        Each load gets one budget (``max_drain_timeout_s``, set when it enters
+        the gate) shared by every candidate it waits on. Waits outside a load
+        (``ensure_vram_free`` for a service) keep their per-candidate wait.
+        """
+        deadline = self._drain_deadlines.get(requesting_model_id)
+        if deadline is None:
+            return wanted_s
+        remaining = deadline - asyncio.get_running_loop().time()
+        return max(0, min(int(wanted_s), int(remaining)))
+
     async def _evict_for_space(self, gpu_index: int, needed_mb: int) -> int:
         """Evict LRU models from gpu_index until needed_mb is freed.
 
@@ -1327,7 +1522,10 @@ class ModelManager:
                 if shrunk:
                     freed += shrunk
                     continue
-                vram_per_gpu = state.vram_used_mb // max(1, len(state.current_gpu or [1]))
+                # What it holds on THIS GPU, not vram_used_mb split evenly:
+                # a tensor-split worker rarely lands evenly (same mistake the
+                # load path's per-GPU lock already fixed, 2026-11-04).
+                vram_per_gpu = self._physical_mb_on_gpu(model_id, gpu_index)
                 logger.info(
                     "vram_eviction",
                     model_id=model_id,
@@ -1385,6 +1583,7 @@ class ModelManager:
                             max(static_timeout_s, int(settings.max_drain_timeout_s)),
                             int(remaining) + 15,
                         )
+                drain_timeout_s = self._drain_wait_budget_s(requesting_model_id, drain_timeout_s)
                 logger.info(
                     "vram_eviction_last_resort_drain_wait",
                     requested_model_id=requesting_model_id,
@@ -1434,7 +1633,7 @@ class ModelManager:
         shrunk = await self._try_shrink_for_space(candidate_id, gpu_index, needed_mb)
         if shrunk:
             return shrunk
-        vram_per_gpu = state.vram_used_mb // max(1, len(state.current_gpu or [1]))
+        vram_per_gpu = self._physical_mb_on_gpu(candidate_id, gpu_index)
         logger.info(
             "vram_eviction_last_resort",
             model_id=candidate_id,
@@ -1465,6 +1664,13 @@ class ModelManager:
             try:
                 await asyncio.sleep(interval_s)
                 if not self._gpu_manager:
+                    continue
+                if self._load_gate_busy():
+                    # A load is admitting/evicting/starting: usage is mid-change
+                    # and it is already making room under the gate. Evicting
+                    # here too raced it on stale figures; the next tick will
+                    # see the settled card.
+                    logger.debug("vram_watchdog_skipped_load_in_progress")
                     continue
                 threshold = float(getattr(settings, "vram_eviction_threshold", 0.96))
                 gpu_states = await self._gpu_manager.get_all_states()
@@ -1748,20 +1954,13 @@ class ModelManager:
         loads it through the normal (evicting) path.
         """
         delay = max(0, int(settings.pin_autoload_delay_s))
-        # Persisted ERROR can mean last run's backend process (and its VRAM
-        # lock) is still alive — see unload()'s ERROR handling. Clear it now,
-        # not after the delay, so the stale lock does not mislead the loads
-        # requests make in the meantime.
-        for model_id, state in list(self._states.items()):
-            if state.load_policy == LoadPolicy.PIN and state.status == ModelStatus.ERROR:
-                try:
-                    await self.unload(model_id, reason="startup_error_recovery")
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "startup_error_recovery_unload_failed",
-                        model_id=model_id,
-                        error=str(exc),
-                    )
+        # There is no "persisted ERROR" to recover here: status is never read
+        # back from the database or Redis (_load_configs_from_db builds every
+        # state as CONFIGURED, _reconcile_ollama_state only adopts LOADED), and
+        # GPUManager's VRAM locks are in memory, so a restart starts clean. An
+        # "unload every PIN in ERROR" pass that used to sit here could only
+        # ever see a load that failed in the first instants of this run, and
+        # unloading that again did nothing useful.
         if delay and self._pinned_needing_load():
             logger.info("pin_autoload_delayed", seconds=delay, models=self._pinned_needing_load())
             await asyncio.sleep(delay)
@@ -2131,6 +2330,8 @@ class ModelManager:
             if state.status == ModelStatus.LOADED:
                 return state
 
+            status_before_load = state.status
+            error_before_load = state.error_message
             state.status = ModelStatus.LOADING
             load_started_at = datetime.now(UTC)
             load_task = asyncio.current_task()
@@ -2252,6 +2453,13 @@ class ModelManager:
                         gate_entered = True
                         self._load_in_progress.add(model_id)
                         self._load_started_at[model_id] = time.time()
+                        # One drain budget for the whole load (BUG-24): each
+                        # busy candidate used to get its own wait of up to
+                        # max_drain_timeout_s, so a load could hold the gate
+                        # far longer than the loads queued behind it wait.
+                        self._drain_deadlines[model_id] = asyncio.get_running_loop().time() + max(
+                            1, int(settings.max_drain_timeout_s)
+                        )
                         try:
                             if state.backend_type == "ollama":
                                 await self._prepare_ollama_runtime_switch(state)
@@ -2647,6 +2855,7 @@ class ModelManager:
                         finally:
                             self._load_in_progress.discard(model_id)
                             self._load_started_at.pop(model_id, None)
+                            self._drain_deadlines.pop(model_id, None)
                 except BaseException:
                     # Only decrement the waiter counter when the exception
                     # happened before we even entered the gate; once inside,
@@ -2690,6 +2899,25 @@ class ModelManager:
                 state.error_message = None
                 await self._publish_event(model_id, "load_cancelled")
                 logger.info("model_load_cancelled", model_id=model_id)
+                raise
+            except LoadGateTimeoutError as e:
+                # Queued behind another load for too long: nothing was started
+                # and nothing is broken (BUG-24). Put the model back as it was
+                # — not ERROR, no system alert — so the caller's 503 carries
+                # Retry-After and concurrent waiters see a retryable state.
+                try:
+                    if "backend_loaded" in locals() and backend_loaded:
+                        await backend.unload(state.backend_model_id)
+                except Exception:  # noqa: BLE001
+                    logger.warning("model_load_cleanup_failed", model_id=model_id)
+                self._worker_pool.remove_worker(model_id)
+                if "assigned_port" in locals() and assigned_port:
+                    self._worker_pool.release_port(assigned_port)
+                await self._release_failed_load_residency(state, model_id)
+                state.status = status_before_load
+                state.error_message = error_before_load
+                await self._publish_event(model_id, "status_changed")
+                logger.warning("model_load_gate_timeout", model_id=model_id, error=str(e))
                 raise
             except Exception as e:
                 state.status = ModelStatus.ERROR
@@ -3017,6 +3245,12 @@ class ModelManager:
         the service's worst-case generation time.
 
         Raises InsufficientVRAMError if not enough VRAM could be freed.
+
+        Not under the load gate (BUG-23, left open on purpose): the caller is a
+        service container mid-request, and a load holding the gate can be
+        waiting on that same service (``pressure_evict`` asks it to unload), so
+        queueing here could hold both until the gate timeout. Coordinating it
+        properly needs the VRAM arbiter.
         """
         return await self._assign_gpus_for_load(
             model_id=requesting_id,
@@ -3698,6 +3932,7 @@ class ModelManager:
                                         max_drain_timeout_s,
                                         int(remaining) + 15,
                                     )
+                            drain_timeout_s = self._drain_wait_budget_s(model_id, drain_timeout_s)
                             logger.info(
                                 "pressure_eviction_drain_wait",
                                 requested_model_id=model_id,
@@ -4241,13 +4476,27 @@ class ModelManager:
         return max(5, int((state.vram_used_mb if state else 0) // 400))
 
     def _physical_mb_on_gpu(self, model_id: str, gpu_index: int) -> int:
-        """MB a model's process really holds on one GPU (what unloading frees)."""
+        """MB a model's process really holds on one GPU (what unloading frees).
+
+        Measured per PID when NVML sees the worker; else the VRAM lock it holds
+        on that GPU (per-GPU already: real usage or the preset's split, see
+        _load_model); only then ``vram_used_mb`` split evenly.
+        """
         state = self._states.get(model_id)
         if state is None:
             return 0
         used = self._worker_vram_by_gpu(state).get(gpu_index)
         if used:
             return int(used)
+        snapshot = getattr(self._gpu_manager, "locks_snapshot", None)
+        if callable(snapshot):
+            try:
+                locks = snapshot(gpu_index)
+            except Exception:  # noqa: BLE001 - fall back to the even split
+                locks = None
+            locked = locks.get(model_id) if isinstance(locks, dict) else None
+            if isinstance(locked, int) and locked > 0:
+                return locked
         return int(state.vram_used_mb // max(1, len(state.current_gpu or [1])))
 
     async def _evict_cheap_then_shrink(
@@ -4514,6 +4763,25 @@ class ModelManager:
         state = self._states.get(model_id)
         if state is None or self._gpu_manager is None or not state.current_gpu:
             return False
+        async with self._try_load_gate() as gated:
+            if not gated:
+                # A load is evicting/admitting right now: don't evict on top of
+                # it with figures it is about to change. The request fails
+                # with its usual "retry later" instead.
+                logger.info("whisper_eviction_skip_load_in_progress", whisper=model_id)
+                return False
+            return await self._evict_for_whisper_gated(
+                model_id, state, needed_mb=needed_mb, only_unshrinkable=only_unshrinkable
+            )
+
+    async def _evict_for_whisper_gated(
+        self,
+        model_id: str,
+        state: ModelState,
+        *,
+        needed_mb: int | None,
+        only_unshrinkable: bool,
+    ) -> bool:
         gpu = int(state.current_gpu[0])
         needed = int(needed_mb if needed_mb is not None else settings.whisper_diarization_extra_mb)
         for candidate in self._get_pressure_eviction_candidates(model_id, gpu_indices=[gpu]):
@@ -5104,9 +5372,8 @@ class ModelManager:
             # still held (e.g. a generation timeout or health-check failure
             # that never went through a clean unload) — unload() must still
             # be able to kill that process and release the lock, or it's
-            # stuck forever (the lock lives only in GPUManager's in-memory
-            # dict, so even a container restart re-derives the same stuck
-            # state from the model's last-known DB row). Reproduced live
+            # stuck until the API restarts (the lock lives only in
+            # GPUManager's in-memory dict). Reproduced live
             # 2026-11-04: gemma4:26b sat in ERROR holding 23632 MB on GPU1
             # — every other model's load attempt on that GPU failed with
             # "insufficient VRAM" until the process was killed by hand,
@@ -5138,6 +5405,31 @@ class ModelManager:
                     await self.unload(sibling_id, reason=reason)
             return
 
+        # Same per-model lock loads take: a load arriving while this unload
+        # runs waits for it instead of starting a worker next to the one
+        # being stopped (there are awaits between the status flip and the
+        # process exit). Reentrant for a task already holding it. If the
+        # model turns LOADING/UNLOADING under another holder while we wait
+        # (someone else is loading or unloading it), give up: that is the
+        # same no-op the status check above makes, and it keeps an eviction
+        # running inside the load gate from waiting on a load that is itself
+        # queued behind that gate.
+        def _not_unloadable() -> bool:
+            return state.status not in (ModelStatus.LOADED, ModelStatus.ERROR)
+
+        async with self._acquire_model_load_lock(model_id, abort_if=_not_unloadable) as held:
+            if not held or _not_unloadable():
+                logger.info(
+                    "model_unload_skipped",
+                    model_id=model_id,
+                    reason=reason,
+                    status=state.status.value,
+                )
+                return
+            await self._unload_locked(state, model_id, reason)
+
+    async def _unload_locked(self, state: ModelState, model_id: str, reason: str) -> None:
+        """Body of :meth:`unload`; the caller holds ``model_id``'s load lock."""
         released_vram_mb = state.vram_used_mb
         released_gpu_indices = list(state.current_gpu)
         if self._gpu_manager:
@@ -5448,7 +5740,8 @@ class ModelManager:
         """
         if not settings.preferred_gpu_replacement_enabled or self._gpu_manager is None:
             return
-        if self._load_in_progress:
+        # A load queued on the gate is not in _load_in_progress yet.
+        if self._load_in_progress or self._load_gate_busy():
             return
 
         now = time.time()
@@ -5606,6 +5899,10 @@ class ModelManager:
                 continue
             idle_s = (now - anchor).total_seconds()
             if idle_s > timeout_s:
+                if self._load_gate_busy():
+                    # Don't free memory under a load that is measuring it; the
+                    # model stays idle and goes on the next tick.
+                    continue
                 logger.info("idle_eviction", model_id=model_id, idle_s=int(idle_s))
                 self._create_background_task(
                     self.unload(model_id, reason="idle"),
@@ -6164,6 +6461,24 @@ class ModelManager:
                 "extra_config": normalize_case(patch["extra_config"], prefer="camel")[0],
             }
 
+        # The extra_config patch, computed once and merged the same way into
+        # the database row and into memory. They used to differ: the row got
+        # the patch stripped of derived paths and registry_metadata, memory the
+        # raw one, so a UI round-trip wrote stale registry_metadata (or a
+        # path) into memory that the database never had, and the two only
+        # agreed again after a restart.
+        raw_extra: dict | None = None
+        extra_patch: dict | None = None
+        if "extra_config" in patch:
+            raw_extra = patch["extra_config"] or {}
+            extra_patch = raw_extra
+            if state.artifact:
+                # The UI round-trips what GET returned, derived paths and
+                # registry metadata included; those are owned by the artifact /
+                # the model row, never by extra_config.
+                extra_patch = model_artifacts.strip_derived(state.backend_type, raw_extra) or {}
+                extra_patch = {k: v for k, v in extra_patch.items() if k != "registry_metadata"}
+
         if model_id in self._persisted_model_ids:
             async with database.AsyncSessionLocal() as session:
                 result = await session.execute(
@@ -6182,25 +6497,14 @@ class ModelManager:
                             existing_extra = (
                                 cfg.extra_config if isinstance(cfg.extra_config, dict) else {}
                             )
-                            incoming = val or {}
                             if cfg.artifact:
                                 new_artifact = model_artifacts.apply_path_edits(
-                                    state.backend_type, cfg.artifact, incoming, state.extra_config
+                                    state.backend_type, cfg.artifact, raw_extra, state.extra_config
                                 )
                                 if new_artifact != cfg.artifact:
                                     cfg.artifact = new_artifact
                                     state.artifact = new_artifact
-                                # The UI round-trips what GET returned, derived
-                                # paths and registry metadata included; those
-                                # are owned by the artifact / the model row.
-                                incoming = (
-                                    model_artifacts.strip_derived(state.backend_type, incoming)
-                                    or {}
-                                )
-                                incoming = {
-                                    k: v for k, v in incoming.items() if k != "registry_metadata"
-                                }
-                            setattr(cfg, key, _deep_merge_dicts(existing_extra, incoming))
+                            setattr(cfg, key, _deep_merge_dicts(existing_extra, extra_patch or {}))
                         else:
                             setattr(cfg, key, val)
                     await session.commit()
@@ -6214,7 +6518,7 @@ class ModelManager:
                 setattr(state, key, bool(val))
             elif key == "extra_config":
                 existing_extra = state.extra_config if isinstance(state.extra_config, dict) else {}
-                merged = _deep_merge_dicts(existing_extra, val or {})
+                merged = _deep_merge_dicts(existing_extra, extra_patch or {})
                 if state.artifact:
                     # paths always come from the (possibly just edited) artifact
                     merged = model_artifacts.materialize(

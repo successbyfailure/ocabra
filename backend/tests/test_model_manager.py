@@ -8,9 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import sqlalchemy as sa
 
+import ocabra.core.model_manager as model_manager_module
 from ocabra.backends._mock import MockBackend
 from ocabra.backends.base import BackendCapabilities, BackendInterface, WorkerInfo
-from ocabra.core.model_manager import LoadPolicy, ModelManager, ModelStatus
+from ocabra.core.model_manager import LoadGateTimeoutError, LoadPolicy, ModelManager, ModelStatus
 from ocabra.core.worker_pool import WorkerPool
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.stats import ModelLoadStat
@@ -437,10 +438,15 @@ async def test_gpu_admission_times_out_instead_of_hanging_forever(monkeypatch):
         stuck_task = asyncio.create_task(mm.load("ollama/stuck-model"))
         await asyncio.wait_for(stuck_started.wait(), timeout=1)
 
-        with pytest.raises(TimeoutError):
+        alert = model_manager_module.publish_system_alert
+        with pytest.raises(LoadGateTimeoutError):
             await asyncio.wait_for(mm.load("vllm/other-model"), timeout=5)
 
-        assert mm._states["vllm/other-model"].status == ModelStatus.ERROR
+        # BUG-24: waiting behind another load is retryable, not a failure —
+        # the model goes back to where it was, without ERROR or system alert.
+        assert mm._states["vllm/other-model"].status == ModelStatus.CONFIGURED
+        assert mm._states["vllm/other-model"].error_message is None
+        alert.assert_not_awaited()
         assert mm._load_queue_waiters == 0
 
         never_finishes.set()
