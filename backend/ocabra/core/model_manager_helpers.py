@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from ocabra.core.vram_planner import (
@@ -59,6 +60,22 @@ def _bitnet_parallel(extra: dict) -> object:
     if isinstance(section, dict) and section.get("parallel") is not None:
         return section.get("parallel")
     return extra.get("parallel")
+
+
+_WORKER_SUFFIX = re.compile(r"[0-9a-f]{12}")
+
+
+def strip_worker_suffix(worker_key: str) -> str:
+    """The deployment behind a worker key: ``<id>::<hash>`` → ``<id>`` (BUG-30).
+
+    ``::`` means two things: the 12-hex-digit hash :func:`compute_worker_key`
+    appends for a preset's worker, and the ``repo::file`` of a GGUF
+    deployment. Splitting at the first ``::`` turned ``repo::file::hash`` into
+    ``repo`` (losing the file) and splitting at the last turned a plain
+    ``repo::file`` into ``repo``. Only a trailing hash is stripped here.
+    """
+    base, separator, suffix = str(worker_key).rpartition("::")
+    return base if separator and _WORKER_SUFFIX.fullmatch(suffix) else str(worker_key)
 
 
 def compute_worker_key(base_model_id: str, load_overrides: dict | None) -> str:

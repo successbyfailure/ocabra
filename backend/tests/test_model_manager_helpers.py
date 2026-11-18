@@ -664,3 +664,27 @@ def test_estimate_accepts_camel_case_keys(tmp_path: Path) -> None:
     assert _est({"vllm": {"maxModelLen": 32768, "kvCacheDtype": "fp8"}}) < snake
     # camelCase operator override still means "don't estimate"
     assert _est({"vllm": {"maxModelLen": 32768}, "vramEstimateMb": 9000}) == 0
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("key", "base"),
+    [
+        ("llama_cpp/qwen3.8-27b::781a0367a8ba", "llama_cpp/qwen3.8-27b"),
+        # GGUF repo::file: the file is not a preset hash and stays.
+        ("llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M", "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M"),
+        # GGUF repo::file with a preset worker: only the hash goes.
+        ("llama_cpp/org/repo::Model-Q4_K_M::0b2a99a4d66f", "llama_cpp/org/repo::Model-Q4_K_M"),
+        ("vllm/org/model", "vllm/org/model"),
+        ("x::ABCDEF012345", "x::ABCDEF012345"),  # uppercase is not our hash
+    ],
+)
+def test_strip_worker_suffix_only_removes_the_preset_hash(key, base):
+    """BUG-30: the first-``::`` split loses the GGUF file of ``repo::file::hash``.
+    Only ``batch_priority`` uses this helper so far; see the review notes."""
+    from ocabra.core.model_manager_helpers import compute_worker_key, strip_worker_suffix
+
+    assert strip_worker_suffix(key) == base
+    assert strip_worker_suffix(compute_worker_key("a/b::F", {"x": 1})) == "a/b::F"

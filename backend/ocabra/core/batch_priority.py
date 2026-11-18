@@ -20,7 +20,6 @@ the wait this module exists to cut short.
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from dataclasses import dataclass, field
 
@@ -99,8 +98,9 @@ class BatchPriorityCoordinator:
         the same identity. Confirmed live 2026-10-30: without this,
         preempt_now() always found an empty bucket and silently did nothing.
         """
-        base, separator, suffix = worker_key.rpartition("::")
-        return base if separator and re.fullmatch(r"[0-9a-f]{12}", suffix) else worker_key
+        from ocabra.core.model_manager_helpers import strip_worker_suffix
+
+        return strip_worker_suffix(worker_key)
 
     # ── Registration (called by the batch processor around each dispatch) ──
 
