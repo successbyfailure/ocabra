@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.110.1 — 2026-11-18
+
+### Corregido
+
+- Un modelo podía quedarse en «cargando» para siempre, sin que nada volviera a
+  cargarlo hasta reiniciar el servidor. Pasaba si la carga se cancelaba justo
+  al empezar, por ejemplo cuando una sesión de `/v1/realtime` se cerraba en
+  el momento en que arrancaba la carga de su modelo de voz. Las peticiones a
+  ese modelo esperaban a una carga que no iba a terminar. Ahora una
+  cancelación en ese punto deja el modelo descargado y la siguiente petición
+  lo vuelve a cargar.
+
+---
+
 ## 0.110.0 — 2026-11-18
 
 ### Nuevo

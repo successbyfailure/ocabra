@@ -2132,13 +2132,17 @@ class ModelManager:
                 return state
 
             state.status = ModelStatus.LOADING
-            await self._publish_event(model_id, "status_changed")
             load_started_at = datetime.now(UTC)
             load_task = asyncio.current_task()
             if load_task is not None:
                 self._load_tasks[model_id] = load_task
 
             try:
+                # Inside the try: a cancellation on this first await (a
+                # Realtime session closing as its background load starts) used
+                # to skip the cleanup below and leave the model in LOADING for
+                # good, so nothing would load it again until a restart.
+                await self._publish_event(model_id, "status_changed")
                 if state.artifact:
                     # Re-resolve on every load: an ``ollama pull`` that updated
                     # the tag points it at a new blob, and the old one is gone.

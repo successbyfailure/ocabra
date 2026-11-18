@@ -2735,3 +2735,38 @@ async def test_pressure_eviction_judges_one_card_when_the_model_fits_one(worker_
         )
 
     unload_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_load_cancelled_on_its_first_await_does_not_stay_loading() -> None:
+    """A Realtime session that closed just as its background load started
+    cancelled ``_load_model`` on the ``status_changed`` publish, which ran
+    before the ``try``: the cleanup was skipped and the model stayed LOADING
+    until the api restarted (piper-es-mx, 2026-11-18)."""
+    from ocabra.core.model_manager import ModelState
+
+    mm = ModelManager(WorkerPool())
+    model_id = "piper/piper-es-mx-claude-high"
+    mm._states[model_id] = ModelState(
+        model_id=model_id, display_name="Piper es_MX", backend_type="piper"
+    )
+    publishing = asyncio.Event()
+
+    async def _publish(mid: str, event: str) -> None:
+        if event == "status_changed":
+            publishing.set()
+            await asyncio.Event().wait()
+
+    with (
+        patch.object(mm, "_publish_event", new=_publish),
+        patch.object(mm, "_release_failed_load_residency", new=AsyncMock()),
+    ):
+        task = asyncio.create_task(mm._load_model(model_id))
+        await asyncio.wait_for(publishing.wait(), 5)
+        assert mm._states[model_id].status == ModelStatus.LOADING
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert mm._states[model_id].status == ModelStatus.UNLOADED
+    assert model_id not in mm._load_tasks
