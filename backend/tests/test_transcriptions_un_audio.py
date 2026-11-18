@@ -584,3 +584,24 @@ def test_la_federacion_no_inventa_los_campos_si_el_cliente_no_los_manda(monkeypa
     assert _transcribe(cliente).status_code == 200
     assert "vad_filter" not in enviados[0]
     assert "condition_on_previous_text" not in enviados[0]
+
+
+def test_whisper_cpp_recibe_los_campos_traducidos_no_los_de_faster_whisper(monkeypatch):
+    """whisper-server ignora ``vad_filter``/``condition_on_previous_text``:
+    la peticion normal (sin diarizar) tiene que mandar ``max_context``/``vad``."""
+    from types import SimpleNamespace
+
+    cliente, mm, enviados = _cliente_perfil(monkeypatch, diarizado=False)
+    mm.get_state.return_value.backend_type = "whisper_cpp"
+    traducir = MagicMock(return_value={"max_context": "0"})
+    cliente.app.state.worker_pool.get_backend = AsyncMock(
+        return_value=SimpleNamespace(
+            health_check=AsyncMock(return_value=True), transcription_option_fields=traducir
+        )
+    )
+    assert _transcribe(cliente, condition_on_previous_text="false", vad_filter="true").status_code == 200
+
+    assert enviados[0]["max_context"] == "0"
+    assert "condition_on_previous_text" not in enviados[0] and "vad_filter" not in enviados[0]
+    pedido = traducir.call_args.args[1]
+    assert pedido["condition_on_previous_text"] == "false" and pedido["vad_filter"] == "true"

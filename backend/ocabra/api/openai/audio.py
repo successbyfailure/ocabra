@@ -351,6 +351,12 @@ async def transcriptions(
                         body["prompt"] = prompt
                     if granularities:
                         body["timestamp_granularities"] = granularities
+                    # The backend translates these into whisper-server's own
+                    # fields (max_context, vad); they were dropped here.
+                    if vad_filter is not None:
+                        body["vad_filter"] = vad_filter
+                    if condition_on_previous_text is not None:
+                        body["condition_on_previous_text"] = condition_on_previous_text
                     # WhisperCppBackend (like AceStep below) keys its own
                     # _processes by backend_model_id (the short suffix), not
                     # the canonical worker_key — see the ACE-Step call further
@@ -373,10 +379,28 @@ async def transcriptions(
                             form_data["diarize"] = diarize
                         if granularities:
                             form_data["timestamp_granularities"] = granularities
-                        if vad_filter is not None:
-                            form_data["vad_filter"] = vad_filter
-                        if condition_on_previous_text is not None:
-                            form_data["condition_on_previous_text"] = condition_on_previous_text
+                        if state.backend_type == "whisper_cpp":
+                            # whisper-server ignores faster-whisper's names:
+                            # translate them (condition_on_previous_text=false
+                            # → max_context=0, vad_filter → vad when the
+                            # worker has a VAD model).
+                            form_data.update(
+                                backend.transcription_option_fields(
+                                    state.backend_model_id,
+                                    {
+                                        "vad_filter": vad_filter,
+                                        "condition_on_previous_text": condition_on_previous_text,
+                                        "prompt": prompt,
+                                    },
+                                )
+                            )
+                        else:
+                            if vad_filter is not None:
+                                form_data["vad_filter"] = vad_filter
+                            if condition_on_previous_text is not None:
+                                form_data["condition_on_previous_text"] = (
+                                    condition_on_previous_text
+                                )
 
                         resp = await client.post(
                             url,
