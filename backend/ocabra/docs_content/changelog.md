@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.110.2 — 2026-11-18
+
+### Corregido
+
+- Desde la 0.109.0, una clave API no podía crear claves (`403` en
+  `POST /ocabra/auth/keys`), y eso rompía a quien da de alta claves
+  automáticamente: Coder crea una por workspace con su propia clave. Ahora
+  vuelve a poder hacerlo, siempre que la clave nueva caduque en 90 días o
+  menos (`expires_in_days` entre 1 y 90). Una clave sin caducidad, o crear
+  claves para otro usuario (`POST /ocabra/users/{id}/keys`), sigue exigiendo
+  la sesión iniciada.
+
+---
+
 ## 0.110.1 — 2026-11-18
 
 ### Corregido
@@ -70,7 +84,8 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 - **Acción** — Una clave API ya no puede crear claves API
   (`POST /ocabra/auth/keys`, `POST /ocabra/users/{id}/keys`): da `403`. Hay
   que hacerlo con la sesión iniciada en el panel. Así una clave filtrada no
-  puede dejarse sustitutas.
+  puede dejarse sustitutas. (Suavizado en la 0.110.2: con caducidad de hasta
+  90 días, sí.)
 - Cambiar la contraseña (la tuya o, como admin, la de otro) cierra todas las
   demás sesiones de ese usuario. La sesión desde la que la cambias sigue
   abierta. Las claves API no se revocan: son de integraciones, revócalas una

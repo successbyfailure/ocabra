@@ -30,6 +30,10 @@ class PasswordChangeRequest(BaseModel):
     new_password: str
 
 
+#: Longest expiry of a key created with another key (Coder asks for 30).
+MAX_KEY_CREATED_KEY_DAYS = 90
+
+
 class CreateApiKeyRequest(BaseModel):
     name: str
     expires_in_days: int | None = None
@@ -441,13 +445,25 @@ async def create_api_key(
     Raises:
         HTTP 401: If the caller is not authenticated.
     """
-    from ocabra.api._deps_auth import require_session
     from ocabra.core.auth_manager import generate_api_key
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey
 
-    # A leaked key must not be able to mint replacements for itself (SEG-19).
-    require_session(user)
+    # A key may create keys (Coder makes one per workspace this way), but only
+    # ones that expire: a leaked key must not leave permanent replacements
+    # behind (SEG-19).
+    if user.via_api_key and not (
+        body.expires_in_days is not None
+        and 0 < body.expires_in_days <= MAX_KEY_CREATED_KEY_DAYS
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "An API key can only create keys that expire within "
+                f"{MAX_KEY_CREATED_KEY_DAYS} days (set expires_in_days). "
+                "Keys without expiry need a signed-in session."
+            ),
+        )
 
     now = datetime.now(UTC)
     expires_at = None

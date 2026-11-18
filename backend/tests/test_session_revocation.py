@@ -51,12 +51,38 @@ def _ctx(**kw):
 
 
 @pytest.mark.asyncio
-async def test_an_api_key_cannot_create_api_keys():
+@pytest.mark.parametrize("days", [None, 0, 91, 3650])
+async def test_an_api_key_cannot_create_keys_that_do_not_expire_soon(days):
     from ocabra.api.internal.auth import CreateApiKeyRequest, create_api_key
 
     with pytest.raises(HTTPException) as exc:
-        await create_api_key(CreateApiKeyRequest(name="x"), _ctx(via_api_key=True))
+        await create_api_key(
+            CreateApiKeyRequest(name="x", expires_in_days=days), _ctx(via_api_key=True)
+        )
     assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_an_api_key_can_create_expiring_keys_like_coder_does():
+    """Coder creates one key per workspace, with 30 days, using its own key.
+    v0.109.0 refused every key created with a key and broke it."""
+    from ocabra.api.internal.auth import CreateApiKeyRequest, create_api_key
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    session.add = MagicMock()
+
+    async def _refresh(row):
+        row.id = uuid.uuid4()
+
+    session.refresh = _refresh
+    with patch("ocabra.database.AsyncSessionLocal", return_value=session):
+        out = await create_api_key(
+            CreateApiKeyRequest(name="coder-ws-owner-1", expires_in_days=30),
+            _ctx(via_api_key=True),
+        )
+    assert out["key"].startswith("sk-ocabra-") and out["expires_at"]
 
 
 @pytest.mark.asyncio
