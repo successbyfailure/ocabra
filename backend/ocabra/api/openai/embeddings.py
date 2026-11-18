@@ -32,6 +32,7 @@ from ._deps import (
     ocabra_response_headers,
     raise_inference_dispatch_error,
     raise_upstream_http_error,
+    read_json_object,
     resolve_profile,
     to_backend_body,
 )
@@ -92,7 +93,7 @@ async def embeddings(
     Create text embeddings. Proxies to the resolved model worker (backend-agnostic).
     Requires a model with capability embeddings=True.
     """
-    body = await request.json()
+    body = await read_json_object(request)
     model_id: str = body.get("model", "")
 
     model_manager = get_model_manager(request)

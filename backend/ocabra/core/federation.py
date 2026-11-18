@@ -1345,6 +1345,10 @@ class FederationManager:
             headers=proxy_headers,
             timeout=self._settings.federation_proxy_timeout_s,
         ) as response:
+            if response.status_code >= 400:
+                # Read the error body while the stream is open, so the caller
+                # can answer with the peer's status and message (BUG-17).
+                await response.aread()
             response.raise_for_status()
             async for chunk in response.aiter_bytes():
                 yield chunk

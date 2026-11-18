@@ -21,6 +21,7 @@ from ocabra.api.openai._deps import (
     get_model_manager,
     get_profile_registry,
     merge_profile_defaults,
+    read_json_object,
     resolve_profile,
     to_backend_body,
 )
@@ -277,7 +278,7 @@ async def embeddings(
     Response:
       - {"model": ..., "embeddings": [[...], ...]}
     """
-    body = await request.json()
+    body = await read_json_object(request)
     return await _run_embeddings(request, body, legacy=True, user=user)
 
 
@@ -296,5 +297,5 @@ async def embed(
     Response:
       - {"model": ..., "embeddings": [[...], ...]}
     """
-    body = await request.json()
+    body = await read_json_object(request)
     return await _run_embeddings(request, body, legacy=False, user=user)

@@ -511,3 +511,76 @@ def test_las_estadisticas_guardan_el_perfil_pedido(monkeypatch):
 
     assert _transcribe(cliente).status_code == 200
     assert vistos == ["faster-whisper-large-v3-diarized"]
+
+
+# ── Revisión 2026-11-16: BUG-15, BUG-18 y BUG-21 ─────────────────────────────
+
+
+def test_temperatura_no_numerica_da_400_con_el_parametro(monkeypatch):
+    """``float(form["temperature"])`` sin guarda: ``temperature=abc`` era un 500."""
+    cliente, mm, enviados = _cliente_perfil(monkeypatch, diarizado=False)
+    respuesta = _transcribe(cliente, temperature="abc")
+
+    assert respuesta.status_code == 400
+    error = respuesta.json()["detail"]["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "temperature"
+    assert enviados == []
+    mm.begin_request.assert_not_called()
+
+
+def test_si_hacer_hueco_falla_no_se_queda_la_peticion_en_vuelo(monkeypatch):
+    """``begin_request`` iba antes del ``try`` cuyo ``finally`` la cierra: si
+    ``make_room_for_whisper`` reventaba, el contador en vuelo no bajaba nunca."""
+    cliente, mm, _enviados = _cliente_perfil(monkeypatch, diarizado=False)
+    mm.make_room_for_whisper = AsyncMock(side_effect=RuntimeError("boom"))
+    cliente = TestClient(cliente.app, raise_server_exceptions=False)
+
+    respuesta = _transcribe(cliente)
+
+    assert respuesta.status_code == 500
+    mm.begin_request.assert_called_once()
+    mm.end_request.assert_called_once_with("whisper/faster-whisper-large-v3", "req-1")
+
+
+def test_la_federacion_reenvia_vad_filter_y_condition_on_previous_text(monkeypatch):
+    """El camino local los manda a faster-whisper; el que salía hacia un peer
+    los perdía y el peer transcribía con sus valores por defecto."""
+    import httpx
+
+    from ocabra.api.openai import audio as audio_mod
+
+    enviados: list[dict] = []
+
+    async def _proxy(request, **kwargs):
+        enviados.append(dict(kwargs["data"]))
+        return httpx.Response(200, json={"text": "remoto"})
+
+    monkeypatch.setattr(audio_mod, "try_proxy_multipart", _proxy)
+    cliente, _mm, _locales = _cliente_perfil(monkeypatch, diarizado=False)
+
+    respuesta = _transcribe(cliente, vad_filter="false", condition_on_previous_text="true")
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["text"] == "remoto"
+    assert enviados[0]["vad_filter"] == "false"
+    assert enviados[0]["condition_on_previous_text"] == "true"
+
+
+def test_la_federacion_no_inventa_los_campos_si_el_cliente_no_los_manda(monkeypatch):
+    import httpx
+
+    from ocabra.api.openai import audio as audio_mod
+
+    enviados: list[dict] = []
+
+    async def _proxy(request, **kwargs):
+        enviados.append(dict(kwargs["data"]))
+        return httpx.Response(200, json={"text": "remoto"})
+
+    monkeypatch.setattr(audio_mod, "try_proxy_multipart", _proxy)
+    cliente, _mm, _locales = _cliente_perfil(monkeypatch, diarizado=False)
+
+    assert _transcribe(cliente).status_code == 200
+    assert "vad_filter" not in enviados[0]
+    assert "condition_on_previous_text" not in enviados[0]

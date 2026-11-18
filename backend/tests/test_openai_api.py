@@ -439,6 +439,158 @@ class TestOpenAITTSStreamingErrors:
         assert b'"input":"Hello through alias"' in sent_request.content
 
 
+class TestOpenAITTSWorkerAndFederationErrors:
+    """BUG-14 / BUG-18 (revisión 2026-11-16): errores de /v1/audio/speech."""
+
+    _BODY = {"model": "piper/test-voice", "input": "Hola", "voice": "alloy"}
+
+    def test_worker_unreachable_streaming_is_a_retryable_503(self):
+        client = TestClient(_make_tts_app())
+        with patch.object(
+            httpx.AsyncClient, "send", new=AsyncMock(side_effect=httpx.ConnectError("refused"))
+        ):
+            response = client.post(
+                "/v1/audio/speech", json={**self._BODY, "response_format": "mp3"}
+            )
+
+        assert response.status_code == 503
+        assert response.json()["detail"]["error"]["code"] == "worker_unavailable"
+        assert response.headers["Retry-After"] == "10"
+
+    def test_worker_unreachable_wav_is_a_retryable_503(self):
+        client = TestClient(_make_tts_app())
+        with patch.object(
+            httpx.AsyncClient, "post", new=AsyncMock(side_effect=httpx.ConnectError("refused"))
+        ):
+            response = client.post(
+                "/v1/audio/speech", json={**self._BODY, "response_format": "wav"}
+            )
+
+        assert response.status_code == 503
+        assert response.json()["detail"]["error"]["code"] == "worker_unavailable"
+        assert "Retry-After" in response.headers
+
+    def test_worker_read_timeout_is_a_504(self):
+        client = TestClient(_make_tts_app())
+        with patch.object(
+            httpx.AsyncClient, "send", new=AsyncMock(side_effect=httpx.ReadTimeout("slow"))
+        ):
+            response = client.post(
+                "/v1/audio/speech", json={**self._BODY, "response_format": "mp3"}
+            )
+
+        assert response.status_code == 504
+        assert response.json()["detail"]["error"]["code"] == "generation_timeout"
+
+    def test_wav_worker_4xx_is_an_invalid_request_error(self):
+        client = TestClient(_make_tts_app())
+        upstream = httpx.Response(
+            400,
+            json={"detail": "invalid voice"},
+            request=httpx.Request("POST", "http://worker/synthesize"),
+        )
+        with patch.object(httpx.AsyncClient, "post", new=AsyncMock(return_value=upstream)):
+            response = client.post(
+                "/v1/audio/speech", json={**self._BODY, "response_format": "wav"}
+            )
+
+        assert response.status_code == 400
+        error = response.json()["detail"]["error"]
+        assert error["type"] == "invalid_request_error"
+        assert "invalid voice" in error["message"]
+
+    def test_wav_worker_5xx_stays_a_server_error(self):
+        client = TestClient(_make_tts_app())
+        upstream = httpx.Response(
+            503,
+            json={"detail": "Model not loaded"},
+            request=httpx.Request("POST", "http://worker/synthesize"),
+        )
+        with patch.object(httpx.AsyncClient, "post", new=AsyncMock(return_value=upstream)):
+            response = client.post(
+                "/v1/audio/speech", json={**self._BODY, "response_format": "wav"}
+            )
+
+        assert response.status_code == 503
+        assert response.json()["detail"]["error"]["type"] == "server_error"
+
+    @pytest.mark.parametrize("speed", ["fast", [1], {"x": 1}])
+    def test_non_numeric_speed_is_a_400_naming_the_param(self, speed):
+        client = TestClient(_make_tts_app())
+        send = AsyncMock()
+        with patch.object(httpx.AsyncClient, "send", new=send):
+            response = client.post("/v1/audio/speech", json={**self._BODY, "speed": speed})
+
+        assert response.status_code == 400
+        error = response.json()["detail"]["error"]
+        assert error["type"] == "invalid_request_error"
+        assert error["param"] == "speed"
+        send.assert_not_awaited()
+
+    def test_null_speed_takes_the_default(self):
+        client = TestClient(_make_tts_app())
+        upstream = httpx.Response(
+            200,
+            content=b"mp3",
+            request=httpx.Request("POST", "http://worker/synthesize/stream"),
+        )
+        send = AsyncMock(return_value=upstream)
+        with patch.object(httpx.AsyncClient, "send", new=send):
+            response = client.post("/v1/audio/speech", json={**self._BODY, "speed": None})
+
+        assert response.status_code == 200
+        assert b'"speed":1.0' in send.await_args.args[0].content
+
+    @staticmethod
+    def _federated_app(monkeypatch, peer):
+        import ocabra.core.federation as federation_mod
+
+        app = _make_tts_app()
+        app.state.openai_tts_compat = SimpleNamespace(
+            resolve=lambda model, voice: "piper/test-voice" if model == "tts-1" else None
+        )
+        fed = MagicMock()
+        seen: list[dict] = []
+
+        async def _proxy_stream(*, peer, path, body, headers):
+            seen.append(body)
+            yield b"remote-audio"
+
+        fed.proxy_stream = _proxy_stream
+        app.state.federation_manager = fed
+        monkeypatch.setattr(settings, "federation_enabled", True)
+        resolve = AsyncMock(return_value=("remote", peer))
+        monkeypatch.setattr(federation_mod, "resolve_federated", resolve)
+        return app, seen, resolve
+
+    def test_federation_sends_the_peer_the_resolved_model_not_the_alias(self, monkeypatch):
+        peer = SimpleNamespace(peer_id="peer-1", name="peer", models=[])
+        app, seen, resolve = self._federated_app(monkeypatch, peer)
+
+        response = TestClient(app).post(
+            "/v1/audio/speech", json={"model": "tts-1", "input": "Hola", "voice": "alloy"}
+        )
+
+        assert response.status_code == 200
+        assert response.content == b"remote-audio"
+        assert resolve.await_args.args[0] == "piper/test-voice"
+        assert seen[0]["model"] == "piper/test-voice"
+
+    def test_federation_remote_without_peer_falls_back_to_local(self, monkeypatch):
+        app, seen, _ = self._federated_app(monkeypatch, None)
+        upstream = httpx.Response(
+            200,
+            content=b"local-audio",
+            request=httpx.Request("POST", "http://worker/synthesize/stream"),
+        )
+        with patch.object(httpx.AsyncClient, "send", new=AsyncMock(return_value=upstream)):
+            response = TestClient(app).post("/v1/audio/speech", json=self._BODY)
+
+        assert response.status_code == 200
+        assert response.content == b"local-audio"
+        assert seen == []
+
+
 def test_to_backend_body_ollama_never_injects_reasoning_knobs() -> None:
     # Ollama's /v1 can't disable reasoning via params (a string `reasoning`
     # 400s upstream); oCabra must not inject any knob and must drop the

@@ -8,7 +8,7 @@ POST /v1/audio/generate      — ACE-Step music generation
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 
 import httpx
 import structlog
@@ -30,6 +30,7 @@ from ._deps import (
     get_profile_registry,
     merge_profile_defaults,
     raise_upstream_http_error,
+    read_json_object,
     resolve_profile,
 )
 from ._federation import try_proxy_json, try_proxy_multipart
@@ -61,6 +62,26 @@ def _worker_timeout() -> float:
 # an agent got diarize=true accepted by two whisper.cpp profiles with no
 # speaker labels in the response — whisper_cpp support added the same day).
 _DIARIZATION_CAPABLE_BACKENDS = {"whisper", "whisper_cpp"}
+
+
+def _parse_float_param(value: Any, param: str, default: float) -> float:
+    """Read a numeric request field, or answer a 400 naming it.
+
+    ``float()`` on a client value used to run unguarded, so
+    ``temperature=abc`` or ``speed="fast"`` escaped as a generic 500. A
+    missing field (or JSON ``null``) takes *default*.
+    """
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise _openai_error(
+            f"Invalid value for '{param}': {str(value)[:50]!r} is not a number.",
+            "invalid_request_error",
+            param=param,
+            code="invalid_value",
+        ) from None
 
 
 def _is_diarize_requested(raw: str | None) -> bool:
@@ -116,7 +137,7 @@ async def transcriptions(
     language: str | None = form.get("language")
     response_format: str = form.get("response_format", "json")
     prompt: str | None = form.get("prompt")
-    temperature: float = float(form.get("temperature", 0.0))
+    temperature: float = _parse_float_param(form.get("temperature"), "temperature", 0.0)
     diarize: str | None = form.get("diarize")
     # ASR hallucination-loop mitigations, forwarded to faster-whisper. Left unset
     # here so the worker's defaults (vad_filter=true, condition_on_previous_text=
@@ -177,6 +198,12 @@ async def transcriptions(
         fed_form_data["diarize"] = diarize
     if granularities:
         fed_form_data["timestamp_granularities"] = granularities
+    # Same knobs the local path forwards to faster-whisper: a peer that served
+    # the request used to run with its defaults whatever the client asked for.
+    if vad_filter is not None:
+        fed_form_data["vad_filter"] = vad_filter
+    if condition_on_previous_text is not None:
+        fed_form_data["condition_on_previous_text"] = condition_on_previous_text
 
     fed_resp = await try_proxy_multipart(
         request,
@@ -272,12 +299,15 @@ async def transcriptions(
     last_error: Exception | None = None
 
     inflight_request_id = model_manager.begin_request(worker_key, user=user)
-    if state.backend_type == "whisper":
-        # Diarizing or many transcriptions at once grow whisper's footprint past
-        # what it is sized for: ask a llama.cpp model on its card to shrink its
-        # context first, instead of whisper running out of memory.
-        await model_manager.make_room_for_whisper(worker_key, diarize=diarize_requested)
+    # Everything after begin_request() runs inside the try: an exception in
+    # make_room_for_whisper() used to skip the finally and leak the in-flight
+    # slot for good (the model then never looked idle again).
     try:
+        if state.backend_type == "whisper":
+            # Diarizing or many transcriptions at once grow whisper's footprint
+            # past what it is sized for: ask a llama.cpp model on its card to
+            # shrink its context first, instead of whisper running out of memory.
+            await model_manager.make_room_for_whisper(worker_key, diarize=diarize_requested)
         for attempt in range(2):
             worker = worker_pool.get_worker(worker_key)
             backend = await worker_pool.get_backend(state.backend_type)
@@ -594,6 +624,33 @@ async def list_voices(
         }
 
 
+def _raise_tts_transport_error(exc: httpx.TransportError, worker_key: str) -> NoReturn:
+    """Map a TTS worker that could not be reached (or did not answer) to a
+    retryable error instead of the generic 500 it escaped as.
+
+    Same shapes as the transcription path above: unreachable worker → 503
+    ``worker_unavailable``; a worker that took the request and did not answer
+    in time → 504.
+    """
+    if isinstance(exc, httpx.TimeoutException) and not isinstance(exc, httpx.ConnectTimeout):
+        raise _openai_error(
+            f"Speech synthesis with '{worker_key}' did not finish in time. Retry, "
+            "or send a shorter input.",
+            "server_error",
+            code="generation_timeout",
+            status_code=504,
+            headers={"Retry-After": "5"},
+        ) from exc
+    logger.warning("tts_worker_transport_error", model_id=worker_key, error=str(exc))
+    raise _openai_error(
+        f"TTS worker unavailable for model '{worker_key}'.",
+        "server_error",
+        code="worker_unavailable",
+        status_code=503,
+        headers={"Retry-After": "10"},
+    ) from exc
+
+
 @router.post("/audio/speech", summary="Generate speech", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def speech(
     request: Request,
@@ -618,7 +675,7 @@ async def speech(
     it resolves straight to the pinned oCabra profile instead of being
     looked up literally.
     """
-    body = await request.json()
+    body = await read_json_object(request)
     if not isinstance(body, dict):
         raise _openai_error(
             "The request body must be a JSON object.",
@@ -641,6 +698,9 @@ async def speech(
             code="invalid_input",
         )
     body["input"] = raw_input
+    # Validate before any federation proxy or model load: a bad ``speed`` is
+    # the client's mistake and must not cost a cold start (it was a 500).
+    _parse_float_param(body.get("speed"), "speed", 1.0)
 
     requested_model_id: str = body.get("model", "")
     model_id = _resolve_openai_tts_compat(request, requested_model_id, body.get("voice"))
@@ -657,30 +717,45 @@ async def speech(
         if _settings.federation_enabled:
             from ocabra.core.federation import resolve_federated
 
+            from ._federation import body_for_peer
+
+            resolved: dict[str, Any] = {}
             target, peer = await resolve_federated(
                 model_id,
                 model_manager,
                 federation_manager,
                 profile_registry,
+                resolved=resolved,
                 user=resolution_user,
             )
-            if target == "remote":
+            if target == "remote" and peer is not None:
                 request.state.federation_remote_node_id = peer.peer_id
+                # The peer gets the model this node resolved, not the client's
+                # OpenAI alias: ``tts-1`` + ``alloy`` is a pin of *this* node's
+                # openai_tts_voice_map, and the peer may have none (or another).
+                proxy_body, _ = await body_for_peer(
+                    peer, model_id, {**body, "model": model_id}, resolved, profile_registry
+                )
                 # TTS is streaming audio — proxy as stream.
                 response_format = str(body.get("response_format") or "mp3").lower()
                 media_type = _AUDIO_CONTENT_TYPES.get(response_format, "audio/mpeg")
-                return StreamingResponse(
-                    federation_manager.proxy_stream(
-                        peer=peer,
-                        path=request.url.path,
-                        body=body,
-                        headers=dict(request.headers),
-                    ),
+                from ._federation import try_proxy_stream
+
+                streamed = await try_proxy_stream(
+                    request,
+                    peer=peer,
+                    model_id=model_id,
+                    body=proxy_body,
+                    federation_manager=federation_manager,
+                    logger=logger,
                     media_type=media_type,
                     headers={
                         "Content-Disposition": f'attachment; filename="speech.{response_format}"',
                     },
                 )
+                if streamed is not None:
+                    return streamed
+                # The peer refused or is unreachable: serve it locally.
     # --- End federation hook ---
 
     profile, state = await resolve_profile(
@@ -699,7 +774,7 @@ async def speech(
     input_text: str = merged_body.get("input", "")
     voice: str = merged_body.get("voice", "alloy")
     response_format: str = merged_body.get("response_format", "mp3")
-    speed: float = float(merged_body.get("speed", 1.0))
+    speed: float = _parse_float_param(merged_body.get("speed"), "speed", 1.0)
     language: str = merged_body.get("language", "Auto")
     reference_audio: str | None = merged_body.get("reference_audio") or merged_body.get("voice_ref")
     reference_text: str | None = merged_body.get("reference_text")
@@ -750,10 +825,17 @@ async def speech(
     if not stream_safe:
         # Non-streaming (WAV): fetch full response so errors propagate correctly
         async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.post(url, json=payload)
+            try:
+                resp = await client.post(url, json=payload)
+            except httpx.TransportError as exc:
+                _raise_tts_transport_error(exc, worker_key)
             if resp.status_code >= 400:
                 detail = resp.text[:300] if resp.text else f"Worker error {resp.status_code}"
-                raise _openai_error(detail, "server_error", status_code=resp.status_code)
+                raise _openai_error(
+                    detail,
+                    "invalid_request_error" if resp.status_code < 500 else "server_error",
+                    status_code=resp.status_code,
+                )
             return StreamingResponse(
                 iter([resp.content]),
                 media_type=content_type,
@@ -769,6 +851,9 @@ async def speech(
     try:
         upstream_request = client.build_request("POST", url, json=payload)
         resp = await client.send(upstream_request, stream=True)
+    except httpx.TransportError as exc:
+        await client.aclose()
+        _raise_tts_transport_error(exc, worker_key)
     except BaseException:
         await client.aclose()
         raise
@@ -824,7 +909,7 @@ async def generate_music(
 
     Returns the generated audio file as binary.
     """
-    body = await request.json()
+    body = await read_json_object(request)
     model_id: str = body.get("model", "")
     response_format: str = str(body.get("response_format") or "mp3").lower()
     if response_format not in {"mp3", "wav", "flac"}:

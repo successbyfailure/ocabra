@@ -150,6 +150,30 @@ def _openai_error(
     )
 
 
+async def read_json_object(request: Request) -> dict:
+    """The request body as a JSON object, or a 400 (BUG-18).
+
+    ``await request.json()`` raised on malformed JSON, and a valid JSON that is
+    not an object (``[]``, ``"x"``) broke on the first ``body.get``: either
+    way the client got a 500 for its own mistake.
+    """
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise _openai_error(
+            f"The request body is not valid JSON: {exc}",
+            "invalid_request_error",
+            code="invalid_json",
+        ) from exc
+    if not isinstance(body, dict):
+        raise _openai_error(
+            "The request body must be a JSON object.",
+            "invalid_request_error",
+            code="invalid_json",
+        )
+    return body
+
+
 async def _wait_for_unloading_transition(
     model_manager: ModelManager,
     model_id: str,
@@ -1337,6 +1361,8 @@ async def _do_ensure_loaded(
                     "invalid_request_error",
                     code="insufficient_vram",
                     status_code=409,
+                    # Transient: memory frees as other models go idle (BUG-19).
+                    headers={"Retry-After": "30"},
                 ) from exc
             raise _openai_error(
                 f"Failed to load model '{model_id}': {exc}",
@@ -1440,25 +1466,16 @@ async def ensure_loaded(
     user: UserContext | None = None,
 ) -> ModelState:
     """
-    Ensure a model is LOADED before forwarding a request.
-    Triggers on-demand loading if CONFIGURED, UNLOADED, or ERROR.
-    Waits up to settings.model_load_wait_timeout_s if already LOADING.
-    On success, updates the model's last-request timestamp and persists it.
+    Ensure a model is LOADED before forwarding a request (legacy names).
 
-    If *user* is provided, model access is filtered by the user's accessible model
-    set (mirrors the filtering done in /v1/models).
+    Resolves *model_id* the legacy way (filtered by *user*'s accessible models,
+    as ``/v1/models`` does) and loads it with :func:`_do_ensure_loaded`.
+
+    This used to be a second copy of that loader whose wait loop did not stop
+    when the load failed: a load that failed in 2 s kept the request waiting
+    the whole ``model_load_wait_timeout_s`` and then answered "did not finish
+    loading in time" (BUG-16). Only the Ollama layer calls it.
     """
-    from ocabra.core.model_manager import ModelStatus
-
-    async def _touch_last_request_at(resolved_id: str, request_at: datetime) -> None:
-        state.last_request_at = request_at
-        touch = getattr(model_manager, "touch_last_request_at", None)
-        if touch is None:
-            return
-        result = touch(resolved_id, request_at)
-        if inspect.isawaitable(result):
-            await result
-
     resolved_model_id, state = await resolve_model(model_manager, model_id, user=user)
     if state is None:
         raise _openai_error(
@@ -1468,86 +1485,7 @@ async def ensure_loaded(
             code="model_not_found",
             status_code=404,
         )
-
-    state = await _wait_for_eviction_claim(model_manager, resolved_model_id, state)
-    state = await _wait_for_unloading_transition(
-        model_manager,
-        resolved_model_id,
-        state,
-    )
-
-    if state.status == ModelStatus.LOADED:
-        request_at = datetime.now(UTC)
-        await _touch_last_request_at(resolved_model_id, request_at)
-        return state
-
-    if state.status in (ModelStatus.CONFIGURED, ModelStatus.UNLOADED, ModelStatus.ERROR):
-        try:
-            await model_manager.load(resolved_model_id)
-        except Exception as exc:
-            # Surface resource/scheduler failures as clear client-visible errors.
-            from ocabra.core.scheduler import InsufficientVRAMError
-
-            if isinstance(exc, InsufficientVRAMError):
-                retried_state = await _wait_for_service_gpu_and_retry_load(
-                    model_manager, resolved_model_id, state
-                )
-                if retried_state is not None:
-                    request_at = datetime.now(UTC)
-                    await _touch_last_request_at(resolved_model_id, request_at)
-                    return retried_state
-                raise _openai_error(
-                    str(exc),
-                    "invalid_request_error",
-                    code="insufficient_vram",
-                    status_code=409,
-                ) from exc
-            raise _openai_error(
-                f"Failed to load model '{resolved_model_id}': {exc}",
-                "server_error",
-                code="model_load_failed",
-                status_code=503,
-                headers={"Retry-After": "10"},
-            ) from exc
-
-        state = await model_manager.get_state(resolved_model_id)
-        if state and state.status == ModelStatus.LOADED:
-            request_at = datetime.now(UTC)
-            await _touch_last_request_at(resolved_model_id, request_at)
-            return state
-
-    if state and state.status == ModelStatus.LOADING:
-        for _ in range(_ensure_load_timeout_s()):
-            await asyncio.sleep(1)
-            state = await model_manager.get_state(resolved_model_id)
-            if state and state.status == ModelStatus.LOADED:
-                request_at = datetime.now(UTC)
-                await _touch_last_request_at(resolved_model_id, request_at)
-                return state
-        raise _openai_error(
-            f"Model '{resolved_model_id}' did not finish loading in time.",
-            "server_error",
-            code="model_load_timeout",
-            status_code=503,
-            headers={"Retry-After": "10"},
-        )
-
-    detail_suffix = ""
-    if state and state.error_message:
-        detail_suffix = f" detail: {state.error_message}"
-
-    # See the twin ensure_worker_loaded() site above for why ERROR skips the hint.
-    retry_headers = None if state and state.status == ModelStatus.ERROR else {"Retry-After": "10"}
-    raise _openai_error(
-        (
-            f"Model '{resolved_model_id}' is not available "
-            f"(status: {state.status.value if state else 'unknown'}).{detail_suffix}"
-        ),
-        "server_error",
-        code="model_unavailable",
-        status_code=503,
-        headers=retry_headers,
-    )
+    return await _do_ensure_loaded(model_manager, resolved_model_id)
 
 
 def is_batch_origin_request(request: Request) -> bool:
@@ -2249,10 +2187,17 @@ def raise_upstream_http_error(exc: httpx.HTTPStatusError) -> None:
     """
     Translate worker HTTP errors into OpenAI-compatible API errors.
 
-    Preserves upstream status code and error payload when possible.
+    Preserves upstream status code and error payload when possible, and the
+    headers a client acts on (``Retry-After``): they used to be dropped, so a
+    backend's own 429/503 lost its retry hint (BUG-19).
     """
     status_code = exc.response.status_code
     body_text = exc.response.text
+    headers = {
+        name: exc.response.headers[name]
+        for name in _UPSTREAM_HEADERS_KEPT
+        if name in exc.response.headers
+    } or None
 
     try:
         parsed = json.loads(body_text) if body_text else None
@@ -2261,16 +2206,21 @@ def raise_upstream_http_error(exc: httpx.HTTPStatusError) -> None:
 
     if isinstance(parsed, dict):
         if "detail" in parsed:
-            raise HTTPException(status_code=status_code, detail=parsed["detail"])
+            raise HTTPException(status_code=status_code, detail=parsed["detail"], headers=headers)
         if "error" in parsed:
-            raise HTTPException(status_code=status_code, detail=parsed)
+            raise HTTPException(status_code=status_code, detail=parsed, headers=headers)
 
     message = body_text.strip() if body_text else str(exc)
     raise _openai_error(
         message,
         "invalid_request_error" if 400 <= status_code < 500 else "server_error",
         status_code=status_code,
+        headers=headers,
     )
+
+
+#: Upstream response headers worth passing on with an error.
+_UPSTREAM_HEADERS_KEPT = ("retry-after",)
 
 
 def raise_inference_dispatch_error(exc: Exception) -> None:

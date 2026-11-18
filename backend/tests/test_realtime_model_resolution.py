@@ -76,6 +76,7 @@ async def test_router_pick_failure_returns_none() -> None:
 @pytest.mark.asyncio
 async def test_legacy_backend_id_falls_back_to_model_state() -> None:
     manager = MagicMock()
+    manager.get_state = AsyncMock(return_value=None)
     manager.list_states = AsyncMock(
         return_value=[SimpleNamespace(model_id="ollama/qwen3:8b", backend_model_id="qwen3:8b")]
     )
@@ -171,3 +172,24 @@ async def test_no_matching_profile_falls_back_to_base_model_id() -> None:
     )
 
     assert worker_key == "llama_cpp/orphan-model"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("order", [0, 1])
+async def test_a_name_shared_by_two_deployments_does_not_depend_on_order(order) -> None:
+    """BUG-22: ``gemma4:26b`` is the Ollama tag of ``ollama/gemma4:26b`` and the
+    backend reference of ``llamacpp_mks/gemma4:26b``; the first state in the
+    list used to win."""
+    ollama = SimpleNamespace(model_id="ollama/gemma4:26b", backend_model_id="gemma4:26b", model_key="gemma4:26b")
+    llama = SimpleNamespace(model_id="llamacpp_mks/gemma4:26b", backend_model_id="gemma4:26b", model_key="gemma4:26b")
+    states = [ollama, llama] if order == 0 else [llama, ollama]
+    manager = MagicMock()
+    manager.get_state = AsyncMock(return_value=None)
+    manager.list_states = AsyncMock(return_value=states)
+    manager.is_default_deployment = lambda s: s is llama
+
+    resolved = await resolve_realtime_model_id(
+        "gemma4:26b", profile_registry=_registry({}), model_manager=manager
+    )
+
+    assert resolved == "llamacpp_mks/gemma4:26b"

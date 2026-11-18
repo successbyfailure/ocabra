@@ -262,6 +262,93 @@ async def try_proxy_json(
     return None
 
 
+async def try_proxy_stream(
+    request: Request,
+    *,
+    peer: Any,
+    model_id: str,
+    body: dict[str, Any],
+    federation_manager: Any,
+    logger: structlog.stdlib.BoundLogger,
+    media_type: str = "text/event-stream",
+    headers: dict[str, str] | None = None,
+) -> Response | None:
+    """Stream from *peer*, or ``None`` to fall back to local (BUG-17).
+
+    Before, the three streaming paths returned the peer's stream straight
+    away: a peer that refused (401, 404, 5xx) gave the client a 200 whose
+    stream just broke, and nothing fell back to local. Now the first chunk is
+    awaited before answering — the peer rejects before it — so a refusal is
+    handled like :func:`try_proxy_json` does: fall back to local when that
+    makes sense, otherwise answer with the peer's status and body.
+
+    *body* must already name the model the way the peer knows it
+    (:func:`body_for_peer`).
+    """
+    import httpx
+    from starlette.responses import StreamingResponse
+
+    from ocabra.core.federation import should_fallback_to_local
+
+    gen = federation_manager.proxy_stream(
+        peer=peer,
+        path=request.url.path,
+        body=body,
+        headers=dict(request.headers),
+    )
+    request.state.federation_remote_node_id = peer.peer_id
+    try:
+        first = await gen.__anext__()
+    except StopAsyncIteration:
+        first = None
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        try:
+            content = exc.response.content
+        except Exception:  # noqa: BLE001 -- body not read: answer without it
+            content = b""
+        if should_fallback_to_local(status):
+            logger.warning(
+                "federation_peer_rejected_fallback_local",
+                peer=peer.name,
+                model_id=model_id,
+                status=status,
+                stream=True,
+            )
+            request.state.federation_remote_node_id = None
+            note_federation_fallback(peer, status)
+            return None
+        return Response(
+            content=content,
+            status_code=status,
+            media_type=exc.response.headers.get("content-type", "application/json"),
+        )
+    except Exception as exc:  # noqa: BLE001 -- network error: serve it locally
+        logger.warning(
+            "federation_peer_network_error_fallback_local",
+            peer=peer.name,
+            model_id=model_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            stream=True,
+        )
+        request.state.federation_remote_node_id = None
+        note_federation_fallback(peer, exc)
+        return None
+
+    async def _replay():
+        if first is not None:
+            yield first
+        async for chunk in gen:
+            yield chunk
+
+    return StreamingResponse(
+        _replay(),
+        media_type=media_type,
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **(headers or {})},
+    )
+
+
 async def try_proxy_multipart(
     request: Request,
     *,

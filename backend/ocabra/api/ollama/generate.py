@@ -27,6 +27,7 @@ from ocabra.api.openai._deps import (
     get_profile_registry,
     merge_profile_defaults,
     ollama_required_capabilities,
+    read_json_object,
     resolve_profile,
     to_backend_body,
 )
@@ -68,7 +69,7 @@ async def generate(
     Request fields include model, prompt, stream, and options.
     Streaming responses are returned as NDJSON lines.
     """
-    body = await request.json()
+    body = await read_json_object(request)
     ollama_model = str(body.get("model", ""))
     stream = bool(body.get("stream", True))
 

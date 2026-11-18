@@ -145,14 +145,17 @@ async def resolve_realtime_model_id(
                 return target.base_model_id
         return None
     if "/" not in model:
-        # Not a profile and not a canonical id — try legacy fallback
-        states = await model_manager.list_states()
-        match = next(
-            (s for s in states if s.backend_model_id == model or s.model_id == model),
-            None,
-        )
-        if match:
-            return match.model_id
+        # Not a profile and not a canonical id: the same legacy match as the
+        # REST endpoints. Taking the first state that matched made the answer
+        # depend on dict order (``gemma4:26b`` is both an Ollama tag and the
+        # backend reference of the llama.cpp deployment); ``resolve_model``
+        # prefers the default deployment (BUG-22). The ACL is checked
+        # separately, by ``user_may_use_realtime_model``.
+        from ocabra.api.openai._deps import resolve_model
+
+        resolved_id, state = await resolve_model(model_manager, model)
+        if state is not None:
+            return resolved_id
     return model
 
 

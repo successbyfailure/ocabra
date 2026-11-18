@@ -27,6 +27,7 @@ from ._deps import (
     ocabra_response_headers,
     raise_inference_dispatch_error,
     raise_upstream_http_error,
+    read_json_object,
     resolve_profile,
     to_backend_body,
 )
@@ -303,7 +304,7 @@ async def pooling(
     """
     Run pooling/embedding-style inference on a model configured with pooling support.
     """
-    body = await request.json()
+    body = await read_json_object(request)
     return await _resolve_and_forward(request, body, "pooling", "pooling", "/pooling", user)
 
 
@@ -315,7 +316,7 @@ async def score(
     """
     Score pairs with a model exposing similarity/score support.
     """
-    body = _normalize_score_request(await request.json())
+    body = _normalize_score_request(await read_json_object(request))
     return await _resolve_and_forward(request, body, "score", "score", "/score", user)
 
 
@@ -329,7 +330,7 @@ async def rerank(
     """
     Rerank candidate documents against a query using a reranker-capable model.
     """
-    body = _normalize_rerank_request(await request.json())
+    body = _normalize_rerank_request(await read_json_object(request))
     return await _resolve_and_forward(request, body, "rerank", "rerank", "/rerank", user)
 
 
@@ -345,7 +346,7 @@ async def classify(
     """
     Run text classification on one or many inputs.
     """
-    body = _normalize_classification_input(await request.json())
+    body = _normalize_classification_input(await read_json_object(request))
     return await _resolve_and_forward(
         request, body, "classification", "classification", "/classify", user
     )

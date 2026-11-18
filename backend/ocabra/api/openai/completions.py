@@ -19,6 +19,7 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.output_limits import apply_declared_output_limit
+from ocabra.core.router_resolver import NoRoutableTargetError
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError, WorkerGoneError
 
 from ._deps import (
@@ -42,8 +43,10 @@ from ._deps import (
     note_router_resolution,
     raise_inference_dispatch_error,
     raise_upstream_http_error,
+    read_json_object,
     resolve_profile,
     resolve_profile_runtime_plan,
+    router_pick_error,
     sse_ocabra_event,
     stream_error_details,
     to_backend_body,
@@ -65,7 +68,7 @@ async def completions(
     """
     Create a text completion. Proxies to the resolved model worker (backend-agnostic).
     """
-    body = await request.json()
+    body = await read_json_object(request)
     model_id: str = body.get("model", "")
     stream: bool = body.get("stream", False)
 
@@ -95,16 +98,19 @@ async def completions(
                 peer_body, _profile = await body_for_peer(
                     peer, model_id, body, resolved, profile_registry
                 )
-                return StreamingResponse(
-                    federation_manager.proxy_stream(
-                        peer=peer,
-                        path=request.url.path,
-                        body=peer_body,
-                        headers=dict(request.headers),
-                    ),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                from ._federation import try_proxy_stream
+
+                streamed = await try_proxy_stream(
+                    request,
+                    peer=peer,
+                    model_id=model_id,
+                    body=peer_body,
+                    federation_manager=federation_manager,
+                    logger=logger,
                 )
+                if streamed is not None:
+                    return streamed
+                # The peer refused or is unreachable: serve it locally.
 
     if not stream:
         from ._federation import try_proxy_json
@@ -144,7 +150,19 @@ async def completions(
             and router_resolver is not None
             and router_resolver.is_router(profile)
         ):
-            resolved = await router_resolver.pick(profile, request_body=body)
+            try:
+                # Same filters as the chat path (BUG-13): a target that cannot
+                # complete text is skipped, and one excluded by an earlier
+                # attempt stays excluded.
+                resolved = await router_resolver.pick(
+                    profile,
+                    request_body=body,
+                    required_capability=("completion",),
+                    exclude_targets=getattr(request.state, "router_excluded_targets", None),
+                )
+            except NoRoutableTargetError as exc:
+                # Escaped as a 500 on the streaming path.
+                raise router_pick_error(exc) from exc
             target = await profile_registry.get(resolved.target_profile_id)
             if target is not None and target.profile_id != profile.profile_id:
                 note_router_resolution(profile, target)
@@ -205,6 +223,7 @@ async def completions(
         request_body=body,
         router_resolver=getattr(request.app.state, "router_resolver", None),
         request_state=request.state,
+        required_capability=("completion",),
     )
     check_capability(state, "completion", "text completions")
 

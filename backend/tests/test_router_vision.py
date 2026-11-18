@@ -357,3 +357,42 @@ def test_chat_router_reintenta_en_otro_destino_tras_vision_no_room():
     )
     assert resp.status_code == 200, resp.text
     assert llamadas == ["a", "b"]
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_completions_a_router_sin_destino_capaz_es_400_no_500(stream):
+    """BUG-13: en /v1/completions con streaming el router no filtraba por
+    capacidad y un NoRoutableTargetError se escapaba como 500."""
+    from fastapi.testclient import TestClient
+
+    from tests.test_openai_api import FakeProfileRegistry, _make_app, _make_test_profile
+
+    solo_chat = _estado("a", vision=False, status=ModelStatus.LOADED)
+    solo_chat.capabilities = BackendCapabilities(chat=True, completion=False)
+    estados = {"a": solo_chat}
+    app = _make_app()
+    app.state.model_manager.get_state = AsyncMock(side_effect=lambda mid: estados.get(mid))
+    router = SimpleNamespace(
+        profile_id="r",
+        profile_kind="router",
+        base_model_id=None,
+        display_name="r",
+        description=None,
+        category="llm",
+        enabled=True,
+        is_default=False,
+        routing_targets=["a"],
+        router_context=None,
+        request_defaults={},
+        load_overrides=None,
+    )
+    registro = FakeProfileRegistry([_make_test_profile("a", "a"), router])
+    app.state.profile_registry = registro
+    app.state.router_resolver = RouterResolver(
+        profile_registry=registro, model_manager=app.state.model_manager
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/v1/completions", json={"model": "r", "stream": stream, "prompt": "x"}
+    )
+    assert resp.status_code == 400, resp.text
+    assert "model_not_capable" in resp.text

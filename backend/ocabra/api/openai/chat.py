@@ -68,6 +68,7 @@ from ._deps import (
     note_router_resolution,
     raise_inference_dispatch_error,
     raise_upstream_http_error,
+    read_json_object,
     resolve_profile,
     resolve_profile_runtime_plan,
     router_pick_error,
@@ -119,7 +120,7 @@ async def chat_completions(
     answer was written. Don't render an empty response to the end user;
     retry with a larger `max_tokens` and/or a lower `reasoning_effort`.
     """
-    body = await request.json()
+    body = await read_json_object(request)
     model_id: str = body.get("model", "")
     stream: bool = body.get("stream", False)
 
@@ -164,58 +165,59 @@ async def chat_completions(
                 )
                 request.state.federation_remote_node_id = peer.peer_id
                 if stream:
-                    # SSE: can't peek status before streaming starts, so we
-                    # rely on the peer's first chunk including the auth error
-                    # if any. No local fallback for streaming requests.
-                    return StreamingResponse(
-                        federation_manager.proxy_stream(
+                    from ._federation import try_proxy_stream
+
+                    streamed = await try_proxy_stream(
+                        request,
+                        peer=peer,
+                        model_id=model_id,
+                        body=body_out,
+                        federation_manager=federation_manager,
+                        logger=logger,
+                    )
+                    if streamed is not None:
+                        return streamed
+                    # The peer refused or is unreachable: serve it locally.
+                else:
+                    try:
+                        resp = await federation_manager.proxy_request(
                             peer=peer,
                             path=request.url.path,
                             body=body_out,
                             headers=dict(request.headers),
-                        ),
-                        media_type="text/event-stream",
-                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                    )
-                try:
-                    resp = await federation_manager.proxy_request(
-                        peer=peer,
-                        path=request.url.path,
-                        body=body_out,
-                        headers=dict(request.headers),
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "federation_peer_network_error_fallback_local",
-                        peer=peer.name,
-                        model_id=model_id,
-                        error=str(exc),
-                    )
-                    request.state.federation_remote_node_id = None
-                    note_federation_fallback(peer, exc)
-                    resp = None
-                if resp is not None and resp.status_code < 400:
-                    return Response(
-                        content=resp.content,
-                        status_code=resp.status_code,
-                        media_type=resp.headers.get("content-type"),
-                    )
-                if resp is not None and not should_fallback_to_local(resp.status_code):
-                    return Response(
-                        content=resp.content,
-                        status_code=resp.status_code,
-                        media_type=resp.headers.get("content-type"),
-                    )
-                if resp is not None:
-                    logger.warning(
-                        "federation_peer_rejected_fallback_local",
-                        peer=peer.name,
-                        model_id=model_id,
-                        status=resp.status_code,
-                        body_preview=privacy_preview(resp.text),
-                    )
-                    request.state.federation_remote_node_id = None
-                    note_federation_fallback(peer, resp.status_code)
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "federation_peer_network_error_fallback_local",
+                            peer=peer.name,
+                            model_id=model_id,
+                            error=str(exc),
+                        )
+                        request.state.federation_remote_node_id = None
+                        note_federation_fallback(peer, exc)
+                        resp = None
+                    if resp is not None and resp.status_code < 400:
+                        return Response(
+                            content=resp.content,
+                            status_code=resp.status_code,
+                            media_type=resp.headers.get("content-type"),
+                        )
+                    if resp is not None and not should_fallback_to_local(resp.status_code):
+                        return Response(
+                            content=resp.content,
+                            status_code=resp.status_code,
+                            media_type=resp.headers.get("content-type"),
+                        )
+                    if resp is not None:
+                        logger.warning(
+                            "federation_peer_rejected_fallback_local",
+                            peer=peer.name,
+                            model_id=model_id,
+                            status=resp.status_code,
+                            body_preview=privacy_preview(resp.text),
+                        )
+                        request.state.federation_remote_node_id = None
+                        note_federation_fallback(peer, resp.status_code)
                 # Fall through to local processing.
     # --- End federation hook ---
 

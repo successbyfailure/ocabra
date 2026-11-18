@@ -16,6 +16,51 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.112.0 — 2026-11-18
+
+### Corregido
+
+- **Errores del cliente que daban `500`.** Un cuerpo que no es JSON válido, o
+  que es JSON pero no un objeto (`[]`, `"texto"`), da `400` con
+  `code: "invalid_json"` en todos los endpoints de `/v1` y `/api` que leen
+  JSON. Un `temperature` (transcripciones) o un `speed` (voz) que no sea un
+  número da `400` con `code: "invalid_value"` y `param`; `speed: null` usa el
+  valor por defecto.
+- **Streaming hacia un nodo federado.** En `/v1/chat/completions`,
+  `/v1/completions`, `/api/chat` y `/v1/audio/speech` con `stream: true`, si el
+  nodo remoto rechazaba la petición recibías un `200` con un stream que se
+  cortaba. Ahora, si el rechazo admite respaldo (`401`, `403`, `404`, `5xx`)
+  o el nodo no responde, la petición se sirve aquí; si no, recibes el código
+  y el mensaje del nodo. `/api/chat` además manda al nodo el modelo que eligió
+  el router, no el nombre del router.
+- **Routers en `/v1/completions` con streaming.** Un router sin destino
+  disponible daba `500`; ahora da lo mismo que en chat: `400`
+  `model_not_capable` si ningún destino completa texto, `503`
+  `router_no_target` si no hay ninguno habilitado. Los destinos que no
+  completan texto ya no se eligen.
+- **`/v1/audio/speech`.** Un worker de voz inalcanzable da `503`
+  `worker_unavailable` con `Retry-After` (antes `500`), y uno que no contesta a
+  tiempo da `504` `generation_timeout`. En WAV, un `4xx` del worker tiene tipo
+  `invalid_request_error` (antes `server_error`). Con federación, los nombres
+  de OpenAI (`tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`) llegan al nodo remoto
+  como el modelo al que este servidor los traduce.
+- **`/v1/audio/transcriptions` en un nodo federado** respeta ya `vad_filter`
+  y `condition_on_previous_text`.
+- **`Retry-After`.** Los errores que vienen del motor conservan su
+  `Retry-After` (un `429` o `503` del propio motor lo perdía). El `409`
+  `insufficient_vram` lo lleva ahora (30 s): la memoria se libera cuando otros
+  modelos quedan ociosos.
+- **`/api/chat`, `/api/generate` y `/api/embed` con nombres antiguos de
+  Ollama.** Si la carga del modelo fallaba, la petición esperaba el timeout
+  de carga completo y respondía «did not finish loading in time». Ahora
+  responde enseguida con el error real.
+- **`/v1/realtime`** con un nombre que comparten dos despliegues (la etiqueta
+  de Ollama y el de llama.cpp de `gemma4:26b`) elegía uno según el orden
+  interno; ahora elige el despliegue por defecto, como los endpoints REST.
+- **`/ocabra/video/upscale`** acepta routers y aparece en las estadísticas.
+
+---
+
 ## 0.111.0 — 2026-11-18
 
 Arreglos en la API compatible con Ollama (`/api/chat`, `/api/generate`,

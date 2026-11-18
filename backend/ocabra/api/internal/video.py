@@ -13,6 +13,8 @@ reensambla es el cliente (VHS), que ya tiene ffmpeg y NVENC afinados.
 
 from __future__ import annotations
 
+import time
+from datetime import UTC, datetime
 from typing import Annotated
 
 import httpx
@@ -28,6 +30,7 @@ from ocabra.api.openai._deps import (
     get_profile_registry,
     resolve_profile,
 )
+from ocabra.stats.collector import record_direct_request
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["video"])
@@ -57,7 +60,14 @@ async def upscale_video(
     profile_registry = get_profile_registry(request)
 
     profile, state = await resolve_profile(
-        model, model_manager, profile_registry, user=_user
+        model,
+        model_manager,
+        profile_registry,
+        user=_user,
+        # Routers resolve here too, as on every /v1 endpoint (BUG-20).
+        router_resolver=getattr(request.app.state, "router_resolver", None),
+        request_state=request.state,
+        required_capability="video_upscaling",
     )
     check_capability(state, "video_upscaling", "video upscaling")
 
@@ -65,6 +75,9 @@ async def upscale_video(
     request.state.stats_model_id = worker_key
 
     worker_pool = request.app.state.worker_pool
+    started_at = datetime.now(UTC)
+    started = time.monotonic()
+    status_code, error = 200, None
     inflight_request_id = model_manager.begin_request(worker_key, user=_user)
     try:
         for attempt in range(2):
@@ -115,8 +128,29 @@ async def upscale_video(
                     status_code=exc.response.status_code,
                     detail=exc.response.text[:500],
                 ) from exc
+    except HTTPException as exc:
+        status_code, error = exc.status_code, str(exc.detail)[:500]
+        raise
+    except Exception as exc:
+        status_code, error = 500, str(exc)[:500]
+        raise
     finally:
         model_manager.end_request(worker_key, inflight_request_id)
+        # Not under /v1, so the stats middleware never saw these (BUG-20).
+        try:
+            await record_direct_request(
+                request,
+                model_id=worker_key,
+                started_at=started_at,
+                duration_ms=(time.monotonic() - started) * 1000,
+                endpoint_path="/ocabra/video/upscale",
+                request_kind="video_upscale",
+                status_code=status_code,
+                error_message=error,
+                work_size_meta={"input_bytes": len(payload)},
+            )
+        except Exception as exc:  # noqa: BLE001 -- stats must not break the response
+            logger.warning("video_upscale_stats_failed", error=str(exc))
 
     # Las estadísticas del worker (fps, VRAM, resolución) se reenvían: son lo
     # único que permite a un cliente saber qué le costó de verdad su segmento.

@@ -383,6 +383,7 @@ class TestProxyStream:
         chunks = [b"data: chunk1\n\n", b"data: chunk2\n\n", b"data: [DONE]\n\n"]
 
         mock_resp = AsyncMock()
+        mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
 
         async def fake_aiter_bytes():

@@ -36,6 +36,7 @@ from ocabra.api.openai._deps import (
     get_profile_registry,
     merge_profile_defaults,
     ollama_required_capabilities,
+    read_json_object,
     resolve_profile,
     to_backend_body,
 )
@@ -96,7 +97,7 @@ async def chat(
     out during reasoning before any answer was written; don't render that
     as-is, retry with a bigger budget. See docs/API.md.
     """
-    body = await request.json()
+    body = await read_json_object(request)
     ollama_model = str(body.get("model", ""))
     stream = bool(body.get("stream", True))
 
@@ -118,62 +119,76 @@ async def chat(
             # ``recomendado-ha-chatbots`` fell through to the "not found
             # anywhere" branch and the caller received 404 model_not_found
             # from the federation layer, before resolve_profile ever ran.
+            resolved: dict = {}
             target, peer = await resolve_federated(
-                ollama_model, model_manager, federation_manager, profile_registry, user=user
+                ollama_model,
+                model_manager,
+                federation_manager,
+                profile_registry,
+                resolved=resolved,
+                user=user,
             )
-            if target == "remote":
+            if target == "remote" and peer is not None:
                 import structlog as _structlog
 
+                from ocabra.api.openai._federation import body_for_peer, try_proxy_stream
                 from ocabra.core.federation import should_fallback_to_local
 
                 _fed_logger = _structlog.get_logger(__name__)
+                # A router is sent as the target it chose, as on /v1 (BUG-17).
+                peer_body, _profile = await body_for_peer(
+                    peer, ollama_model, body, resolved, profile_registry
+                )
                 request.state.federation_remote_node_id = peer.peer_id
                 if stream:
-                    return StreamingResponse(
-                        federation_manager.proxy_stream(
+                    streamed = await try_proxy_stream(
+                        request,
+                        peer=peer,
+                        model_id=ollama_model,
+                        body=peer_body,
+                        federation_manager=federation_manager,
+                        logger=_fed_logger,
+                        media_type="application/x-ndjson",
+                    )
+                    if streamed is not None:
+                        return streamed
+                    # The peer refused or is unreachable: serve it locally.
+                else:
+                    try:
+                        resp = await federation_manager.proxy_request(
                             peer=peer,
                             path=request.url.path,
-                            body=body,
+                            body=peer_body,
                             headers=dict(request.headers),
-                        ),
-                        media_type="application/x-ndjson",
-                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                    )
-                try:
-                    resp = await federation_manager.proxy_request(
-                        peer=peer,
-                        path=request.url.path,
-                        body=body,
-                        headers=dict(request.headers),
-                    )
-                except Exception as exc:
-                    _fed_logger.warning(
-                        "federation_peer_network_error_fallback_local",
-                        peer=peer.name,
-                        model_id=ollama_model,
-                        error=str(exc),
-                    )
-                    request.state.federation_remote_node_id = None
-                    note_federation_fallback(peer, exc)
-                    resp = None
-                if resp is not None and (
-                    resp.status_code < 400 or not should_fallback_to_local(resp.status_code)
-                ):
-                    return Response(
-                        content=resp.content,
-                        status_code=resp.status_code,
-                        media_type=resp.headers.get("content-type"),
-                    )
-                if resp is not None:
-                    _fed_logger.warning(
-                        "federation_peer_rejected_fallback_local",
-                        peer=peer.name,
-                        model_id=ollama_model,
-                        status=resp.status_code,
-                        body_preview=privacy_preview(resp.text),
-                    )
-                    request.state.federation_remote_node_id = None
-                    note_federation_fallback(peer, resp.status_code)
+                        )
+                    except Exception as exc:
+                        _fed_logger.warning(
+                            "federation_peer_network_error_fallback_local",
+                            peer=peer.name,
+                            model_id=ollama_model,
+                            error=str(exc),
+                        )
+                        request.state.federation_remote_node_id = None
+                        note_federation_fallback(peer, exc)
+                        resp = None
+                    if resp is not None and (
+                        resp.status_code < 400 or not should_fallback_to_local(resp.status_code)
+                    ):
+                        return Response(
+                            content=resp.content,
+                            status_code=resp.status_code,
+                            media_type=resp.headers.get("content-type"),
+                        )
+                    if resp is not None:
+                        _fed_logger.warning(
+                            "federation_peer_rejected_fallback_local",
+                            peer=peer.name,
+                            model_id=ollama_model,
+                            status=resp.status_code,
+                            body_preview=privacy_preview(resp.text),
+                        )
+                        request.state.federation_remote_node_id = None
+                        note_federation_fallback(peer, resp.status_code)
                 # Fall through to local processing.
     # --- End federation hook ---
 

@@ -2012,6 +2012,39 @@ async def record_realtime_request(
     )
 
 
+async def record_direct_request(
+    request: Request,
+    *,
+    model_id: str,
+    started_at: datetime,
+    duration_ms: float,
+    endpoint_path: str,
+    request_kind: str,
+    status_code: int,
+    error_message: str | None = None,
+    work_size_meta: dict | None = None,
+) -> None:
+    """Record one request from its endpoint, for paths the middleware skips.
+
+    ``/ocabra/video/upscale`` is outside ``/v1`` and uploads whole video
+    segments, which the middleware would read into memory again; it records
+    itself instead (BUG-20).
+    """
+    await _record_stat(
+        request=request,
+        model_id=model_id,
+        started_at=started_at,
+        duration_ms=duration_ms,
+        error_message=error_message,
+        status_code=status_code,
+        endpoint_path=endpoint_path,
+        request_kind=request_kind,
+        input_tokens=None,
+        output_tokens=None,
+        work_size_meta=work_size_meta,
+    )
+
+
 def _federated_router_attribution(request: Request) -> tuple[str | None, str | None]:
     """``(target, router)`` when a router request was proxied to a peer.
 
