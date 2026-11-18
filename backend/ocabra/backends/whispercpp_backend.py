@@ -85,6 +85,20 @@ def _parse_optional_bool(raw: Any) -> bool | None:
 _vad_unavailable_logged = False
 
 
+def whisper_models_dirs() -> list[Path]:
+    """Where whisper.cpp GGML models (and the Silero VAD one) live, in order.
+
+    ``<models_dir>/whisper_cpp`` first. The old place, ``<backends_dir>/
+    whisper_cpp/models``, is inside the backend's own folder, which a reinstall
+    or an OCI update replaces wholesale: the models were lost that way on
+    2026-11-17. It is still searched so nodes not migrated keep working.
+    """
+    return [
+        Path(settings.models_dir) / "whisper_cpp",
+        Path(settings.backends_dir) / "whisper_cpp" / "models",
+    ]
+
+
 def _log_vad_unavailable_once(model_id: str, models_dir: Path) -> None:
     global _vad_unavailable_logged
     if _vad_unavailable_logged:
@@ -227,28 +241,43 @@ class WhisperCppBackend(BackendInterface):
             path = Path(str(explicit))
             if path.is_file():
                 return path
+            # A path recorded before the models moved out of the backend
+            # folder: the same file in the current models folder.
+            for models_dir in whisper_models_dirs():
+                moved = models_dir / path.name
+                if moved.is_file():
+                    return moved
 
         direct = Path(model_id)
         if direct.is_file():
             return direct
 
-        models_dir = Path(settings.backends_dir) / "whisper_cpp" / "models"
         stem = Path(model_id).name
-        candidates = [
-            models_dir / model_id,
-            models_dir / f"{stem}.bin",
-            models_dir / f"ggml-{stem}.bin",
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
+        dirs = whisper_models_dirs()
+        for models_dir in dirs:
+            for candidate in (
+                models_dir / model_id,
+                models_dir / f"{stem}.bin",
+                models_dir / f"ggml-{stem}.bin",
+            ):
+                if candidate.is_file():
+                    return candidate
 
-        matches = [path for path in models_dir.glob("*.bin") if stem.lower() in path.name.lower()]
-        if matches:
-            return max(matches, key=lambda path: path.stat().st_mtime)
+        for models_dir in dirs:
+            try:
+                matches = [
+                    path
+                    for path in models_dir.glob("*.bin")
+                    if stem.lower() in path.name.lower() and "silero" not in path.name.lower()
+                ]
+            except OSError:
+                continue
+            if matches:
+                return max(matches, key=lambda path: path.stat().st_mtime)
 
         raise FileNotFoundError(
-            f"whisper.cpp GGML model not found for '{model_id}' under {models_dir}"
+            f"whisper.cpp GGML model not found for '{model_id}' under "
+            + " or ".join(str(d) for d in dirs)
         )
 
     def _resolve_vad_model(self, extra_config: dict[str, Any]) -> Path | None:
@@ -262,11 +291,12 @@ class WhisperCppBackend(BackendInterface):
         if explicit:
             path = Path(str(explicit))
             return path if path.is_file() else None
-        models_dir = Path(settings.backends_dir) / "whisper_cpp" / "models"
-        try:
-            matches = [p for p in models_dir.glob("ggml-silero*.bin") if p.is_file()]
-        except OSError:
-            return None
+        matches: list[Path] = []
+        for models_dir in whisper_models_dirs():
+            try:
+                matches += [p for p in models_dir.glob("ggml-silero*.bin") if p.is_file()]
+            except OSError:
+                continue
         if not matches:
             return None
         return max(matches, key=lambda path: path.stat().st_mtime)
@@ -486,9 +516,7 @@ class WhisperCppBackend(BackendInterface):
             if cfg.get("vad_filter", True) is not False:
                 args.append("--vad")
         else:
-            _log_vad_unavailable_once(
-                model_id, Path(settings.backends_dir) / "whisper_cpp" / "models"
-            )
+            _log_vad_unavailable_once(model_id, whisper_models_dirs()[0])
 
         log_path = _worker_log_path(model_id)
         log_file = open(log_path, "ab")  # noqa: ASYNC230, SIM115 — worker-lifetime handle

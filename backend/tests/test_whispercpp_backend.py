@@ -567,3 +567,43 @@ async def test_los_wav_de_ffmpeg_van_a_un_directorio_escribible(tmp_path: Path) 
     tmp_dir = args[args.index("--tmp-dir") + 1]
     assert tmp_dir == tempfile.gettempdir()
     assert os.access(tmp_dir, os.W_OK)
+
+
+def _settings_con_dirs(tmp_path: Path):
+    from unittest.mock import MagicMock
+
+    s = MagicMock()
+    s.models_dir = str(tmp_path / "models")
+    s.backends_dir = str(tmp_path / "backends")
+    return s
+
+
+def test_los_modelos_se_buscan_fuera_de_la_carpeta_del_backend(tmp_path: Path) -> None:
+    """Una reinstalación o una actualización OCI sustituye la carpeta del
+    backend entera y se llevaba los modelos (17/11)."""
+    nuevo = tmp_path / "models" / "whisper_cpp"
+    viejo = tmp_path / "backends" / "whisper_cpp" / "models"
+    nuevo.mkdir(parents=True)
+    viejo.mkdir(parents=True)
+    (nuevo / "ggml-large-v3-turbo-q8_0.bin").write_bytes(b"n")
+    (viejo / "ggml-large-v3-turbo-q8_0.bin").write_bytes(b"v")
+    (nuevo / "ggml-silero-v6.2.0.bin").write_bytes(b"s")
+    backend = WhisperCppBackend()
+    with patch("ocabra.backends.whispercpp_backend.settings", _settings_con_dirs(tmp_path)):
+        assert backend._resolve_model_file("large-v3-turbo-q8_0", {}).parent == nuevo
+        # Una ruta guardada antes de mover los ficheros sigue funcionando.
+        guardada = {"model_path": str(viejo.parent / "gone" / "ggml-large-v3-turbo-q8_0.bin")}
+        assert backend._resolve_model_file("x", guardada) == nuevo / "ggml-large-v3-turbo-q8_0.bin"
+        assert backend._resolve_vad_model({}) == nuevo / "ggml-silero-v6.2.0.bin"
+
+
+def test_un_nodo_sin_migrar_sigue_usando_la_carpeta_antigua(tmp_path: Path) -> None:
+    viejo = tmp_path / "backends" / "whisper_cpp" / "models"
+    viejo.mkdir(parents=True)
+    (viejo / "ggml-large-v3-turbo-q8_0.bin").write_bytes(b"v")
+    backend = WhisperCppBackend()
+    with patch("ocabra.backends.whispercpp_backend.settings", _settings_con_dirs(tmp_path)):
+        assert backend._resolve_model_file("large-v3-turbo-q8_0", {}).parent == viejo
+        # El modelo VAD no se confunde con el de transcripción.
+        (viejo / "ggml-silero-v6.2.0.bin").write_bytes(b"s")
+        assert "silero" not in backend._resolve_model_file("ggml", {}).name

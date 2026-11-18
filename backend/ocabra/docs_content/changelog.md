@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.113.2 — 2026-11-18
+
+### Corregido
+
+- **Los modelos de whisper.cpp se perdían al reinstalar o actualizar el
+  backend.** Vivían dentro de su carpeta, que una reinstalación o una
+  actualización sustituye entera. Ahora están en `<MODELS_DIR>/whisper_cpp` (el
+  modelo de transcripción y el de VAD). La carpeta antigua se sigue leyendo,
+  para los nodos que aún no se han movido.
+
+---
+
 ## 0.113.1 — 2026-11-18
 
 ### Corregido
