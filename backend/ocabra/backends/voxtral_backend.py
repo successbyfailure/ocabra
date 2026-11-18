@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._process_group import terminate_process_group
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -160,6 +161,10 @@ class VoxtralBackend(BackendInterface):
             env=env,
             stdout=log_file,
             stderr=log_file,
+            # Own process group: unload stops the worker *and* the
+            # ``vllm serve`` it launches (killing only the worker orphaned
+            # vllm with its GPU memory).
+            start_new_session=True,
         )
 
         info = WorkerInfo(
@@ -193,15 +198,8 @@ class VoxtralBackend(BackendInterface):
         worker = self._workers.pop(model_id, None)
         if not worker:
             return
-        process = worker.process
         try:
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=15)
-                except TimeoutError:
-                    process.kill()
-                    await process.wait()
+            await terminate_process_group(worker.process, grace_s=15)
         finally:
             if worker.log_file:
                 try:

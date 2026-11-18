@@ -31,6 +31,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._process_group import terminate_process_group
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -65,6 +66,69 @@ def _reserve_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _parse_optional_bool(raw: Any) -> bool | None:
+    """OpenAI/faster-whisper style boolean form value; None if absent/unknown."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+# Logged once per process: VAD needs a Silero GGML model that is not installed.
+_vad_unavailable_logged = False
+
+
+def _log_vad_unavailable_once(model_id: str, models_dir: Path) -> None:
+    global _vad_unavailable_logged
+    if _vad_unavailable_logged:
+        return
+    _vad_unavailable_logged = True
+    logger.warning(
+        "whispercpp_vad_unavailable",
+        model_id=model_id,
+        detail=(
+            "no Silero VAD GGML model found (expected ggml-silero-*.bin under "
+            f"{models_dir} or whisper_cpp.vad_model in extra_config); "
+            "vad_filter is accepted but has no effect on whisper.cpp"
+        ),
+    )
+
+
+def transcription_option_fields(body: dict, *, vad_available: bool) -> dict[str, str]:
+    """Translate faster-whisper style options into ``whisper-server`` fields.
+
+    - ``condition_on_previous_text=false`` → ``max_context=0``: whisper.cpp
+      feeds the text already decoded as prompt for each next 30 s window,
+      capped at ``max_context`` tokens; 0 turns that off. ``true`` is the
+      server's default, nothing to send. The initial ``prompt`` shares that
+      budget (0 would drop it too), so with a ``prompt`` the prompt wins and
+      nothing is sent. ``whisper-server``'s ``no_context`` is not a request
+      field and is always on — it only clears context *between* requests.
+    - ``vad_filter`` → ``vad``: only when the worker was launched with a VAD
+      model (``--vad-model``); asking whisper.cpp for VAD without one fails
+      the whole transcription, so with no model ``true`` is dropped.
+
+    Absent or unparseable values send nothing, leaving the launch defaults
+    (VAD on when a VAD model is installed, like faster-whisper's default).
+    """
+    fields: dict[str, str] = {}
+    condition = _parse_optional_bool(body.get("condition_on_previous_text"))
+    if condition is False and not body.get("prompt"):
+        fields["max_context"] = "0"
+    vad = _parse_optional_bool(body.get("vad_filter"))
+    if vad is False:
+        fields["vad"] = "false"
+    elif vad is True and vad_available:
+        fields["vad"] = "true"
+    return fields
+
+
 def _is_diarize_requested(raw: Any) -> bool:
     if raw is None:
         return False
@@ -76,6 +140,7 @@ class _WhisperCppWorker:
     process: asyncio.subprocess.Process
     port: int
     log_file: Any
+    vad_available: bool = False
 
 
 @dataclass
@@ -185,6 +250,38 @@ class WhisperCppBackend(BackendInterface):
             f"whisper.cpp GGML model not found for '{model_id}' under {models_dir}"
         )
 
+    def _resolve_vad_model(self, extra_config: dict[str, Any]) -> Path | None:
+        """Silero VAD GGML model for ``--vad-model``, or None if not installed.
+
+        ``whisper_cpp.vad_model`` in extra_config wins; otherwise the newest
+        ``ggml-silero*.bin`` next to the whisper models. Nothing is downloaded.
+        """
+        cfg = extra_config.get("whisper_cpp") if isinstance(extra_config, dict) else None
+        explicit = cfg.get("vad_model") if isinstance(cfg, dict) else None
+        if explicit:
+            path = Path(str(explicit))
+            return path if path.is_file() else None
+        models_dir = Path(settings.backends_dir) / "whisper_cpp" / "models"
+        try:
+            matches = [p for p in models_dir.glob("ggml-silero*.bin") if p.is_file()]
+        except OSError:
+            return None
+        if not matches:
+            return None
+        return max(matches, key=lambda path: path.stat().st_mtime)
+
+    def transcription_option_fields(self, model_id: str, body: dict) -> dict[str, str]:
+        """``whisper-server`` form fields for ``vad_filter`` and
+        ``condition_on_previous_text`` in ``body`` (see the module function).
+
+        For callers that post to the worker directly instead of through
+        :meth:`forward_request` (the plain, non-diarized transcriptions).
+        """
+        entry = self._processes.get(model_id)
+        return transcription_option_fields(
+            body, vad_available=bool(getattr(entry, "vad_available", False))
+        )
+
     def _resolve_diarization_python_bin(self) -> str:
         """pyannote.audio lives in the ``whisper`` backend's own venv (it's
         already a declared dependency there, see whisper_backend.py's
@@ -249,6 +346,8 @@ class WhisperCppBackend(BackendInterface):
                 env=env,
                 stdout=log_file,
                 stderr=log_file,
+                # Own process group, stopped as a whole (see _process_group).
+                start_new_session=True,
             )
             sidecar = _DiarizationSidecar(process=process, port=port, log_file=log_file)
             self._diarization_workers[model_id] = sidecar
@@ -274,10 +373,7 @@ class WhisperCppBackend(BackendInterface):
                 self._diarization_workers.pop(model_id, None)
                 log_tail = self._read_log_tail(_diarization_log_path(model_id))
                 try:
-                    process.kill()
-                    await process.wait()
-                except ProcessLookupError:
-                    pass
+                    await terminate_process_group(process, grace_s=0, graceful=False)
                 finally:
                     log_file.close()
                 raise RuntimeError(
@@ -292,15 +388,8 @@ class WhisperCppBackend(BackendInterface):
         sidecar = self._diarization_workers.pop(model_id, None)
         if not sidecar:
             return
-        process = sidecar.process
         try:
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=10.0)
-                except TimeoutError:
-                    process.kill()
-                    await process.wait()
+            await terminate_process_group(sidecar.process, grace_s=10.0)
         finally:
             sidecar.log_file.close()
 
@@ -373,7 +462,26 @@ class WhisperCppBackend(BackendInterface):
             "auto",
             "--inference-path",
             _INFERENCE_PATH,
+            # No ``--max-context 0`` here even though faster-whisper defaults
+            # to condition_on_previous_text=false: in whisper.cpp the client's
+            # ``prompt`` travels through the same context budget, so a launch
+            # default of 0 would silently drop every prompt. Per request only,
+            # see ``transcription_option_fields``.
         ]
+        # Same default as faster-whisper (vad_filter=true), but whisper.cpp
+        # needs a Silero GGML model for it — without one, VAD stays off and
+        # ``vad_filter`` is accepted and ignored.
+        # ``whisper_cpp.vad_filter: false`` in extra_config keeps the model
+        # loaded (requests can still ask for VAD) but off by default.
+        vad_model = self._resolve_vad_model(extra_config)
+        if vad_model is not None:
+            args += ["--vad-model", str(vad_model)]
+            if cfg.get("vad_filter", True) is not False:
+                args.append("--vad")
+        else:
+            _log_vad_unavailable_once(
+                model_id, Path(settings.backends_dir) / "whisper_cpp" / "models"
+            )
 
         log_path = _worker_log_path(model_id)
         log_file = open(log_path, "ab")  # noqa: ASYNC230, SIM115 — worker-lifetime handle
@@ -384,8 +492,16 @@ class WhisperCppBackend(BackendInterface):
             env=env,
             stdout=log_file,
             stderr=log_file,
+            # Own process group: whisper-server's ``--convert`` runs ffmpeg as
+            # a child, and stopping only the server could leave it behind.
+            start_new_session=True,
         )
-        self._processes[model_id] = _WhisperCppWorker(process=process, port=port, log_file=log_file)
+        self._processes[model_id] = _WhisperCppWorker(
+            process=process,
+            port=port,
+            log_file=log_file,
+            vad_available=vad_model is not None,
+        )
 
         try:
             await self._wait_for_startup(
@@ -445,7 +561,9 @@ class WhisperCppBackend(BackendInterface):
         # merge speaker labels into, regardless of what the caller actually
         # asked for — the real requested_format is applied after merging.
         transcribe_body = {**body, "response_format": "verbose_json"} if diarize_requested else body
-        files, form_data = _build_transcription_multipart(transcribe_body)
+        files, form_data = _build_transcription_multipart(
+            transcribe_body, vad_available=bool(getattr(entry, "vad_available", False))
+        )
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
@@ -524,29 +642,8 @@ class WhisperCppBackend(BackendInterface):
         entry = self._processes.pop(model_id, None)
         if not entry:
             return
-        process = entry.process
-        if process.returncode is not None:
-            entry.log_file.close()
-            return
-
-        if graceful:
-            try:
-                process.terminate()
-                await asyncio.wait_for(process.wait(), timeout=20.0)
-                entry.log_file.close()
-                return
-            except (TimeoutError, ProcessLookupError):
-                logger.warning(
-                    "whispercpp_sigterm_timeout",
-                    model_id=model_id,
-                    log_tail=self._read_log_tail(_worker_log_path(model_id)),
-                )
-
         try:
-            process.kill()
-            await process.wait()
-        except ProcessLookupError:
-            pass
+            await terminate_process_group(entry.process, grace_s=20.0, graceful=graceful)
         finally:
             entry.log_file.close()
 
@@ -567,6 +664,8 @@ class WhisperCppBackend(BackendInterface):
 
 def _build_transcription_multipart(
     body: dict,
+    *,
+    vad_available: bool = False,
 ) -> tuple[dict[str, tuple[str, bytes, str]], dict[str, str | list[str]]]:
     file_name, file_bytes, content_type = _extract_audio_file(body)
 
@@ -596,6 +695,8 @@ def _build_transcription_multipart(
 
     if body.get("temperature") is not None:
         form_data["temperature"] = str(body["temperature"])
+
+    form_data.update(transcription_option_fields(body, vad_available=vad_available))
 
     return files, form_data
 

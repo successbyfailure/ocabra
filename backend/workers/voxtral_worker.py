@@ -21,6 +21,7 @@ import struct
 import sys
 import wave
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -28,6 +29,10 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from process_guard import parent_death_preexec  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Voxtral preset voices (from Mistral docs)
@@ -189,11 +194,15 @@ async def _start_vllm_omni(model_id: str, port: int, gpu_indices: list[int]) -> 
     log_path = f"/tmp/voxtral-worker-{model_id.replace('/', '__')}.log"
     log_file = open(log_path, "ab")  # noqa: SIM115, ASYNC230
 
+    # Same process group as this worker (the backend stops the whole group),
+    # plus PR_SET_PDEATHSIG so vllm-omni also goes when this worker dies on
+    # its own (SIGKILL, OOM) — before, it kept running holding the GPU.
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         env=env,
         stdout=log_file,
         stderr=log_file,
+        preexec_fn=parent_death_preexec(),
     )
     return proc
 

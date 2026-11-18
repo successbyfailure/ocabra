@@ -488,6 +488,12 @@ _WHISPERCPP_FIELDS: list[Field] = [
     _f("whisper_cpp", "model_path", "string", "Fichero del modelo", "advanced",
        help="Ruta del modelo ggml. Se guarda en el artefacto del despliegue.", nullable=False,
        advanced=True, widget="path"),
+    _f("whisper_cpp", "vad_filter", "bool", "VAD por defecto", "audio",
+       help="Solo con un modelo Silero instalado; cada petición puede cambiarlo con "
+       "vad_filter.", default=True),
+    _f("whisper_cpp", "vad_model", "string", "Modelo VAD (Silero)", "advanced",
+       help="Ruta de un ggml-silero-*.bin. Vacío = el más reciente en la carpeta de modelos "
+       "de whisper.cpp; sin ninguno, no hay VAD.", advanced=True, widget="path"),
 ]
 
 _VIBEASR_FIELDS: list[Field] = [

@@ -382,3 +382,174 @@ def test_sin_idioma_no_se_inventa_ninguno_en_el_formulario(vacio) -> None:
     """El defecto vive en la linea de comandos; aqui estorbaria."""
     _, form = _build_transcription_multipart({"file": b"RIFF....", "language": vacio})
     assert "language" not in form
+
+
+# --- vad_filter y condition_on_previous_text ---------------------------------
+# Los clientes los mandan al estilo OpenAI/faster-whisper y faster-whisper los
+# respeta; whisper.cpp los tiraba sin más. whisper-server tiene sus propios
+# campos: ``vad`` (necesita un modelo Silero cargado con --vad-model; pedir VAD
+# sin él hace fallar la transcripción entera) y ``max_context`` (0 = no
+# condicionar cada ventana de 30 s en el texto ya decodificado). Su
+# ``no_context`` no es campo de petición y ya va siempre activo: solo limpia el
+# contexto *entre* peticiones.
+
+
+def test_condition_on_previous_text_false_se_traduce_a_max_context_0() -> None:
+    _, form = _build_transcription_multipart(
+        {"file": b"RIFF", "condition_on_previous_text": "false"}
+    )
+    assert form["max_context"] == "0"
+    assert "condition_on_previous_text" not in form
+
+
+@pytest.mark.parametrize("valor", ["true", None, "", "quizá"])
+def test_condition_on_previous_text_sin_false_no_toca_el_contexto(valor) -> None:
+    _, form = _build_transcription_multipart({"file": b"RIFF", "condition_on_previous_text": valor})
+    assert "max_context" not in form
+
+
+def test_con_prompt_no_se_anula_el_contexto() -> None:
+    """En whisper.cpp el prompt inicial va por el mismo presupuesto de contexto:
+    max_context=0 lo tiraría también."""
+    _, form = _build_transcription_multipart(
+        {"file": b"RIFF", "condition_on_previous_text": "false", "prompt": "oCabra"}
+    )
+    assert form["prompt"] == "oCabra"
+    assert "max_context" not in form
+
+
+def test_vad_filter_true_activa_vad_si_hay_modelo() -> None:
+    _, form = _build_transcription_multipart(
+        {"file": b"RIFF", "vad_filter": "true"}, vad_available=True
+    )
+    assert form["vad"] == "true"
+    assert "vad_filter" not in form
+
+
+def test_vad_filter_true_sin_modelo_no_se_pide() -> None:
+    _, form = _build_transcription_multipart({"file": b"RIFF", "vad_filter": "true"})
+    assert "vad" not in form
+
+
+@pytest.mark.parametrize("disponible", [True, False])
+def test_vad_filter_false_se_apaga_siempre(disponible: bool) -> None:
+    _, form = _build_transcription_multipart(
+        {"file": b"RIFF", "vad_filter": "false"}, vad_available=disponible
+    )
+    assert form["vad"] == "false"
+
+
+@pytest.mark.asyncio
+async def test_la_ruta_diarizada_reenvia_vad_y_contexto_a_whisper_server() -> None:
+    backend = WhisperCppBackend()
+    backend._processes["m"] = type(
+        "Entry",
+        (),
+        {"process": _fake_process(), "port": 18123, "log_file": None, "vad_available": True},
+    )()
+    posted: list[tuple[str, dict]] = []
+    transcribe_response = httpx.Response(
+        200, json={"text": "hola", "segments": []}, request=httpx.Request("POST", "http://x")
+    )
+
+    async def _fake_post(self, url, **kwargs):
+        posted.append((url, kwargs.get("data") or {}))
+        return transcribe_response
+
+    with (
+        patch("httpx.AsyncClient.post", new=_fake_post),
+        patch.object(
+            backend,
+            "_ensure_diarization_worker",
+            new=AsyncMock(return_value=type("S", (), {"port": 19999})()),
+        ),
+    ):
+        await backend.forward_request(
+            "m",
+            "/transcribe",
+            {
+                "file": b"RIFF",
+                "diarize": "true",
+                "vad_filter": "true",
+                "condition_on_previous_text": "false",
+            },
+        )
+
+    whisper_form = next(data for url, data in posted if ":18123" in url)
+    assert whisper_form["vad"] == "true"
+    assert whisper_form["max_context"] == "0"
+
+
+def test_transcription_option_fields_para_quien_postea_directo() -> None:
+    backend = WhisperCppBackend()
+    backend._processes["m"] = type("Entry", (), {"vad_available": False})()
+    assert backend.transcription_option_fields(
+        "m", {"vad_filter": "true", "condition_on_previous_text": "false"}
+    ) == {"max_context": "0"}
+
+
+async def _args_con_modelos(
+    tmp_path: Path, extra: dict | None = None
+) -> tuple[list[str], WhisperCppBackend]:
+    modelo = tmp_path / "ggml-m.bin"
+    modelo.write_bytes(b"x")
+    binario = tmp_path / "whisper-server"
+    binario.write_bytes(b"#!/bin/sh\n")
+    backend = WhisperCppBackend()
+    with (
+        patch("ocabra.backends.whispercpp_backend.settings") as mock_settings,
+        patch(
+            "ocabra.backends.whispercpp_backend.read_backend_metadata",
+            return_value={"extra_bins": {"server": str(binario)}},
+        ),
+        patch(
+            "asyncio.create_subprocess_exec", new=AsyncMock(return_value=_fake_process())
+        ) as spawn,
+        patch.object(WhisperCppBackend, "_wait_for_startup", new=AsyncMock()),
+    ):
+        mock_settings.backends_dir = str(tmp_path)
+        mock_settings.whispercpp_threads = 4
+        await backend.load(
+            "m",
+            [],
+            port=18099,
+            extra_config={"whisper_cpp": {"model_path": str(modelo), **(extra or {})}},
+        )
+    return list(spawn.await_args.args), backend
+
+
+@pytest.mark.asyncio
+async def test_con_modelo_silero_el_worker_arranca_con_vad(tmp_path: Path) -> None:
+    models = tmp_path / "whisper_cpp" / "models"
+    models.mkdir(parents=True)
+    vad = models / "ggml-silero-v5.1.2.bin"
+    vad.write_bytes(b"x")
+    args, backend = await _args_con_modelos(tmp_path)
+    assert "--vad" in args
+    assert args[args.index("--vad-model") + 1] == str(vad)
+    assert backend._processes["m"].vad_available is True
+
+
+@pytest.mark.asyncio
+async def test_vad_filter_false_en_config_carga_el_modelo_pero_no_lo_activa(tmp_path: Path) -> None:
+    models = tmp_path / "whisper_cpp" / "models"
+    models.mkdir(parents=True)
+    (models / "ggml-silero-v5.1.2.bin").write_bytes(b"x")
+    args, backend = await _args_con_modelos(tmp_path, {"vad_filter": False})
+    assert "--vad" not in args
+    assert "--vad-model" in args
+    assert backend._processes["m"].vad_available is True
+
+
+@pytest.mark.asyncio
+async def test_sin_modelo_silero_no_se_pide_vad_y_se_avisa_una_vez(tmp_path: Path) -> None:
+    import ocabra.backends.whispercpp_backend as mod
+
+    mod._vad_unavailable_logged = False
+    with patch.object(mod.logger, "warning") as warning:
+        args, backend = await _args_con_modelos(tmp_path)
+        await _args_con_modelos(tmp_path)
+    assert "--vad" not in args and "--vad-model" not in args
+    assert backend._processes["m"].vad_available is False
+    events = [c.args[0] for c in warning.call_args_list]
+    assert events.count("whispercpp_vad_unavailable") == 1

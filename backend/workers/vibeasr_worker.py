@@ -22,6 +22,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -29,6 +30,10 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from process_guard import parent_death_preexec  # noqa: E402
 
 _READY_MARKER = "---READY---"
 _END_MARKER = "---END---"
@@ -87,6 +92,7 @@ def _transcode_to_wav(src: str) -> str:
         check=True,
         capture_output=True,
         timeout=120,
+        preexec_fn=parent_death_preexec(),
     )
     return dst
 
@@ -125,6 +131,9 @@ def create_app(
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=None,
+                # Dies with this worker even if it is SIGKILLed (the backend
+                # also stops the whole process group on unload).
+                preexec_fn=parent_death_preexec(),
             )
             # Block until the server signals it has loaded both models.
             await _read_until(_READY_MARKER, timeout_s=180.0)

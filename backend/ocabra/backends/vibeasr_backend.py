@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._process_group import terminate_process_group
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -217,8 +218,10 @@ class VibeAsrBackend(BackendInterface):
         log_file = open(log_path, "ab")  # noqa: SIM115, ASYNC230
 
         logger.info("vibeasr_starting", model_id=model_id, port=port, threads=threads)
+        # Own process group: unload stops the worker *and* its
+        # asr_stream_server/ffmpeg children, even when it reaches SIGKILL.
         process = await asyncio.create_subprocess_exec(
-            *args, env=env, stdout=log_file, stderr=log_file
+            *args, env=env, stdout=log_file, stderr=log_file, start_new_session=True
         )
 
         info = WorkerInfo(
@@ -245,15 +248,8 @@ class VibeAsrBackend(BackendInterface):
         worker = self._workers.pop(model_id, None)
         if not worker:
             return
-        process = worker.process
         try:
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=8)
-                except TimeoutError:
-                    process.kill()
-                    await process.wait()
+            await terminate_process_group(worker.process, grace_s=8)
         finally:
             if worker.log_file:
                 try:
