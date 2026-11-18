@@ -16,6 +16,17 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.107.1 — 2026-11-18
+
+### Corregido
+
+- La imagen `ocabra-node` y los backends nativos compilados en el nodo
+  (`llama_cpp`, `llamacpp_mks`) ya no fallan al compilar: llama.cpp intentaba
+  descargar su interfaz web de una versión que no existe. oCabra no la usa, así
+  que ya no se descarga.
+
+---
+
 ## 0.107.0 — 2026-11-18
 
 ### Nuevo

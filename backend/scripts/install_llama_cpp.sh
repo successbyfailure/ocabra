@@ -100,12 +100,16 @@ fi
 
 cd "${SRC_DIR}"
 
+# LLAMA_USE_PREBUILT_UI=OFF: llama-server's web UI is not used by oCabra, and
+# fetching it broke the build — a shallow clone resolves its version to "b1",
+# which the Hugging Face bucket does not have (ocabra-node 0.107.0, 2026-11-18).
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     ${GGML_CPU_FLAGS:-} \
     -DGGML_CUDA="${ENABLE_CUDA}" \
     -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHITECTURES}" \
     -DLLAMA_CURL=OFF \
+    -DLLAMA_USE_PREBUILT_UI=OFF \
     "${NCCL_FLAGS[@]}"
 cmake --build build --target llama-server -j"${BUILD_JOBS}"
 # llama-fit-params projects what a configuration takes on each device and in
