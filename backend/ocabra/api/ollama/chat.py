@@ -37,6 +37,7 @@ from ocabra.api.openai._deps import (
     merge_profile_defaults,
     ollama_required_capabilities,
     resolve_profile,
+    to_backend_body,
 )
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
@@ -47,12 +48,19 @@ from ocabra.database import AsyncSessionLocal
 
 from ._mapper import resolve_model
 from ._shared import (
+    REASONING_KEYS,
     apply_option_map,
+    apply_think,
     build_native_passthrough_body,
+    dispatch_error_types,
     get_ollama_user,
     iter_sse_payloads,
     now_iso_z,
+    open_stream,
+    raise_dispatch_error,
+    reasoning_text,
     request_stream_usage,
+    stream_error_line,
     usage_from_stream_payload,
 )
 
@@ -248,7 +256,11 @@ async def chat(
             )
         return await worker_pool.forward_request(worker_key, "/api/chat", upstream_body)
 
-    vllm_body = _build_vllm_chat_body(merged_body, state.backend_model_id, stream)
+    # Through ``to_backend_body`` like ``/v1``: reasoning level and budget,
+    # thinking switches and message normalisation (BUG-11).
+    vllm_body = to_backend_body(
+        state, _build_vllm_chat_body(merged_body, state.backend_model_id, stream)
+    )
     user_key = fairness_user_key(user)
     slots = fairness_slots(state)
     kv_capacity, kv_tokens = fairness_kv_budget(
@@ -269,18 +281,19 @@ async def chat(
         )
 
     if stream:
-        return StreamingResponse(
-            _stream_chat(
-                worker_pool,
+        source = await open_stream(
+            worker_pool.forward_stream(
                 worker_key,
-                ollama_model,
+                "/v1/chat/completions",
                 vllm_body,
-                user_key,
-                slots,
-                kv_capacity,
-                kv_tokens,
-                runtime_telemetry,
-            ),
+                user_key=user_key,
+                slots=slots,
+                **telemetry_admission,
+                **kv_admission,
+            )
+        )
+        return StreamingResponse(
+            _stream_chat(source, ollama_model),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -308,8 +321,8 @@ async def chat(
         # Cancelada por desconexion del cliente: el slot y la GPU ya estan
         # libres. 499 es el codigo canonico de "client closed request".
         raise HTTPException(status_code=499, detail="client disconnected") from None
-    except KVCapacityError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except dispatch_error_types() as exc:
+        raise_dispatch_error(exc)
     message = _extract_chat_ollama_message(result)
     total_duration = time.monotonic_ns() - started_ns
     usage = result.get("usage") or {}
@@ -397,27 +410,34 @@ def _build_vllm_chat_body(payload: dict, model_id: str, stream: bool) -> dict:
         "stop",
         "seed",
         "max_tokens",
+        *REASONING_KEYS,
     ):
         if key in payload:
             body[key] = payload[key]
 
     options = payload.get("options") or {}
     apply_option_map(body, options)
+    apply_think(payload, body)
 
     request_stream_usage(body)
     return body
 
 
-async def _stream_chat(
-    worker_pool,
-    model_id: str,
-    ollama_model: str,
-    body: dict,
-    user_key: str | None = None,
-    slots: int = 1,
-    kv_capacity_tokens: int | None = None,
-    kv_tokens: int = 0,
-    telemetry=None,
+async def _stream_chat(source: AsyncIterator[bytes], ollama_model: str) -> AsyncIterator[bytes]:
+    """OpenAI SSE from the worker as Ollama NDJSON.
+
+    A failure after the first line ends the stream with Ollama's
+    ``{"error": ...}`` line instead of cutting the connection (BUG-10).
+    """
+    try:
+        async for line in _translate_chat_stream(source, ollama_model):
+            yield line
+    except Exception as exc:  # noqa: BLE001 -- the 200 is already sent
+        yield stream_error_line(exc)
+
+
+async def _translate_chat_stream(
+    source: AsyncIterator[bytes], ollama_model: str
 ) -> AsyncIterator[bytes]:
     started_ns = time.monotonic_ns()
     prompt_eval_count = 0
@@ -435,21 +455,7 @@ async def _stream_chat(
     # themselves).
     tool_calls_acc: dict[int, dict] = {}
 
-    async for payload in iter_sse_payloads(
-        worker_pool.forward_stream(
-            model_id,
-            "/v1/chat/completions",
-            body,
-            user_key=user_key,
-            slots=slots,
-            **({"telemetry": telemetry} if telemetry is not None else {}),
-            **(
-                {"kv_capacity_tokens": kv_capacity_tokens, "kv_tokens": kv_tokens}
-                if kv_capacity_tokens is not None
-                else {}
-            ),
-        )
-    ):
+    async for payload in iter_sse_payloads(source):
         if payload == "[DONE]":
             total_duration = time.monotonic_ns() - started_ns
             done_message: dict = {"role": "assistant", "content": ""}
@@ -499,13 +505,18 @@ async def _stream_chat(
                 entry["function"]["arguments"] += fn_delta["arguments"]
 
         token = str(delta.get("content") or "")
-        if token == "":
+        thinking = reasoning_text(delta)
+        if token == "" and thinking == "":
             continue
 
+        message: dict = {"role": "assistant", "content": token}
+        if thinking:
+            # Ollama streams reasoning as ``message.thinking`` (BUG-11).
+            message["thinking"] = thinking
         chunk = {
             "model": ollama_model,
             "created_at": now_iso_z(),
-            "message": {"role": "assistant", "content": token},
+            "message": message,
             "done": False,
         }
         yield (json.dumps(chunk) + "\n").encode("utf-8")
@@ -547,6 +558,9 @@ def _extract_chat_ollama_message(payload: dict) -> dict:
         return {"role": "assistant", "content": ""}
     message = choices[0].get("message") or {}
     out: dict = {"role": "assistant", "content": str(message.get("content") or "")}
+    thinking = reasoning_text(message)
+    if thinking:
+        out["thinking"] = thinking
     if message.get("tool_calls"):
         out["tool_calls"] = _openai_tool_calls_to_ollama(message["tool_calls"])
     return out

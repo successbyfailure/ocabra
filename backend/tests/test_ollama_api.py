@@ -712,7 +712,11 @@ def _stream_chat(app, chunks: list[bytes]) -> tuple[list[dict], dict]:
     with client.stream(
         "POST",
         "/api/chat",
-        json={"model": "gemma4:26b", "messages": [{"role": "user", "content": "hola"}], "stream": True},
+        json={
+            "model": "gemma4:26b",
+            "messages": [{"role": "user", "content": "hola"}],
+            "stream": True,
+        },
     ) as resp:
         assert resp.status_code == 200
         lines = [json.loads(line) for line in resp.iter_lines() if line]
@@ -809,3 +813,275 @@ def test_pull_is_allowed_for_model_manager() -> None:
         resp = client.post("/api/pull", json={"name": "llama3.2:3b", "stream": False})
 
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# BUG-10: dispatch errors keep their status; stream failures end in-band
+# ---------------------------------------------------------------------------
+
+
+def _chat_body(stream: bool) -> dict:
+    return {
+        "model": "gemma4:26b",
+        "messages": [{"role": "user", "content": "hola"}],
+        "stream": stream,
+    }
+
+
+def _upstream_error(status: int, body: str):
+    import httpx
+
+    req = httpx.Request("POST", "http://worker/v1/chat/completions")
+    return httpx.HTTPStatusError(
+        "upstream", request=req, response=httpx.Response(status, text=body, request=req)
+    )
+
+
+def test_chat_timeout_is_a_504_with_retry_after_not_a_500() -> None:
+    from ocabra.core.worker_pool import InferenceTimeoutError
+
+    app = _make_app(model_state=_llama_state())
+    app.state.worker_pool.forward_request = AsyncMock(
+        side_effect=InferenceTimeoutError("llamacpp_mks/gemma4:26b", "/v1/chat/completions", 900)
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post("/api/chat", json=_chat_body(False))
+
+    assert resp.status_code == 504
+    assert resp.headers.get("retry-after")
+
+
+def test_chat_upstream_400_keeps_its_status() -> None:
+    app = _make_app(model_state=_llama_state())
+    app.state.worker_pool.forward_request = AsyncMock(
+        side_effect=_upstream_error(400, '{"error": {"message": "Missing tool call type"}}')
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post("/api/chat", json=_chat_body(False))
+
+    assert resp.status_code == 400
+    assert "Missing tool call type" in resp.text
+
+
+def test_chat_stream_rejected_before_the_first_byte_is_a_real_status() -> None:
+    from ocabra.core.worker_pool import WorkerDegradedError
+
+    async def _refuse():
+        raise WorkerDegradedError("llamacpp_mks/gemma4:26b", 3)
+        yield b""  # pragma: no cover
+
+    app = _make_app(model_state=_llama_state())
+    app.state.worker_pool.forward_stream = MagicMock(return_value=_refuse())
+    resp = TestClient(app, raise_server_exceptions=False).post("/api/chat", json=_chat_body(True))
+
+    assert resp.status_code == 503
+    assert resp.headers.get("retry-after")
+
+
+def test_chat_stream_failing_midway_ends_with_an_ollama_error_line() -> None:
+    from ocabra.core.worker_pool import InferenceTimeoutError
+
+    async def _half():
+        yield b'data: {"choices":[{"delta":{"content":"Hola"}}]}\n\n'
+        raise InferenceTimeoutError("llamacpp_mks/gemma4:26b", "/v1/chat/completions", 900)
+
+    app = _make_app(model_state=_llama_state())
+    app.state.worker_pool.forward_stream = MagicMock(return_value=_half())
+    with TestClient(app).stream("POST", "/api/chat", json=_chat_body(True)) as resp:
+        assert resp.status_code == 200
+        lines = [json.loads(line) for line in resp.iter_lines() if line]
+
+    assert lines[0]["message"]["content"] == "Hola"
+    assert lines[-1]["code"] == "generation_timeout" and lines[-1]["error"]
+
+
+def test_generate_timeout_is_a_504_not_a_500() -> None:
+    from ocabra.core.worker_pool import InferenceTimeoutError
+
+    app = _make_app(model_state=_llama_state())
+    app.state.worker_pool.forward_request = AsyncMock(
+        side_effect=InferenceTimeoutError("llamacpp_mks/gemma4:26b", "/v1/completions", 900)
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/api/generate", json={"model": "gemma4:26b", "prompt": "hola", "stream": False}
+    )
+
+    assert resp.status_code == 504
+
+
+# ---------------------------------------------------------------------------
+# BUG-11: reasoning controls reach the backend; thinking comes back
+# ---------------------------------------------------------------------------
+
+
+def test_chat_think_false_turns_reasoning_off_on_llama_cpp() -> None:
+    app = _make_app(model_state=_llama_state())
+    _lines, sent = _stream_chat_with(app, {**_chat_body(True), "think": False})
+
+    assert sent.get("chat_template_kwargs", {}).get("enable_thinking") is False
+    assert "think" not in sent
+
+
+def test_chat_stream_returns_reasoning_as_thinking() -> None:
+    app = _make_app(model_state=_llama_state())
+    lines, _sent = _stream_chat(
+        app,
+        [
+            b'data: {"choices":[{"delta":{"reasoning_content":"pienso"}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"Hola"}}]}\n\n',
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            b"data: [DONE]\n\n",
+        ],
+    )
+
+    assert lines[0]["message"] == {"role": "assistant", "content": "", "thinking": "pienso"}
+    assert lines[1]["message"]["content"] == "Hola"
+
+
+def test_chat_non_stream_returns_reasoning_as_thinking() -> None:
+    app = _make_app(
+        model_state=_llama_state(),
+        worker_result={
+            "choices": [
+                {
+                    "message": {"content": "Hola", "reasoning_content": "pienso"},
+                    "finish_reason": "stop",
+                }
+            ]
+        },
+    )
+    resp = TestClient(app).post("/api/chat", json=_chat_body(False))
+
+    assert resp.json()["message"]["thinking"] == "pienso"
+
+
+def _stream_chat_with(app, body: dict) -> tuple[list[dict], dict]:
+    app.state.worker_pool.forward_stream = MagicMock(return_value=_async_gen([b"data: [DONE]\n\n"]))
+    with TestClient(app).stream("POST", "/api/chat", json=body) as resp:
+        assert resp.status_code == 200
+        lines = [json.loads(line) for line in resp.iter_lines() if line]
+    return lines, app.state.worker_pool.forward_stream.call_args.args[2]
+
+
+# ---------------------------------------------------------------------------
+# BUG-12: /api/embed
+# ---------------------------------------------------------------------------
+
+
+def _ollama_embed_state():
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    return ModelState(
+        model_id="ollama/nomic-embed-text",
+        display_name="nomic",
+        backend_type="ollama",
+        backend_model_id="nomic-embed-text:latest",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(embeddings=True),
+    )
+
+
+def test_embed_does_not_silently_embed_only_the_first_input() -> None:
+    """Any /api/embed failure used to retry on /api/embeddings with input[0]:
+    three inputs, one vector, 200."""
+    app = _make_app(model_state=_ollama_embed_state())
+    app.state.worker_pool.forward_request = AsyncMock(
+        side_effect=_upstream_error(500, '{"error": "input too long"}')
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/api/embed", json={"model": "nomic-embed-text", "input": ["a", "b", "c"]}
+    )
+
+    assert resp.status_code == 500
+    assert app.state.worker_pool.forward_request.await_count == 1
+
+
+def test_embed_on_an_old_ollama_embeds_every_input() -> None:
+    calls = []
+
+    async def _forward(key, path, payload, **kw):
+        calls.append(path)
+        if path == "/api/embed":
+            raise _upstream_error(404, "404 page not found")
+        return {"embedding": [float(len(payload["prompt"]))]}
+
+    app = _make_app(model_state=_ollama_embed_state())
+    app.state.worker_pool.forward_request = _forward
+    resp = TestClient(app).post(
+        "/api/embed", json={"model": "nomic-embed-text", "input": ["a", "bb", "ccc"]}
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["embeddings"] == [[1.0], [2.0], [3.0]]
+    assert calls == ["/api/embed", "/api/embeddings", "/api/embeddings", "/api/embeddings"]
+
+
+def test_embed_uses_the_backend_model_name_and_forwards_dimensions_to_ollama() -> None:
+    app = _make_app(model_state=_ollama_embed_state(), worker_result={"embeddings": [[0.1, 0.2]]})
+    TestClient(app).post(
+        "/api/embed", json={"model": "nomic-embed-text", "input": "a", "dimensions": 2}
+    )
+    payload = app.state.worker_pool.forward_request.call_args.args[2]
+
+    assert payload["model"] == "nomic-embed-text:latest"
+    assert payload["dimensions"] == 2
+
+
+def test_embed_truncates_and_renormalises_when_the_backend_ignores_dimensions() -> None:
+    import math
+
+    app = _make_app(worker_result={"data": [{"embedding": [3.0, 4.0, 12.0]}]})
+    resp = TestClient(app).post(
+        "/api/embed",
+        json={"model": "meta-llama/Llama-3.2-3B-Instruct", "input": "a", "dimensions": 2},
+    )
+    vector = resp.json()["embeddings"][0]
+
+    assert len(vector) == 2
+    assert math.isclose(math.hypot(*vector), 1.0)
+    assert app.state.worker_pool.forward_request.call_args.args[2]["dimensions"] == 2
+
+
+def test_embed_rejects_invalid_dimensions() -> None:
+    app = _make_app()
+    resp = TestClient(app).post(
+        "/api/embed",
+        json={"model": "meta-llama/Llama-3.2-3B-Instruct", "input": "a", "dimensions": 0},
+    )
+    assert resp.status_code == 400
+
+
+def test_embed_does_not_turn_a_403_into_a_legacy_404() -> None:
+    from fastapi import HTTPException
+
+    app = _make_app()
+    with patch(
+        "ocabra.api.ollama.embeddings.resolve_profile",
+        AsyncMock(side_effect=HTTPException(status_code=403, detail="no access")),
+    ):
+        resp = TestClient(app).post(
+            "/api/embed", json={"model": "recomendado-embedding", "input": "a"}
+        )
+    assert resp.status_code == 403
+
+
+def test_embed_passes_the_router_resolver_and_federation_gets_the_registry() -> None:
+    import inspect
+
+    from ocabra.api.ollama import embeddings
+
+    source = inspect.getsource(embeddings._run_embeddings)
+    assert "router_resolver=" in source
+    assert "federation_manager, profile_registry" in source
+
+
+def test_legacy_embeddings_answers_ollamas_single_vector_field() -> None:
+    app = _make_app(worker_result={"data": [{"embedding": [0.5, 0.5]}]})
+    body = (
+        TestClient(app)
+        .post("/api/embeddings", json={"model": "meta-llama/Llama-3.2-3B-Instruct", "prompt": "a"})
+        .json()
+    )
+
+    assert body["embedding"] == [0.5, 0.5]
+    assert body["embeddings"] == [[0.5, 0.5]]

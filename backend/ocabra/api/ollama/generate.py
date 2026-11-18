@@ -28,6 +28,7 @@ from ocabra.api.openai._deps import (
     merge_profile_defaults,
     ollama_required_capabilities,
     resolve_profile,
+    to_backend_body,
 )
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
@@ -37,12 +38,18 @@ from ocabra.core.privacy import preview as privacy_preview
 
 from ._mapper import resolve_model
 from ._shared import (
+    REASONING_KEYS,
     apply_option_map,
+    apply_think,
     build_native_passthrough_body,
+    dispatch_error_types,
     get_ollama_user,
     iter_sse_payloads,
     now_iso_z,
+    open_stream,
+    raise_dispatch_error,
     request_stream_usage,
+    stream_error_line,
     usage_from_stream_payload,
 )
 from .chat import _extract_finish_reason, _native_backend_model_name
@@ -214,7 +221,10 @@ async def generate(
             )
         return await worker_pool.forward_request(worker_key, "/api/generate", upstream_body)
 
-    vllm_body = _build_vllm_generate_body(merged_body, state.backend_model_id, stream)
+    # Through ``to_backend_body`` like ``/v1/completions`` (BUG-11).
+    vllm_body = to_backend_body(
+        state, _build_vllm_generate_body(merged_body, state.backend_model_id, stream)
+    )
     user_key = fairness_user_key(user)
     slots = fairness_slots(state)
     kv_capacity, kv_tokens = fairness_kv_budget(
@@ -235,18 +245,19 @@ async def generate(
         )
 
     if stream:
-        return StreamingResponse(
-            _stream_generate(
-                worker_pool,
+        source = await open_stream(
+            worker_pool.forward_stream(
                 worker_key,
-                ollama_model,
+                "/v1/completions",
                 vllm_body,
-                user_key,
-                slots,
-                kv_capacity,
-                kv_tokens,
-                runtime_telemetry,
-            ),
+                user_key=user_key,
+                slots=slots,
+                **telemetry_admission,
+                **kv_admission,
+            )
+        )
+        return StreamingResponse(
+            _stream_generate(source, ollama_model),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -274,8 +285,8 @@ async def generate(
         # Cancelada por desconexion del cliente: el slot y la GPU ya estan
         # libres. 499 es el codigo canonico de "client closed request".
         raise HTTPException(status_code=499, detail="client disconnected") from None
-    except KVCapacityError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except dispatch_error_types() as exc:
+        raise_dispatch_error(exc)
     text = ""
     choices = result.get("choices") or []
     if choices:
@@ -303,26 +314,30 @@ def _build_vllm_generate_body(payload: dict, model_id: str, stream: bool) -> dic
     }
 
     # Common top-level knobs accepted by Ollama.
-    for key in ("suffix", "temperature", "top_p", "stop", "seed"):
+    for key in ("suffix", "temperature", "top_p", "stop", "seed", *REASONING_KEYS):
         if key in payload:
             body[key] = payload[key]
 
     apply_option_map(body, payload.get("options"))
+    apply_think(payload, body)
 
     request_stream_usage(body)
     return body
 
 
 async def _stream_generate(
-    worker_pool,
-    model_id: str,
-    ollama_model: str,
-    body: dict,
-    user_key: str | None = None,
-    slots: int = 1,
-    kv_capacity_tokens: int | None = None,
-    kv_tokens: int = 0,
-    telemetry=None,
+    source: AsyncIterator[bytes], ollama_model: str
+) -> AsyncIterator[bytes]:
+    """OpenAI SSE as Ollama NDJSON; a late failure ends with ``{"error": ...}``."""
+    try:
+        async for line in _translate_generate_stream(source, ollama_model):
+            yield line
+    except Exception as exc:  # noqa: BLE001 -- the 200 is already sent
+        yield stream_error_line(exc)
+
+
+async def _translate_generate_stream(
+    source: AsyncIterator[bytes], ollama_model: str
 ) -> AsyncIterator[bytes]:
     started_ns = time.monotonic_ns()
     prompt_eval_count = 0
@@ -333,21 +348,7 @@ async def _stream_generate(
     ultimo_payload: dict | None = None
     finish_reason: str | None = None
 
-    async for payload in iter_sse_payloads(
-        worker_pool.forward_stream(
-            model_id,
-            "/v1/completions",
-            body,
-            user_key=user_key,
-            slots=slots,
-            **({"telemetry": telemetry} if telemetry is not None else {}),
-            **(
-                {"kv_capacity_tokens": kv_capacity_tokens, "kv_tokens": kv_tokens}
-                if kv_capacity_tokens is not None
-                else {}
-            ),
-        )
-    ):
+    async for payload in iter_sse_payloads(source):
         if payload == "[DONE]":
             total_duration = time.monotonic_ns() - started_ns
             done_payload = {

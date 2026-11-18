@@ -16,6 +16,48 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.111.0 — 2026-11-18
+
+Arreglos en la API compatible con Ollama (`/api/chat`, `/api/generate`,
+`/api/embed`), para modelos servidos por llama.cpp, vLLM y el resto de motores
+que no son el propio Ollama.
+
+### Corregido
+
+- **`/api/chat` y `/api/generate` daban `500` ante errores del motor.** Un
+  timeout, un modelo que se descargó mientras la petición esperaba, un worker
+  degradado o un `400` del motor llegaban como `500 Internal Server Error`.
+  Ahora tienen el mismo código que en `/v1`: `504` con `Retry-After` por
+  timeout, `503` con `Retry-After` si el worker no está disponible, y el `4xx`
+  del motor con su mensaje.
+- **En streaming, un fallo cortaba la conexión sin avisar.** Si el motor
+  rechaza la petición antes de empezar, ahora recibes el código HTTP de error
+  en vez de un `200` vacío. Si falla a mitad, el stream termina con una línea
+  `{"error": "...", "code": "..."}`, como hace Ollama, en vez de cortarse sin
+  `done: true`.
+- **`think` no hacía nada fuera de los modelos de Ollama.** Ahora
+  `"think": false` desactiva el razonamiento y `"think": "low"|"medium"|"high"`
+  fija el nivel, en todos los motores. Sin `think` se aplica el nivel por
+  defecto del modelo, igual que en `/v1/chat/completions`. También se respetan
+  ya `reasoning_effort` y el resto de ajustes de razonamiento de los perfiles.
+- **El razonamiento se perdía.** Ahora llega en `message.thinking`, en
+  streaming y sin streaming, como en Ollama.
+- **`/api/embed` con varias entradas podía devolver un solo vector.** Si la
+  petición fallaba, se repetía en silencio con la primera entrada y respondía
+  `200` con un vector en lugar de N. Ahora un fallo devuelve su error. Solo
+  un Ollama demasiado antiguo para tener `/api/embed` pasa a la vía antigua, y
+  esa vía calcula un vector por entrada.
+- **`/api/embed` ignoraba `dimensions`.** Ahora se pasa al motor y, si este lo
+  ignora (llama.cpp), los vectores se recortan y renormalizan, como en
+  `/v1/embeddings`. Un valor que no sea un entero positivo da `400`.
+- **`/api/embed` no aceptaba routers** (`recomendado-embedding`) y convertía
+  un `403` (sin acceso al modelo) en un `404` engañoso.
+- **`/api/embeddings` (la versión antigua) no tenía el campo de Ollama.** Ahora
+  responde también `embedding` con un solo vector, como Ollama; `embeddings`
+  se mantiene.
+
+---
+
 ## 0.110.2 — 2026-11-18
 
 ### Corregido

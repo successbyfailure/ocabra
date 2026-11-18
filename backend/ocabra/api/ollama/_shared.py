@@ -180,3 +180,106 @@ def usage_from_stream_payload(
         except (TypeError, ValueError):
             pass
     return prompt_tokens, completion_tokens
+
+
+# ── Dispatch errors (BUG-10) ─────────────────────────────────────────────────
+
+
+def dispatch_error_types() -> tuple[type[Exception], ...]:
+    """Worker errors that ``/v1`` already turns into proper status codes."""
+    import httpx
+
+    from ocabra.core.fair_slot_gate import KVCapacityError
+    from ocabra.core.worker_pool import (
+        InferenceTimeoutError,
+        WorkerDegradedError,
+        WorkerGoneError,
+    )
+
+    return (
+        httpx.HTTPStatusError,
+        InferenceTimeoutError,
+        KVCapacityError,
+        WorkerDegradedError,
+        WorkerGoneError,
+    )
+
+
+def raise_dispatch_error(exc: Exception) -> None:
+    """Same status, code and ``Retry-After`` as ``/v1`` for a worker error.
+
+    ``/api/chat`` and ``/api/generate`` only caught the client leaving and the
+    KV budget: a timeout, a degraded or unloaded worker or an upstream 4xx all
+    reached the generic handler as a 500.
+    """
+    import httpx
+
+    from ocabra.api.openai._deps import (
+        raise_inference_dispatch_error,
+        raise_upstream_http_error,
+    )
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        raise_upstream_http_error(exc)
+    raise_inference_dispatch_error(exc)
+
+
+async def open_stream(gen: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """Start ``gen`` before answering, so a rejection is still a real status.
+
+    The worker raises before its first byte when it refuses the request
+    (``raise_for_status``), and at that point nothing has been sent: answer
+    with the status instead of a 200 whose stream just ends.
+    """
+    from ocabra.api.openai.chat import _peek_first_chunk
+
+    first, exc = await _peek_first_chunk(gen)
+    if exc is not None:
+        if isinstance(exc, dispatch_error_types()):
+            raise_dispatch_error(exc)
+        raise exc
+
+    async def _replay() -> AsyncIterator[bytes]:
+        if first is not None:
+            yield first
+        async for chunk in gen:
+            yield chunk
+
+    return _replay()
+
+
+def stream_error_line(exc: Exception) -> bytes:
+    """Ollama's in-stream error (``{"error": "..."}``) once the 200 is sent."""
+    from ocabra.api.openai._deps import stream_error_details
+
+    message, code = stream_error_details(exc)
+    return (json.dumps({"error": message, "code": code}) + "\n").encode("utf-8")
+
+
+# ── Reasoning (BUG-11) ───────────────────────────────────────────────────────
+
+#: Keys a profile or client may set that the Ollama translation used to drop.
+REASONING_KEYS = ("reasoning_effort", "reasoning_budget", "chat_template_kwargs")
+
+
+def apply_think(payload: Mapping[str, object], body: dict) -> None:
+    """Ollama's ``think`` as the ``reasoning_effort`` ``to_backend_body`` reads.
+
+    ``false`` turns reasoning off; a level (``"low"``/``"medium"``/``"high"``,
+    as Ollama accepts for some models) is used as is; ``true`` keeps the
+    model's configured default, which is what "think" means for a model that
+    reasons anyway. Without ``think`` the model default applies, as on ``/v1``.
+    """
+    think = payload.get("think")
+    if think is False:
+        body["reasoning_effort"] = "off"
+    elif isinstance(think, str) and think.strip():
+        body["reasoning_effort"] = think.strip().lower()
+
+
+def reasoning_text(source: Mapping[str, object] | None) -> str:
+    """The reasoning a backend returned, under either name it uses."""
+    if not isinstance(source, Mapping):
+        return ""
+    value = source.get("reasoning_content") or source.get("reasoning") or ""
+    return value if isinstance(value, str) else ""
