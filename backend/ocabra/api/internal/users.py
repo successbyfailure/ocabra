@@ -371,8 +371,10 @@ async def reset_user_password(
             raise HTTPException(
                 status_code=400, detail={"error": "weak_password", "message": problem}
             )
+        now = datetime.now(UTC)
         user.hashed_password = await hash_password_async(body.new_password)
-        user.updated_at = datetime.now(UTC)
+        user.updated_at = now
+        user.sessions_valid_after = now  # signs the user out everywhere (SEG-19)
         await session.commit()
 
     logger.info("user_password_reset", target_user_id=user_id, by=caller.username)
@@ -651,9 +653,12 @@ async def create_user_api_key(
 
     from sqlalchemy import select
 
+    from ocabra.api._deps_auth import require_session
     from ocabra.core.auth_manager import hash_api_key
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey, User
+
+    require_session(caller)  # a leaked admin key must not mint keys (SEG-19)
 
     try:
         parsed_id = uuid.UUID(user_id)

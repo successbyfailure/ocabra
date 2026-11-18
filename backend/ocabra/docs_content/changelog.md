@@ -16,6 +16,28 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.109.0 — 2026-11-18
+
+### Cambiado
+
+- **Acción** — `/v1/realtime` ya no lee la clave de `?api_key=` en la URL: las
+  URLs acaban en los logs de los proxies. Manda `Authorization: Bearer <clave>`
+  o, desde un navegador (que no puede poner cabeceras en un WebSocket), el
+  subprotocolo `openai-insecure-api-key.<clave>`, como el cliente de OpenAI.
+  El servidor responde con el subprotocolo `realtime` si lo ofreces.
+- **Acción** — Una clave API ya no puede crear claves API
+  (`POST /ocabra/auth/keys`, `POST /ocabra/users/{id}/keys`): da `403`. Hay
+  que hacerlo con la sesión iniciada en el panel. Así una clave filtrada no
+  puede dejarse sustitutas.
+- Cambiar la contraseña (la tuya o, como admin, la de otro) cierra todas las
+  demás sesiones de ese usuario. La sesión desde la que la cambias sigue
+  abierta. Las claves API no se revocan: son de integraciones, revócalas una
+  a una si hace falta.
+- La cookie de sesión lleva `Secure` cuando entras por HTTPS, también detrás
+  del proxy. Por HTTP en la LAN sigue funcionando como antes.
+
+---
+
 ## 0.108.0 — 2026-11-18
 
 ### Cambiado

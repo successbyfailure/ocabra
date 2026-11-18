@@ -41,8 +41,29 @@ class CreateApiKeyRequest(BaseModel):
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 
-def _set_session_cookie(response: Response, token: str, remember: bool) -> None:
-    """Attach the ``ocabra_session`` cookie to *response*."""
+def _is_https(request: Request | None) -> bool:
+    """Whether the browser reached us over HTTPS.
+
+    TLS ends at the front proxy, so the api only sees plain HTTP; Caddy passes
+    on ``X-Forwarded-Proto`` from the trusted front proxy and sets it itself
+    for everyone else, so it cannot be forged from outside. At worst a forged
+    value marks the forger's own cookie ``Secure``.
+    """
+    if request is None:
+        return False
+    proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return proto == "https" or request.url.scheme == "https"
+
+
+def _set_session_cookie(
+    response: Response, token: str, remember: bool, request: Request | None = None
+) -> None:
+    """Attach the ``ocabra_session`` cookie to *response*.
+
+    ``Secure`` when ``USE_HTTPS`` is on or the request came over HTTPS (SEG-20):
+    a plain-HTTP LAN login keeps working, an HTTPS one never sends the cookie
+    in clear.
+    """
     from ocabra.config import settings
 
     if remember:
@@ -55,7 +76,7 @@ def _set_session_cookie(response: Response, token: str, remember: bool) -> None:
         value=token,
         httponly=True,
         samesite="lax",
-        secure=settings.use_https,
+        secure=settings.use_https or _is_https(request),
         max_age=max_age,
         path="/",
         domain=settings.auth_cookie_domain or None,
@@ -165,9 +186,11 @@ async def login(body: LoginRequest, request: Request, response: Response) -> dic
         role=user.role,
         remember=body.remember,
     )
-    _set_session_cookie(response, token, remember=body.remember)
+    _set_session_cookie(response, token, remember=body.remember, request=request)
 
-    logger.info("auth_login_success", username=user.username, role=user.role)
+    logger.info(
+        "auth_login_success", username=user.username, role=user.role, https=_is_https(request)
+    )
 
     return {
         "access_token": token,
@@ -273,9 +296,15 @@ async def me(
 )
 async def change_password(
     body: PasswordChangeRequest,
+    request: Request,
+    response: Response,
     user: Annotated[UserContext, Depends(require_role("user"))],
 ) -> dict:
     """Change the authenticated user's own password.
+
+    Every other session of the user stops working (SEG-19); the one making the
+    change gets a fresh cookie, so it stays signed in. API keys are not
+    revoked: they belong to integrations, revoke them one by one if needed.
 
     Args:
         body: ``{ current_password, new_password }``
@@ -292,6 +321,7 @@ async def change_password(
     from sqlalchemy import select
 
     from ocabra.core.auth_manager import (
+        create_access_token,
         hash_password_async,
         password_problem,
         verify_password_async,
@@ -312,12 +342,33 @@ async def change_password(
         if problem:
             raise HTTPException(status_code=400, detail=problem)
 
+        now = datetime.now(UTC)
         db_user.hashed_password = await hash_password_async(body.new_password)
-        db_user.updated_at = datetime.now(UTC)
+        db_user.updated_at = now
+        db_user.sessions_valid_after = now
         await session.commit()
+        role = db_user.role
+
+    if request.cookies.get("ocabra_session"):
+        remember = _session_was_remembered(request.cookies["ocabra_session"])
+        token = create_access_token(user_id=str(user.user_id), role=role, remember=remember)
+        _set_session_cookie(response, token, remember=remember, request=request)
 
     logger.info("auth_password_changed", username=user.username)
     return {"ok": True}
+
+
+def _session_was_remembered(token: str) -> bool:
+    """Whether the current session had the long ("remember me") lifetime."""
+    from ocabra.config import settings
+    from ocabra.core.auth_manager import AuthError, decode_access_token
+
+    try:
+        payload = decode_access_token(token)
+    except AuthError:
+        return False
+    lifetime = float(payload.get("exp", 0)) - float(payload.get("iat", 0))
+    return lifetime > settings.jwt_ttl_hours * 3600 + 60
 
 
 @router.get(
@@ -390,9 +441,13 @@ async def create_api_key(
     Raises:
         HTTP 401: If the caller is not authenticated.
     """
+    from ocabra.api._deps_auth import require_session
     from ocabra.core.auth_manager import generate_api_key
     from ocabra.database import AsyncSessionLocal
     from ocabra.db.auth import ApiKey
+
+    # A leaked key must not be able to mint replacements for itself (SEG-19).
+    require_session(user)
 
     now = datetime.now(UTC)
     expires_at = None

@@ -7,7 +7,8 @@ Upgrades to WebSocket and runs a :class:`RealtimeSession` that coordinates
 the bidirectional audio pipeline (STT -> LLM -> TTS).
 
 Authentication follows the same pattern as the internal WebSocket endpoint:
-checks ``Authorization: Bearer <key>`` header, ``ocabra_session`` cookie,
+checks ``Authorization: Bearer <key>`` header (or, for browsers, the
+``openai-insecure-api-key.<key>`` subprotocol), ``ocabra_session`` cookie,
 or allows anonymous access when ``require_api_key_openai`` is disabled.
 """
 
@@ -29,6 +30,34 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["OpenAI Realtime"])
 
 
+_KEY_SUBPROTOCOL = "openai-insecure-api-key."
+
+
+def _offered_subprotocols(websocket: WebSocket) -> list[str]:
+    raw = websocket.headers.get("sec-websocket-protocol", "")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _subprotocol_key(websocket: WebSocket) -> str:
+    """The API key a browser client sends as ``openai-insecure-api-key.<key>``."""
+    for item in _offered_subprotocols(websocket):
+        if item.startswith(_KEY_SUBPROTOCOL):
+            return item[len(_KEY_SUBPROTOCOL) :]
+    return ""
+
+
+def _accepted_subprotocol(websocket: WebSocket) -> str | None:
+    """The subprotocol to answer with: never the one carrying the key.
+
+    A browser that offers subprotocols drops the connection unless the server
+    picks one of them; OpenAI's clients offer ``realtime``.
+    """
+    offered = [p for p in _offered_subprotocols(websocket) if not p.startswith(_KEY_SUBPROTOCOL)]
+    if "realtime" in offered:
+        return "realtime"
+    return offered[0] if offered else None
+
+
 async def _authenticate_ws(websocket: WebSocket) -> UserContext | None:
     """Authenticate a WebSocket connection.
 
@@ -42,15 +71,16 @@ async def _authenticate_ws(websocket: WebSocket) -> UserContext | None:
     """
     from ocabra.config import settings
 
-    # 1. Bearer token from header (or query param for WebSocket clients)
+    # 1. Bearer token from the header, or (browsers cannot set headers on a
+    # WebSocket) from the subprotocol OpenAI uses for that. The ``?api_key=``
+    # query parameter is no longer read (SEG-18): URLs end up in proxy and
+    # access logs.
     auth_header = websocket.headers.get("authorization", "")
     bearer_token = ""
     if auth_header.startswith("Bearer "):
         bearer_token = auth_header[len("Bearer ") :]
-
-    # Some WebSocket clients pass the key as a query parameter
     if not bearer_token:
-        bearer_token = websocket.query_params.get("api_key", "")
+        bearer_token = _subprotocol_key(websocket)
 
     if bearer_token:
         from ocabra.api._deps_auth import _resolve_api_key
@@ -232,7 +262,7 @@ async def realtime_ws(
         return
 
     websocket.state.auth_user = user
-    await websocket.accept()
+    await websocket.accept(subprotocol=_accepted_subprotocol(websocket))
 
     worker_pool = websocket.app.state.worker_pool
     model_manager = websocket.app.state.model_manager

@@ -46,6 +46,7 @@ class UserContext:
     is_anonymous: bool = False
     key_group_id: str | None = None  # group_id from the API key used for this request
     api_key_name: str | None = None  # name/label of the API key used
+    via_api_key: bool = False  # authenticated with an API key (not a session)
 
     @property
     def is_admin(self) -> bool:
@@ -136,6 +137,9 @@ async def _resolve_jwt_cookie(token: str, session) -> UserContext | None:
     user: User | None = result.scalar_one_or_none()
     if user is None or not user.is_active:
         return None
+    if session_predates(payload, user.sessions_valid_after):
+        logger.debug("auth_jwt_before_password_change", user_id=user_id)
+        return None
 
     group_result = await session.execute(
         select(UserGroup.group_id).where(UserGroup.user_id == user.id)
@@ -152,6 +156,34 @@ async def _resolve_jwt_cookie(token: str, session) -> UserContext | None:
         accessible_model_ids=accessible,
         is_anonymous=False,
     )
+
+
+def session_predates(payload: dict, valid_after) -> bool:
+    """Whether a JWT was issued before ``valid_after`` (SEG-19).
+
+    ``iat`` has whole seconds, so ``valid_after`` is compared truncated to the
+    second: a token issued in the same second as the change is kept (that is
+    the new session the change itself hands out).
+    """
+    if valid_after is None:
+        return False
+    iat = payload.get("iat")
+    if not isinstance(iat, int | float):
+        return True  # no issue time: cannot prove it is newer
+    return int(iat) < int(valid_after.timestamp())
+
+
+def require_session(user: UserContext) -> None:
+    """403 for a request authenticated with an API key (SEG-19).
+
+    Used where a leaked key must not be able to perpetuate itself, e.g.
+    creating more keys.
+    """
+    if user.via_api_key:
+        raise HTTPException(
+            status_code=403,
+            detail="This action needs a signed-in session, not an API key.",
+        )
 
 
 async def _resolve_api_key(raw_key: str, session) -> UserContext | None:
@@ -215,6 +247,7 @@ async def _resolve_api_key(raw_key: str, session) -> UserContext | None:
         is_anonymous=False,
         key_group_id=key_group_id,
         api_key_name=api_key.name,
+        via_api_key=True,
     )
 
 

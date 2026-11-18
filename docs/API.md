@@ -583,8 +583,10 @@ OpenAI. Pipeline: audio -> Whisper STT -> LLM (streaming) -> TTS -> audio.
 WS /v1/realtime?model=<llm_id>&intent=&conversation_id=&num_speakers=
 ```
 
-Auth: `Authorization: Bearer <key>` en el handshake, o `?api_key=` como
-query param (los navegadores no pueden fijar headers en `new WebSocket()`).
+Auth: `Authorization: Bearer <key>` en el handshake o, desde un navegador
+(que no puede fijar headers en `new WebSocket()`), el subprotocolo
+`openai-insecure-api-key.<key>`: `new WebSocket(url, ["realtime",
+"openai-insecure-api-key." + key])`. `?api_key=` ya no se acepta (v0.109.0).
 
 Eventos de cliente: `session.update`, `input_audio_buffer.{append,commit,clear}`,
 `response.{create,cancel}`, `conversation.item.{create,truncate,delete}`.

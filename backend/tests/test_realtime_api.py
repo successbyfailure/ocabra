@@ -23,9 +23,16 @@ def _context(**overrides) -> UserContext:
     return UserContext(**values)
 
 
-def _websocket(*, authorization: str = "", api_key: str = "", cookie: str = ""):
+def _websocket(
+    *, authorization: str = "", api_key: str = "", cookie: str = "", protocols: str = ""
+):
+    headers = {}
+    if authorization:
+        headers["authorization"] = authorization
+    if protocols:
+        headers["sec-websocket-protocol"] = protocols
     return SimpleNamespace(
-        headers={"authorization": authorization} if authorization else {},
+        headers=headers,
         query_params={"api_key": api_key} if api_key else {},
         cookies={"ocabra_session": cookie} if cookie else {},
     )
@@ -161,8 +168,9 @@ async def test_realtime_ws_refuses_a_model_outside_the_users_groups() -> None:
     """SEG-07: Realtime never checked group grants, so any key could use any
     LLM, STT or TTS. A denied model gets the same answer as an unknown one."""
     user = _context(role="user", accessible_model_ids={"allowed:8b"})
-    profile = SimpleNamespace(profile_id="secret:8b", base_model_id="llamacpp_mks/secret:8b",
-                              enabled=True)
+    profile = SimpleNamespace(
+        profile_id="secret:8b", base_model_id="llamacpp_mks/secret:8b", enabled=True
+    )
     websocket = SimpleNamespace(
         state=SimpleNamespace(),
         app=SimpleNamespace(
@@ -184,8 +192,9 @@ async def test_realtime_ws_refuses_a_model_outside_the_users_groups() -> None:
         patch("ocabra.api.openai.realtime._authenticate_ws", new=AsyncMock(return_value=user)),
         patch("ocabra.api.openai.realtime.RealtimeSession", session_cls),
     ):
-        await realtime_ws(websocket, model="secret:8b", intent="", conversation_id="",
-                          num_speakers=0)
+        await realtime_ws(
+            websocket, model="secret:8b", intent="", conversation_id="", num_speakers=0
+        )
 
     session_cls.assert_not_called()
     error = websocket.send_json.await_args.args[0]
@@ -203,8 +212,49 @@ async def test_user_may_use_realtime_model_follows_the_rest_rule() -> None:
     granted_base = _context(role="user", accessible_model_ids={"llamacpp_mks/chat:8b"})
     outsider = _context(role="user", accessible_model_ids={"other:4b"})
 
-    for user, allowed in ((granted_profile, True), (granted_base, True), (outsider, False),
-                          (_context(), True), (None, True)):
-        assert await user_may_use_realtime_model(
-            user, "chat:8b", "llamacpp_mks/chat:8b", profile_registry=registry
-        ) is allowed
+    for user, allowed in (
+        (granted_profile, True),
+        (granted_base, True),
+        (outsider, False),
+        (_context(), True),
+        (None, True),
+    ):
+        assert (
+            await user_may_use_realtime_model(
+                user, "chat:8b", "llamacpp_mks/chat:8b", profile_registry=registry
+            )
+            is allowed
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_key_travels_in_the_browser_subprotocol_not_the_url() -> None:
+    """SEG-18: ``?api_key=`` ended up in access logs; browsers use the
+    ``openai-insecure-api-key.<key>`` subprotocol instead."""
+    from ocabra.api.openai import realtime
+
+    resolve = AsyncMock(return_value=_context())
+    with (
+        patch("ocabra.api._deps_auth._resolve_api_key", resolve),
+        patch("ocabra.database.AsyncSessionLocal", _session_factory()),
+        patch("ocabra.config.settings.require_api_key_openai", True),
+    ):
+        ws = _websocket(
+            protocols="realtime, openai-insecure-api-key.sk-browser, openai-beta.realtime-v1"
+        )
+        assert await _authenticate_ws(ws) is not None
+        assert resolve.await_args.args[0] == "sk-browser"
+        assert realtime._accepted_subprotocol(ws) == "realtime"
+
+        resolve.reset_mock()
+        assert await _authenticate_ws(_websocket(api_key="sk-in-url")) is None
+        resolve.assert_not_awaited()
+
+
+def test_the_key_subprotocol_is_never_echoed_back() -> None:
+    from ocabra.api.openai import realtime
+
+    assert (
+        realtime._accepted_subprotocol(_websocket(protocols="openai-insecure-api-key.sk")) is None
+    )
+    assert realtime._accepted_subprotocol(_websocket()) is None

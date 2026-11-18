@@ -48,6 +48,7 @@ def _make_db_user(
     u.role = role
     u.hashed_password = hash_password(password)
     u.is_active = is_active
+    u.sessions_valid_after = None
     u.created_at = datetime(2026, 1, 1, tzinfo=UTC)
     return u
 
