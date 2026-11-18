@@ -29,6 +29,70 @@ def _audio_seconds(meta: object) -> float | None:
     return None
 
 
+# Speed of the requests that are not measured in generated tokens, in the
+# unit of what they do. Each entry: request kinds, unit, how to read the work
+# of one row (from work_size_meta / tokens) and whether the value is work per
+# second (rate) or seconds per unit of work (cost).
+_WORK_SPEEDS: tuple[tuple[tuple[str, ...], str, str, bool], ...] = (
+    (("audio_transcription", "realtime_transcription"), "x_realtime", "audio_seconds", True),
+    (("tts", "realtime_tts", "music"), "x_realtime", "audio_seconds", True),
+    (("tts", "realtime_tts"), "chars_per_s", "text_chars", True),
+    (("embedding", "ollama_embedding"), "inputs_per_s", "n_inputs", True),
+    (("embedding", "ollama_embedding"), "tokens_per_s", "input_tokens", True),
+    (("rerank", "score", "classify", "pooling"), "documents_per_s", "n_documents", True),
+    (("image_generation",), "s_per_image", "n_images", False),
+    (("realtime_chat",), "tokens_per_s", "output_tokens", True),
+)
+
+
+def _work_amount(row: object, field: str) -> float:
+    if field in ("input_tokens", "output_tokens"):
+        return float(max(0, int(getattr(row, field, None) or 0)))
+    meta = getattr(row, "work_size_meta", None)
+    value = meta.get(field) if isinstance(meta, dict) else None
+    return float(value) if isinstance(value, (int, float)) and value > 0 else 0.0
+
+
+def work_speeds(rows: list) -> list[dict]:
+    """Speed per request kind in its own unit (see ``_WORK_SPEEDS``).
+
+    Over the rows of one model that succeeded and carry that work: total work
+    / total time (``x_realtime`` = seconds of audio per second of wall time),
+    or time per unit of work for ``s_per_image``. Before, the performance
+    table only had tokens per second: transcription, speech, embeddings,
+    rerank and images showed no speed at all.
+    """
+    out: list[dict] = []
+    for kinds, unit, field, rate in _WORK_SPEEDS:
+        work = 0.0
+        seconds = 0.0
+        samples = 0
+        for r in rows:
+            if (r.request_kind or "") not in kinds or r.error:
+                continue
+            if r.status_code is not None and r.status_code >= 400:
+                continue
+            amount = _work_amount(r, field)
+            ms = max(0, int(r.duration_ms or 0))
+            if amount <= 0 or ms <= 0:
+                continue
+            work += amount
+            seconds += ms / 1000.0
+            samples += 1
+        if not samples or seconds <= 0 or work <= 0:
+            continue
+        value = work / seconds if rate else seconds / work
+        out.append(
+            {
+                "kinds": [k for k in kinds if any((r.request_kind or "") == k for r in rows)],
+                "unit": unit,
+                "value": round(value, 2),
+                "samples": samples,
+            }
+        )
+    return out
+
+
 def _model_key_of_worker(worker_id: str) -> str:
     """``llamacpp_mks/gemma4:26b::0123456789ab`` → ``gemma4:26b``."""
     return _WORKER_HASH_RE.sub("", worker_id).split("/", 1)[-1]
@@ -561,6 +625,7 @@ async def get_performance_stats(
                 "requestsPerMinute": round(req_per_min, 2),
                 "tokensPerSecond": round(tokens_ps, 2),
                 "draftAcceptanceRate": draft_acceptance_rate,
+                "workSpeeds": work_speeds(model_rows),
                 "avgPredictedTokensPerSecond": avg_predicted_tps,
                 "avgPromptTokensPerSecond": avg_prompt_tps,
                 "totalInputTokens": int(sum(in_tokens)),
@@ -1648,9 +1713,7 @@ async def get_federation_stats(
             out["usdPer1kTokens"] = round(cost * 1000 / tokens, 5) if cost and tokens else None
         return out
 
-    outbound = sorted(
-        (_row(r, "out", r[1]) for r in outbound_rows), key=lambda x: -x["count"]
-    )
+    outbound = sorted((_row(r, "out", r[1]) for r in outbound_rows), key=lambda x: -x["count"])
     inbound = sorted((_row(r, "in") for r in inbound_rows), key=lambda x: -x["count"])
     return {
         "localCount": int(totals[0]),

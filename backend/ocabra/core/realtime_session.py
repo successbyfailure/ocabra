@@ -140,12 +140,33 @@ def _cosine(a: list[float], b: list[float]) -> float:
 # known filler on a short/low-confidence segment.
 _NO_SPEECH_DROP = 0.6
 _HALLUCINATION_PHRASES = {
-    "gracias", "muchas gracias", "gracias por ver el video", "gracias por ver",
-    "adios", "hasta luego", "hasta la proxima", "nos vemos", "chau",
-    "subtitulos realizados por la comunidad de amara org", "subtitulos por la comunidad de amara org",
-    "subtitulado por la comunidad de amara org", "amara org",
-    "thanks for watching", "thank you", "thank you for watching", "bye", "goodbye",
-    "you", "the", "si", "no", "a", "fue", "eh", "ah", "mmm",
+    "gracias",
+    "muchas gracias",
+    "gracias por ver el video",
+    "gracias por ver",
+    "adios",
+    "hasta luego",
+    "hasta la proxima",
+    "nos vemos",
+    "chau",
+    "subtitulos realizados por la comunidad de amara org",
+    "subtitulos por la comunidad de amara org",
+    "subtitulado por la comunidad de amara org",
+    "amara org",
+    "thanks for watching",
+    "thank you",
+    "thank you for watching",
+    "bye",
+    "goodbye",
+    "you",
+    "the",
+    "si",
+    "no",
+    "a",
+    "fue",
+    "eh",
+    "ah",
+    "mmm",
 }
 
 
@@ -176,6 +197,8 @@ def _prune_registry_store(now: float) -> None:
     stale = [k for k, v in _REGISTRY_STORE.items() if now - v.get("ts", 0.0) > _REGISTRY_TTL_S]
     for k in stale:
         _REGISTRY_STORE.pop(k, None)
+
+
 _CHANNELS = 1
 _SAMPLE_WIDTH = 2  # 16-bit
 
@@ -215,14 +238,16 @@ def _realtime_tools_to_chat_format(tools: list[dict[str, Any]]) -> list[dict[str
         if isinstance(tool.get("function"), dict):
             converted.append(tool)  # already chat-completions shaped
             continue
-        converted.append({
-            "type": tool.get("type", "function"),
-            "function": {
-                "name": tool.get("name"),
-                "description": tool.get("description", ""),
-                "parameters": tool.get("parameters", {}),
-            },
-        })
+        converted.append(
+            {
+                "type": tool.get("type", "function"),
+                "function": {
+                    "name": tool.get("name"),
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("parameters", {}),
+                },
+            }
+        )
     return converted
 
 
@@ -514,8 +539,14 @@ class RealtimeSession:
         error_message: str | None = None,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        work_size_meta: dict | None = None,
     ) -> None:
-        """Record a Realtime backend operation without disrupting the session."""
+        """Record a Realtime backend operation without disrupting the session.
+
+        ``work_size_meta``: the work done, in the unit of the operation
+        (``audio_seconds`` heard or spoken, ``text_chars`` spoken), so the
+        statistics can show a speed for it like for any other request.
+        """
         if self._request_recorder is None:
             return
         try:
@@ -529,6 +560,7 @@ class RealtimeSession:
                 error_message=error_message,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                work_size_meta=work_size_meta,
             )
         except Exception as exc:  # noqa: BLE001 - stats must not break Realtime
             logger.warning(
@@ -722,11 +754,7 @@ class RealtimeSession:
 
         # Phase 3: Load LLM + TTS (+ optional STT for native flow) in background
         stt_bg = stt_needed and will_use_native
-        need_bg = (
-            not self._llm_ready.is_set()
-            or not self._tts_ready.is_set()
-            or stt_bg
-        )
+        need_bg = not self._llm_ready.is_set() or not self._tts_ready.is_set() or stt_bg
         if need_bg:
             self._background_load_task = asyncio.create_task(
                 self._load_remaining_models(include_stt=stt_bg),
@@ -822,9 +850,7 @@ class RealtimeSession:
             logger.info("realtime_cold_start_loaded", model_id=key, role=role)
             return True
         except Exception as exc:
-            logger.warning(
-                "realtime_auto_load_failed", model_id=key, role=role, error=str(exc)
-            )
+            logger.warning("realtime_auto_load_failed", model_id=key, role=role, error=str(exc))
             await self._send_error(
                 f"Failed to load {role} model '{model_id}': {exc}", "model_load_error"
             )
@@ -1456,9 +1482,7 @@ class RealtimeSession:
             for wd in result["words"]:
                 if wd.get("speaker") is not None:
                     wd["speaker"] = _global(wd["speaker"])
-            result["speakers"] = sorted(
-                {g for s in result["speakers"] if (g := _global(s))}
-            )
+            result["speakers"] = sorted({g for s in result["speakers"] if (g := _global(s))})
             self._save_registry()
 
         def _abs(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1664,9 +1688,7 @@ class RealtimeSession:
             # open for Qwen2.5-Omni / GPT-4o-realtime style backends.
             tts_bypassed_by_native = await self._should_use_native_audio_output()
             tts_enabled = (
-                "audio" in self.modalities
-                and self.tts_model_id
-                and not tts_bypassed_by_native
+                "audio" in self.modalities and self.tts_model_id and not tts_bypassed_by_native
             )
 
             # Stream LLM response
@@ -1706,7 +1728,9 @@ class RealtimeSession:
                             if self._cancel_event.is_set():
                                 break
                             if tts_enabled:
-                                await self._synthesize_and_send(sentence, response_id, output_item_id)
+                                await self._synthesize_and_send(
+                                    sentence, response_id, output_item_id
+                                )
                                 audio_sent = True
                         sentence_buffer = sentences[-1]
 
@@ -1771,12 +1795,14 @@ class RealtimeSession:
                     self.conversation.append(
                         {"id": output_item_id, "role": "assistant", "content": full_text}
                     )
-                    output_items.append({
-                        "id": output_item_id,
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "audio", "transcript": full_text}],
-                    })
+                    output_items.append(
+                        {
+                            "id": output_item_id,
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "audio", "transcript": full_text}],
+                        }
+                    )
 
                 # Finalize any tool calls: tell the client, and persist an
                 # assistant message carrying tool_calls (standard OpenAI chat
@@ -1795,24 +1821,30 @@ class RealtimeSession:
                             name=acc["name"],
                             arguments=acc["arguments"],
                         )
-                        assistant_tool_calls.append({
-                            "id": acc["id"],
-                            "type": "function",
-                            "function": {"name": acc["name"], "arguments": acc["arguments"]},
-                        })
-                        output_items.append({
-                            "id": tool_call_item_ids[idx],
-                            "type": "function_call",
-                            "call_id": acc["id"],
-                            "name": acc["name"],
-                            "arguments": acc["arguments"],
-                        })
-                    self.conversation.append({
-                        "id": output_item_id,
-                        "role": "assistant",
-                        "content": full_text or None,
-                        "tool_calls": assistant_tool_calls,
-                    })
+                        assistant_tool_calls.append(
+                            {
+                                "id": acc["id"],
+                                "type": "function",
+                                "function": {"name": acc["name"], "arguments": acc["arguments"]},
+                            }
+                        )
+                        output_items.append(
+                            {
+                                "id": tool_call_item_ids[idx],
+                                "type": "function_call",
+                                "call_id": acc["id"],
+                                "name": acc["name"],
+                                "arguments": acc["arguments"],
+                            }
+                        )
+                    self.conversation.append(
+                        {
+                            "id": output_item_id,
+                            "role": "assistant",
+                            "content": full_text or None,
+                            "tool_calls": assistant_tool_calls,
+                        }
+                    )
 
                 # Send completion events
                 await self._send_event(
@@ -1873,9 +1905,7 @@ class RealtimeSession:
                 },
             )
 
-    async def _emit_parallel_user_transcript(
-        self, pcm_data: bytes, item_id: str
-    ) -> None:
+    async def _emit_parallel_user_transcript(self, pcm_data: bytes, item_id: str) -> None:
         """Run Whisper in parallel and emit a transcription event.
 
         Only fires when native-audio mode is active and
@@ -2009,6 +2039,7 @@ class RealtimeSession:
                 error_message=error_message,
                 input_tokens=0,
                 output_tokens=output_tokens,
+                work_size_meta={"audio_seconds": round(len(pcm_data) / 2 / _INPUT_SAMPLE_RATE, 3)},
             )
 
     async def _transcribe_verbose(self, pcm_data: bytes) -> dict[str, Any]:
@@ -2037,12 +2068,14 @@ class RealtimeSession:
                 resp = await client.post(
                     url,
                     files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-                    data=self._stt_data({
-                        "response_format": "verbose_json",
-                        "temperature": "0.0",
-                        "timestamp_granularities": ["segment", "word"],
-                        **({"diarize": "true"} if self._stt_diarize else {}),
-                    }),
+                    data=self._stt_data(
+                        {
+                            "response_format": "verbose_json",
+                            "temperature": "0.0",
+                            "timestamp_granularities": ["segment", "word"],
+                            **({"diarize": "true"} if self._stt_diarize else {}),
+                        }
+                    ),
                 )
                 resp.raise_for_status()
                 r = resp.json()
@@ -2090,6 +2123,7 @@ class RealtimeSession:
                 error_message=error_message,
                 input_tokens=0,
                 output_tokens=output_tokens,
+                work_size_meta={"audio_seconds": round(len(pcm_data) / 2 / _INPUT_SAMPLE_RATE, 3)},
             )
 
     async def _ensure_stt_worker(self):
@@ -2108,9 +2142,7 @@ class RealtimeSession:
                 continue
 
             worker = self._worker_pool.get_worker(self.stt_model_id)
-            if worker is not None and (
-                state is None or state.status == ModelStatus.LOADED
-            ):
+            if worker is not None and (state is None or state.status == ModelStatus.LOADED):
                 return worker
 
             try:
@@ -2181,8 +2213,7 @@ class RealtimeSession:
                     entry["exemplars"] = []
                 else:
                     entry["centroid"] = [
-                        (c * n + e2) / (n + 1)
-                        for c, e2 in zip(entry["centroid"], emb, strict=True)
+                        (c * n + e2) / (n + 1) for c, e2 in zip(entry["centroid"], emb, strict=True)
                     ]
                 entry["count"] = n + 1
                 entry["exemplars"].append(list(emb))
@@ -2291,12 +2322,15 @@ class RealtimeSession:
                     continue
                 # Skip partials that are just a known filler (Whisper silence
                 # hallucination) so the live preview doesn't flicker "Gracias/Adiós".
-                if self._suppress_hallucinations and _normalize_phrase(text) in _HALLUCINATION_PHRASES:
+                if (
+                    self._suppress_hallucinations
+                    and _normalize_phrase(text) in _HALLUCINATION_PHRASES
+                ):
                     continue
                 stable = _common_prefix(self._partial_prev_words, words)
                 self._partial_prev_words = words
                 if len(stable) > len(self._partial_emitted):
-                    delta_words = stable[len(self._partial_emitted):]
+                    delta_words = stable[len(self._partial_emitted) :]
                     self._partial_emitted = stable
                     await self._send_event(
                         "conversation.item.input_audio_transcription.delta",
@@ -2492,6 +2526,7 @@ class RealtimeSession:
         started_monotonic = time.monotonic()
         status_code = 200
         error_message: str | None = None
+        spoken_s: float | None = None
         try:
             # Wait for TTS to be ready (may still be loading)
             if not self._tts_ready.is_set():
@@ -2532,9 +2567,9 @@ class RealtimeSession:
                 pcm, src_rate = audio_bytes, _SAMPLE_RATE
             else:
                 pcm, src_rate = parsed
-            encoder = OutputAudioEncoder(
-                self.output_audio_format, self.output_audio_rate, src_rate
-            )
+            encoder = OutputAudioEncoder(self.output_audio_format, self.output_audio_rate, src_rate)
+            if src_rate:
+                spoken_s = round(len(pcm) / 2 / src_rate, 3)
             audio_bytes = encoder.feed(pcm)
 
             # Send audio in chunks to avoid oversized WebSocket frames (~0.5 s)
@@ -2580,6 +2615,10 @@ class RealtimeSession:
                 error_message=error_message,
                 input_tokens=len(text.split()),
                 output_tokens=0,
+                work_size_meta={
+                    "text_chars": len(text),
+                    **({"audio_seconds": spoken_s} if spoken_s else {}),
+                },
             )
 
     # ── Message helpers ─────────────────────────────────────────────────
@@ -2602,7 +2641,9 @@ class RealtimeSession:
         if instructions:
             messages.append({"role": "system", "content": instructions})
 
-        messages.extend({k: v for k, v in entry.items() if k != "id"} for entry in self.conversation)
+        messages.extend(
+            {k: v for k, v in entry.items() if k != "id"} for entry in self.conversation
+        )
         return messages
 
     def _generation_defaults(self) -> dict[str, Any]:

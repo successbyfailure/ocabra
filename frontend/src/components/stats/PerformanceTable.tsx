@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import type { PerformanceStats } from "@/types"
+import type { PerformanceStats, WorkSpeed } from "@/types"
 
 type SortKey =
   | "modelId"
@@ -108,6 +108,7 @@ export function PerformanceTable({ data }: PerformanceTableProps) {
               <th className="px-2 py-2"><button type="button" onClick={() => setSort("lastLoadMs")}>Load last</button></th>
               <th className="px-2 py-2"><button type="button" onClick={() => setSort("requestsPerMinute")}>Req/min</button></th>
               <th className="px-2 py-2"><button type="button" onClick={() => setSort("tokensPerSecond")}>Tokens/s</button></th>
+              <th className="px-2 py-2" title="Para lo que no genera texto: audio transcrito o hablado por segundo, caracteres, textos, documentos o imágenes">Velocidad</th>
               <th className="px-2 py-2">Tok in/out</th>
               <th className="px-2 py-2"><button type="button" onClick={() => setSort("errorCount")}>Err</button></th>
               <th className="px-2 py-2"><button type="button" onClick={() => setSort("uptimePct")}>Uptime</button></th>
@@ -126,6 +127,15 @@ export function PerformanceTable({ data }: PerformanceTableProps) {
                 <td className="px-2 py-2">{row.loadCount > 0 ? row.lastLoadMs.toFixed(0) : "-"}</td>
                 <td className="px-2 py-2">{row.requestsPerMinute.toFixed(2)}</td>
                 <td className="px-2 py-2">{row.tokensPerSecond.toFixed(2)}</td>
+                <td className="px-2 py-2" data-testid="work-speed">
+                  {row.workSpeeds?.length
+                    ? row.workSpeeds.map((w) => (
+                        <span key={w.unit + w.kinds.join()} className="mr-2 whitespace-nowrap" title={`${w.kinds.join(", ")} · ${w.samples} peticiones`}>
+                          {fmtWorkSpeed(w)}
+                        </span>
+                      ))
+                    : "-"}
+                </td>
                 <td className="px-2 py-2">{row.totalInputTokens}/{row.totalOutputTokens}</td>
                 <td className="px-2 py-2">{row.errorCount}</td>
                 <td className="px-2 py-2">{row.uptimePct.toFixed(1)}%</td>
@@ -136,4 +146,17 @@ export function PerformanceTable({ data }: PerformanceTableProps) {
       </div>
     </div>
   )
+}
+
+const WORK_UNIT: Record<string, (v: number) => string> = {
+  x_realtime: (v) => `×${v.toFixed(1)} tiempo real`,
+  chars_per_s: (v) => `${v.toFixed(0)} car/s`,
+  inputs_per_s: (v) => `${v.toFixed(1)} textos/s`,
+  tokens_per_s: (v) => `${v.toFixed(0)} tok/s`,
+  documents_per_s: (v) => `${v.toFixed(1)} docs/s`,
+  s_per_image: (v) => `${v.toFixed(1)} s/imagen`,
+}
+
+export function fmtWorkSpeed(w: WorkSpeed): string {
+  return (WORK_UNIT[w.unit] ?? ((v: number) => `${v} ${w.unit}`))(w.value)
 }

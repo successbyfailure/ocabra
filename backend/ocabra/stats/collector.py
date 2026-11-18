@@ -7,6 +7,7 @@ Tracks OpenAI-compatible `/v1/*` and Ollama-compatible inference routes under
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -77,6 +78,10 @@ def _classify_request_kind(path: str) -> str:
     mapping = {
         "/v1/chat/completions": "chat",
         "/v1/completions": "completion",
+        # Responses API: text generation with the same usage block
+        # (input_tokens/output_tokens); it was recorded as "other".
+        "/v1/responses": "responses",
+        "/v1/audio/generate": "music",
         "/v1/embeddings": "embedding",
         "/v1/images/generations": "image_generation",
         "/v1/images/edits": "image_generation",
@@ -126,9 +131,46 @@ def _extract_work_size_meta(
         response_payload = None
 
     if request_kind == "tts":
-        text = request_payload.get("input") if request_payload else None
+        meta: dict[str, float] = {}
+        text = None
+        if request_payload:
+            # OpenAI's field is ``input``; some clients send ``text``.
+            text = request_payload.get("input") or request_payload.get("text")
         if isinstance(text, str) and text:
-            return {"text_chars": len(text)}
+            meta["text_chars"] = len(text)
+        audio_s = (response_payload or {}).get("audio_seconds")
+        if isinstance(audio_s, (int, float)) and audio_s > 0:
+            meta["audio_seconds"] = float(audio_s)
+        return meta or None
+
+    if request_kind == "music":
+        # ACE-Step: the target length of the piece. (This used to sit after
+        # the TTS branch, which always returned first.)
+        if request_payload:
+            dur = request_payload.get("duration_seconds") or request_payload.get("duration")
+            if isinstance(dur, (int, float)) and dur > 0:
+                return {"duration_seconds": float(dur)}
+        return None
+
+    if request_kind in ("embedding", "ollama_embedding"):
+        if request_payload is None:
+            return None
+        items = request_payload.get("input")
+        if items is None:
+            items = request_payload.get("prompt")
+        if isinstance(items, list):
+            return {"n_inputs": len(items)} if items else None
+        return {"n_inputs": 1} if items else None
+
+    if request_kind in ("rerank", "score", "classify", "pooling"):
+        if request_payload is None:
+            return None
+        for key in ("documents", "texts", "text_2", "input"):
+            items = request_payload.get(key)
+            if isinstance(items, list) and items:
+                return {"n_documents": len(items)}
+            if isinstance(items, str) and items:
+                return {"n_documents": 1}
         return None
 
     if request_kind == "image_generation":
@@ -151,13 +193,19 @@ def _extract_work_size_meta(
             v = request_payload.get(k)
             if isinstance(v, (int, float)) and v > 0:
                 meta[dest] = int(v)
+        data = (response_payload or {}).get("data")
+        if isinstance(data, list) and data:
+            meta["n_images"] = len(data)
+        else:
+            n = request_payload.get("n")
+            meta["n_images"] = int(n) if isinstance(n, (int, float)) and n > 0 else 1
         return meta or None
 
     if request_kind == "audio_transcription":
         # Whisper surfaces ``duration`` (seconds of decoded audio) on the
         # verbose_json response. Faster-whisper and Nvidia backends do the
-        # same. When absent, we leave it blank; a follow-up server-side
-        # probe would be more effort than it's worth for now.
+        # same. When absent, the worker's X-Audio-Duration header fills it
+        # in (see the caller).
         if response_payload is None:
             return None
         for k in ("duration", "audio_seconds"):
@@ -165,16 +213,6 @@ def _extract_work_size_meta(
             if isinstance(v, (int, float)) and v > 0:
                 return {"audio_seconds": float(v)}
         return None
-
-    # ACE-Step music generation lands under the openai /v1/audio/speech
-    # path with a ``duration_seconds`` field; other TTS callers only care
-    # about text_chars (above).
-    if request_kind == "tts" and request_payload:
-        dur = request_payload.get("duration_seconds") or request_payload.get("duration")
-        if isinstance(dur, (int, float)) and dur > 0:
-            return {"duration_seconds": float(dur)}
-
-    return None
 
 
 def _apply_token_kind_defaults(
@@ -211,7 +249,7 @@ def _apply_token_kind_defaults(
 
 # Kinds that generate text output (so a stream/content fallback makes sense when
 # the backend doesn't return a usage payload).
-_TEXT_GEN_KINDS = {"chat", "completion", "ollama_chat", "ollama_generate"}
+_TEXT_GEN_KINDS = {"chat", "completion", "ollama_chat", "ollama_generate", "responses"}
 
 
 def _count_input_tokens(request_payload: dict | None, request_kind: str) -> int | None:
@@ -1168,6 +1206,11 @@ class StatsMiddleware(BaseHTTPMiddleware):
                                 prompt_tokens_per_second=prompt_tps,
                                 work_size_meta=work_size_meta,
                                 via_router_profile_id=via_router_profile_id,
+                                output_audio=(
+                                    (all_body, content_type)
+                                    if request_kind in _AUDIO_KINDS and recorded_status < 400
+                                    else None
+                                ),
                             )
                         )
 
@@ -1254,6 +1297,14 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     prompt_tokens_per_second=prompt_tps,
                     work_size_meta=work_size_meta,
                     via_router_profile_id=via_router,
+                    output_audio=(
+                        (
+                            getattr(response, "body", b"") or b"",
+                            response.headers.get("content-type", ""),
+                        )
+                        if request_kind in _AUDIO_KINDS and response.status_code < 400
+                        else None
+                    ),
                 )
             )
 
@@ -1545,6 +1596,57 @@ async def _extract_response_payload_and_rebuild(response: Response) -> tuple[dic
     return None, response
 
 
+_AUDIO_KINDS = {"tts", "music"}
+
+
+async def _audio_duration_s(body: bytes, content_type: str) -> float | None:
+    """Seconds of audio in a generated response body, or None.
+
+    WAV from its header, raw PCM (24 kHz mono 16-bit, the OpenAI speech
+    default) from its size, anything else (mp3, opus, aac, flac) with
+    ffprobe — a TTS response is a few hundred KB, and this runs after the
+    response was sent.
+    """
+    if not body:
+        return None
+    ctype = (content_type or "").split(";")[0].strip().lower()
+    if body[:4] == b"RIFF" and body[8:12] == b"WAVE":
+        import struct
+
+        try:
+            byte_rate = struct.unpack("<I", body[28:32])[0]
+            data_at = body.find(b"data", 12)
+            if byte_rate > 0 and data_at > 0:
+                declared = struct.unpack("<I", body[data_at + 4 : data_at + 8])[0]
+                size = len(body) - (data_at + 8)
+                # A streamed WAV declares a placeholder size: trust the bytes.
+                frames = size if declared in (0, 0xFFFFFFFF) or declared > size else declared
+                return round(frames / byte_rate, 3)
+        except struct.error:
+            return None
+    if ctype in ("audio/pcm", "audio/l16"):
+        return round(len(body) / (24000 * 2), 3)
+    if not ctype.startswith("audio/"):
+        return None
+    import shutil
+
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", "-i", "pipe:0",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )  # fmt: skip
+        out, _ = await asyncio.wait_for(proc.communicate(body), timeout=5)
+        value = float(out.decode().strip() or 0)
+        return round(value, 3) if value > 0 else None
+    except (TimeoutError, ValueError, OSError):
+        return None
+
+
 async def _record_stat(
     request: Request,
     model_id: str,
@@ -1566,10 +1668,20 @@ async def _record_stat(
     draft_n_accepted: int | None = None,
     predicted_tokens_per_second: float | None = None,
     prompt_tokens_per_second: float | None = None,
+    output_audio: tuple[bytes, str] | None = None,
 ) -> None:
-    """Write a RequestStat row to the database and update Prometheus counters."""
+    """Write a RequestStat row to the database and update Prometheus counters.
+
+    ``output_audio``: the generated audio (body, content type) of a TTS or
+    music request, whose length goes into ``work_size_meta.audio_seconds``.
+    """
     try:
+        if output_audio is not None:
+            seconds = await _audio_duration_s(*output_audio)
+            if seconds:
+                work_size_meta = {**(work_size_meta or {}), "audio_seconds": seconds}
         gpu_index: int | None = None
+        serving_gpus: list[int] = []
         backend_type: str | None = None
         energy_wh: float | None = None
         # ``model_id`` of the row is the logical model (``models.model_key``),
@@ -1597,8 +1709,20 @@ async def _record_stat(
                 backend_type = state.backend_type
                 if getattr(state, "model_key", None):
                     stat_model_id = state.model_key
-                if state.current_gpu:
-                    gpu_index = state.current_gpu[0]
+                # The worker that served it: a preset's worker
+                # (``<model>::<hash>``) holds the GPUs, not the base model,
+                # which is usually not loaded at all — 86 % of the chat rows
+                # had no GPU and therefore no energy (2026-11-18).
+                worker_key = getattr(request.state, "runtime_worker_key", None) or getattr(
+                    request.state, "inflight_model_id", None
+                )
+                worker_state = await mm.get_state(worker_key) if worker_key else None
+                if worker_state is not None and worker_state.current_gpu:
+                    serving_gpus = list(worker_state.current_gpu)
+                elif state.current_gpu:
+                    serving_gpus = list(state.current_gpu)
+                if serving_gpus:
+                    gpu_index = serving_gpus[0]
                 elif backend_type == "ollama":
                     # Ollama manages its own GPU assignment; use preferred_gpu or the
                     # system default so energy estimates are at least approximated.
@@ -1610,13 +1734,19 @@ async def _record_stat(
         except Exception:
             pass
 
-        # Estimate energy from current GPU power draw × request duration.
+        # Estimate energy from the power draw of the GPUs that served it ×
+        # its duration (every GPU of a split model, not only the first). It is
+        # the whole card's draw: concurrent requests on it each count it.
         if gpu_index is not None:
             try:
                 gm = request.app.state.gpu_manager
-                gpu_state = gm._states.get(gpu_index)
-                if gpu_state and gpu_state.power_draw_w > 0:
-                    energy_wh = gpu_state.power_draw_w * duration_ms / 1000.0 / 3600.0
+                watts = 0.0
+                for index in serving_gpus or [gpu_index]:
+                    gpu_state = gm._states.get(index)
+                    if gpu_state and gpu_state.power_draw_w > 0:
+                        watts += float(gpu_state.power_draw_w)
+                if watts > 0:
+                    energy_wh = watts * duration_ms / 1000.0 / 3600.0
             except Exception:
                 pass
 
@@ -1844,6 +1974,7 @@ async def record_realtime_request(
     error_message: str | None = None,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
+    work_size_meta: dict | None = None,
 ) -> None:
     """Persist one Realtime session/backend operation and emit its audit log.
 
@@ -1862,6 +1993,7 @@ async def record_realtime_request(
         request_kind=request_kind,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        work_size_meta=work_size_meta,
     )
 
     state = getattr(websocket, "state", None)

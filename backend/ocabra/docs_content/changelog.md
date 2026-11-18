@@ -16,6 +16,34 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.110.0 — 2026-11-18
+
+### Nuevo
+
+- `GET /ocabra/stats/performance`: cada modelo trae `workSpeeds`, la velocidad
+  de lo que no se mide en tokens generados, en su unidad: transcripción y voz
+  en «×tiempo real» (segundos de audio por segundo), TTS también en caracteres
+  por segundo, embeddings en textos y tokens por segundo, rerank/score/classify
+  en documentos por segundo, imágenes en segundos por imagen y el chat de
+  `/v1/realtime` en tokens por segundo.
+- Las estadísticas de cada petición guardan el trabajo hecho en
+  `work_size_meta`: número de textos (embeddings), de documentos (rerank y
+  afines) y de imágenes, segundos de audio generados (TTS, música) y, en
+  `/v1/realtime`, los segundos de audio transcritos y hablados.
+
+### Corregido
+
+- La energía de cada petición faltaba en la gran mayoría de las que sirve un
+  peldaño (el 86 % de los chats): se buscaba la GPU en el modelo base, que no
+  está cargado. Ahora sale de las GPUs del worker que la sirvió, todas si el
+  modelo está repartido.
+- `/v1/responses` y `/v1/audio/generate` se registraban como tipo `other`;
+  ahora son `responses` (con sus tokens) y `music`. La duración pedida de una
+  pieza de música no se guardaba nunca.
+- TTS: el texto enviado como `text` en lugar de `input` no contaba caracteres.
+
+---
+
 ## 0.109.0 — 2026-11-18
 
 ### Cambiado

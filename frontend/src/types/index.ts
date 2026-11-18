@@ -1015,6 +1015,13 @@ export interface EnergyStats {
   totalServerKwh?: number;
 }
 
+export interface WorkSpeed {
+  kinds: string[];
+  unit: "x_realtime" | "chars_per_s" | "inputs_per_s" | "tokens_per_s" | "documents_per_s" | "s_per_image" | string;
+  value: number;
+  samples: number;
+}
+
 export interface PerformanceStats {
   byModel: {
     modelId: string;
@@ -1025,6 +1032,9 @@ export interface PerformanceStats {
     p95LatencyMs: number;
     requestsPerMinute: number;
     tokensPerSecond: number;
+    /** Velocidad de lo que no se mide en tokens generados, en su unidad
+     *  (×tiempo real, caracteres/s, documentos/s, s por imagen…). */
+    workSpeeds?: WorkSpeed[];
     totalInputTokens: number;
     totalOutputTokens: number;
     tokenizedRequests: number;
