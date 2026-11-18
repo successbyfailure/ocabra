@@ -553,3 +553,17 @@ async def test_sin_modelo_silero_no_se_pide_vad_y_se_avisa_una_vez(tmp_path: Pat
     assert backend._processes["m"].vad_available is False
     events = [c.args[0] for c in warning.call_args_list]
     assert events.count("whispercpp_vad_unavailable") == 1
+
+
+@pytest.mark.asyncio
+async def test_los_wav_de_ffmpeg_van_a_un_directorio_escribible(tmp_path: Path) -> None:
+    """``--convert`` escribía en ".", el cwd del worker (/app), que no se puede
+    escribir desde que la api corre como uid 1000: toda transcripción fallaba
+    con "FFmpeg conversion failed"."""
+    import os
+    import tempfile
+
+    args, _backend = await _args_con_modelos(tmp_path)
+    tmp_dir = args[args.index("--tmp-dir") + 1]
+    assert tmp_dir == tempfile.gettempdir()
+    assert os.access(tmp_dir, os.W_OK)

@@ -23,6 +23,7 @@ import json
 import os
 import signal
 import socket
+import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -442,6 +443,12 @@ class WhisperCppBackend(BackendInterface):
             str(threads),
             "--no-gpu",
             "--convert",
+            # Where ``--convert`` writes ffmpeg's WAV. The default is ".", the
+            # worker's cwd (/app): not writable since the api runs as uid 1000
+            # (v0.106.2), so every transcription failed with "FFmpeg
+            # conversion failed" (found 2026-11-18 testing VAD).
+            "--tmp-dir",
+            tempfile.gettempdir(),
             # ``whisper-server`` defaults this to "en", and with an "en" target
             # Whisper *translates* what it hears instead of transcribing it: a
             # Spanish clip comes back in English, every word counted as an

@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.113.1 — 2026-11-18
+
+### Corregido
+
+- **Las transcripciones con whisper.cpp fallaban todas** con `500` «FFmpeg
+  conversion failed» desde la 0.106.2. Es el motor por CPU al que recurre
+  `recomendado-stt` cuando las tarjetas están ocupadas, y también el de los
+  modelos `-cpu`. whisper.cpp dejaba el audio convertido en una carpeta en la
+  que el servidor ya no puede escribir. Ahora usa la carpeta temporal.
+- **whisper.cpp tiene VAD.** Está instalado el modelo Silero v6.2.0, así que
+  `vad_filter` funciona y viene activado por defecto, igual que en
+  faster-whisper: los tramos sin voz se descartan antes de transcribir. Manda
+  `vad_filter=false` para desactivarlo.
+
+---
+
 ## 0.113.0 — 2026-11-18
 
 ### Corregido
