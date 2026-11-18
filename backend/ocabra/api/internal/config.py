@@ -267,11 +267,14 @@ class ServerConfigPatch(BaseModel):
         ge=0.0,
         le=1.0,
     )
+    # Retired: nothing ever read it (the router picks a target in one pass).
+    # Still accepted, and ignored, so a client or an old tab that sends it
+    # doesn't get a 422 from extra="forbid".
     router_fallback_delay_ms: int | None = Field(
         default=None,
         alias="routerFallbackDelayMs",
-        description="How long the router waits on a busy-but-nearly-free target before falling through to the next one, in milliseconds.",
-        ge=0,
+        description="Deprecated and ignored: it never had any effect.",
+        deprecated=True,
     )
     max_drain_timeout_s: int | None = Field(
         default=None,
@@ -391,7 +394,6 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "generationGpuUtilThresholdPct": settings.generation_gpu_util_threshold_pct,
         "routingEnabled": settings.routing_enabled,
         "routerConfidenceFloor": settings.router_confidence_floor,
-        "routerFallbackDelayMs": settings.router_fallback_delay_ms,
         "maxDrainTimeoutS": settings.max_drain_timeout_s,
         "sessionPauseThresholdS": settings.session_pause_threshold_s,
         "sessionMaxIdleS": settings.session_max_idle_s,
@@ -816,9 +818,6 @@ async def patch_config(
     if "router_confidence_floor" in payload:
         settings.router_confidence_floor = float(payload["router_confidence_floor"])
         await _persist("router_confidence_floor", settings.router_confidence_floor)
-    if "router_fallback_delay_ms" in payload:
-        settings.router_fallback_delay_ms = int(payload["router_fallback_delay_ms"])
-        await _persist("router_fallback_delay_ms", settings.router_fallback_delay_ms)
     if "max_drain_timeout_s" in payload:
         settings.max_drain_timeout_s = int(payload["max_drain_timeout_s"])
         await _persist("max_drain_timeout_s", settings.max_drain_timeout_s)

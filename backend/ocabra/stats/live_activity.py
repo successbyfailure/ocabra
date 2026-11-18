@@ -528,7 +528,7 @@ async def model_context(
         return None
     paged_usage_pct = await vllm_kv_usage_pct(worker_port) if mode == "paged" else None
 
-    from ocabra.core.model_manager_helpers import resolve_llama_cpp_option
+    from ocabra.core.model_manager_helpers import resolve_llama_cpp_option, resolve_worker_slots
     from ocabra.core.runtime_preset_capacity import runtime_capacity_cache
 
     meta = runtime_meta or {}
@@ -591,7 +591,8 @@ async def model_context(
                 "presetKey": meta.get("preset_key"),
                 "gpus": active_gpus,
                 "maxTokens": nominal_tokens or active_tokens,
-                "slots": meta.get("parallelism"),
+                # Same source as admission and the gate (not just presets').
+                "slots": resolve_worker_slots(state),
             }
         ]
 

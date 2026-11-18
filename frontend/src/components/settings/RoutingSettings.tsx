@@ -18,7 +18,6 @@ interface Props {
 export function RoutingSettings({ config, onSave }: Props) {
   const [routingEnabled, setRoutingEnabled] = useState<boolean>(config.routingEnabled ?? true)
   const [confidence, setConfidence] = useState<number>(config.routerConfidenceFloor ?? 0.3)
-  const [fallbackMs, setFallbackMs] = useState<number>(config.routerFallbackDelayMs ?? 200)
   const [drainCap, setDrainCap] = useState<number>(config.maxDrainTimeoutS ?? 900)
   const [pauseS, setPauseS] = useState<number>(config.sessionPauseThresholdS ?? 120)
   const [idleS, setIdleS] = useState<number>(config.sessionMaxIdleS ?? 900)
@@ -27,7 +26,6 @@ export function RoutingSettings({ config, onSave }: Props) {
   useEffect(() => {
     setRoutingEnabled(config.routingEnabled ?? true)
     setConfidence(config.routerConfidenceFloor ?? 0.3)
-    setFallbackMs(config.routerFallbackDelayMs ?? 200)
     setDrainCap(config.maxDrainTimeoutS ?? 900)
     setPauseS(config.sessionPauseThresholdS ?? 120)
     setIdleS(config.sessionMaxIdleS ?? 900)
@@ -39,7 +37,6 @@ export function RoutingSettings({ config, onSave }: Props) {
       await onSave({
         routingEnabled,
         routerConfidenceFloor: confidence,
-        routerFallbackDelayMs: fallbackMs,
         maxDrainTimeoutS: drainCap,
         sessionPauseThresholdS: pauseS,
         sessionMaxIdleS: idleS,
@@ -106,20 +103,6 @@ export function RoutingSettings({ config, onSave }: Props) {
             <p className="mt-1 text-[10px] text-muted-foreground">
               Confianza del estimador necesaria para creer que un target "estará libre
               pronto" y esperar en vez de saltar al siguiente.
-            </p>
-          </div>
-
-          <div>
-            <label className="mb-1 block text-sm font-medium">Delay antes de fallback (ms)</label>
-            <input
-              type="number"
-              min={0}
-              value={fallbackMs}
-              onChange={(e) => setFallbackMs(Number(e.target.value))}
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-            />
-            <p className="mt-1 text-[10px] text-muted-foreground">
-              Cuánto espera el router en un target ocupado antes de degradar al siguiente.
             </p>
           </div>
 

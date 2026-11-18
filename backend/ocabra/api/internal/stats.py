@@ -241,19 +241,19 @@ async def recent_requests(
         # últimas esperan en la cola interna del llama-server. Posición y
         # estimación de espera se calculan aquí para que el UI pueda pintar
         # "procesando" vs "N en cola · ~Xs" sin reimplementar la lógica.
+        # Slots: the same resolve_worker_slots() admission and the fair-share
+        # gate use. Reading only ``_runtime.parallelism`` (written only by
+        # presets) showed every llama.cpp model without presets as 1 slot:
+        # 3 of 4 requests being processed appeared as "queued".
+        from ocabra.core.model_manager_helpers import resolve_worker_slots
+
         all_states = await mm.list_states(include_derived=True)
         slots_by_canonical: dict[str, int] = {}
         for state in all_states:
-            model_id = state.model_id
-            canonical = mm._canonical_runtime_model_id(model_id)
-            meta = state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
-            if isinstance(meta, dict):
-                try:
-                    p = int(meta.get("parallelism") or 0)
-                except (TypeError, ValueError):
-                    p = 0
-                if p > 0:
-                    slots_by_canonical[canonical] = max(slots_by_canonical.get(canonical, 0), p)
+            canonical = mm._canonical_runtime_model_id(state.model_id)
+            p = resolve_worker_slots(state) or 0
+            if p > 0:
+                slots_by_canonical[canonical] = max(slots_by_canonical.get(canonical, 0), p)
         # Agrupa índices por canonical (los más viejos primero → procesando).
         grouped: dict[str, list[int]] = {}
         for idx, row in enumerate(in_flight_rows):

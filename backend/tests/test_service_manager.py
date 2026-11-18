@@ -477,3 +477,81 @@ async def test_set_enabled_stops_running_container_even_if_service_not_marked_al
     await manager.set_enabled("a1111", enabled=False)
 
     assert stop_calls == ["a1111"]
+
+
+@pytest.mark.asyncio
+async def test_slow_unload_of_one_service_does_not_block_another(monkeypatch) -> None:
+    """BUG-34: one lock for every service, held across the unload's HTTP call,
+    made a stuck service (here comfyui, whose /free never answers) block the
+    unload of any other — including the pressure eviction the model load gate
+    runs. Locks are per service now."""
+    import asyncio
+
+    async def fake_publish(channel: str, data: dict) -> None:
+        _ = channel, data
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    stuck = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def fake_request(self, method: str, url: str, **kwargs):
+        if url.endswith("/free"):
+            entered.set()
+            await stuck.wait()
+        return httpx.Response(200, json={"ok": True}, request=httpx.Request(method, url))
+
+    async def fake_post(self, url: str, *args, **kwargs):
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    manager = ServiceManager()
+    for sid in ("comfyui", "a1111"):
+        st = await manager.get_state(sid)
+        st.enabled = True
+        st.service_alive = True
+        st.runtime_loaded = True
+        st.is_generating = False
+
+    slow = asyncio.create_task(manager.unload("comfyui", reason="pressure"))
+    await asyncio.wait_for(entered.wait(), 1)
+    try:
+        other = await asyncio.wait_for(manager.unload("a1111", reason="pressure"), 1)
+        assert other.runtime_loaded is False
+    finally:
+        stuck.set()
+        await slow
+    assert (await manager.get_state("comfyui")).runtime_loaded is False
+
+
+@pytest.mark.asyncio
+async def test_failed_unload_still_publishes_and_raises(monkeypatch) -> None:
+    published: list[str] = []
+
+    async def fake_publish(channel: str, data: dict) -> None:
+        published.append(channel)
+
+    async def fake_set_key(key: str, data: dict, ttl: int | None = None) -> None:
+        _ = key, data, ttl
+
+    async def fake_request(self, method: str, url: str, **kwargs):
+        return httpx.Response(500, request=httpx.Request(method, url))
+
+    monkeypatch.setattr("ocabra.core.service_manager.publish", fake_publish)
+    monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+
+    manager = ServiceManager()
+    st = await manager.get_state("comfyui")
+    st.enabled = True
+    st.service_alive = True
+    st.runtime_loaded = True
+    with pytest.raises(httpx.HTTPStatusError):
+        await manager.unload("comfyui", reason="manual")
+    assert st.runtime_loaded is True
+    assert published

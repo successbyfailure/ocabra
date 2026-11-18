@@ -520,12 +520,19 @@ _VLLM_KV_DTYPE_BYTES: dict[str, float] = {
 
 
 def _resolve_vllm_option(state, key: str, default=None):
+    """Read a vLLM option the way the backend does: ``extra_config["vllm"]``
+    first, then the top level, each in snake_case or camelCase (the UI saves
+    camelCase). Reading only snake_case made the estimator return 0 for
+    ``maxModelLen`` models and fall back to the weights-only heuristic."""
     extra = state.extra_config if isinstance(state.extra_config, dict) else {}
+    camel_key = "".join(
+        part.capitalize() if index else part for index, part in enumerate(key.split("_"))
+    )
     nested = extra.get("vllm") if isinstance(extra.get("vllm"), dict) else None
-    if nested and key in nested:
-        return nested[key]
-    if key in extra:
-        return extra[key]
+    for source in (nested or {}, extra):
+        for candidate in (key, camel_key):
+            if candidate in source:
+                return source[candidate]
     return default
 
 

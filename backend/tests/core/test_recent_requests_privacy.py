@@ -78,3 +78,42 @@ async def test_in_flight_rows_say_what_kind_of_request_is_running(monkeypatch):
     [row] = [r for r in result["requests"] if r.get("inFlight")]
     assert row["requestKind"] == "chat"
     assert row["username"] == "ana"
+
+
+@pytest.mark.asyncio
+async def test_in_flight_queue_uses_the_real_slot_count(monkeypatch):
+    """BUG-31: the queue split read only ``_runtime.parallelism`` (presets).
+    A llama.cpp model with ``parallel_slots: 4`` and no presets counted as one
+    slot, so three of the four requests being processed showed as queued."""
+    import time
+
+    from ocabra.core.model_manager import ActiveRequest
+
+    async def fake_recent(limit):
+        return {"requests": []}
+
+    monkeypatch.setattr("ocabra.stats.aggregator.get_recent_requests", fake_recent)
+    now = time.time()
+    active = [
+        ActiveRequest(request_id=f"r{i}", model_id="llamacpp_mks/m", started_at=now - 10 + i)
+        for i in range(5)
+    ]
+    state = SimpleNamespace(
+        model_id="llamacpp_mks/m",
+        backend_type="llamacpp_mks",
+        extra_config={"llama_cpp": {"parallel_slots": 4}},
+    )
+
+    async def list_states(include_derived=False):
+        return [state]
+
+    mm = SimpleNamespace(
+        active_requests_snapshot=lambda: active,
+        list_states=list_states,
+        _canonical_runtime_model_id=lambda mid: mid,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=mm)))
+    result = await stats_api.recent_requests(request, limit=20, user=_user("system_admin"))
+    rows = [r for r in result["requests"] if r.get("inFlight")]
+    assert {r["slots"] for r in rows} == {4}
+    assert sum(1 for r in rows if r["queued"]) == 1

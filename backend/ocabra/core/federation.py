@@ -886,7 +886,11 @@ class FederationManager:
         if peer.connection_mode == "tunnel_in" and self.join_service is not None:
             await self.join_service.on_tunnel_in_connected(peer)
         # Don't wait up to a heartbeat interval to start routing to it.
-        asyncio.create_task(self._poll_peer(peer), name=f"federation-tunnel-poll-{peer.name}")
+        # spawn keeps a strong reference (a bare create_task could be collected
+        # mid-flight) and logs a failure instead of losing it.
+        from ocabra.core.background_tasks import spawn
+
+        spawn(self._poll_peer(peer), name=f"federation-tunnel-poll-{peer.name}")
 
     def detach_tunnel(self, peer: PeerState, session: Any) -> None:
         """Forget *session* if it is still the peer's live tunnel."""

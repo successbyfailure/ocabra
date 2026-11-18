@@ -301,6 +301,20 @@ async def test_context_without_presets_is_single_tier_from_ctx_size():
     assert ctx["scaleMaxTokens"] == ctx["singleGpuMaxTokens"] == 262144
 
 
+@pytest.mark.asyncio
+async def test_context_without_presets_reports_configured_slots():
+    """BUG-31: the single tier reported only ``_runtime.parallelism`` (written
+    by presets), so a llama.cpp model with ``parallel_slots`` and no presets
+    showed no slots while admission and the gate used 4. Same source now."""
+    state = _state(
+        extra={"llama_cpp": {"kv_unified": True, "ctx_size": 262144, "parallel_slots": 4}}
+    )
+    ctx = await la.model_context(
+        state, runtime_meta=None, gate=None, request_details=[], profiles=[], gpu_states=[]
+    )
+    assert [t["slots"] for t in ctx["tiers"]] == [4]
+
+
 # ── Deudas cerradas el 2026-11-09 ──────────────────────────────────────────
 
 

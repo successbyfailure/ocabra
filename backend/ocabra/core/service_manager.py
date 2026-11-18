@@ -225,7 +225,18 @@ class ServiceManager:
                 idle_action="stop",
             ),
         }
-        self._lock = asyncio.Lock()
+        # One lock per service, created on first use. A single lock for every
+        # service, held across the unload's HTTP call / container stop, let one
+        # slow service (30 s REST timeout, a container that takes long to stop)
+        # block the unload of any other — including the pressure eviction the
+        # model load gate runs, so a model load waited on an unrelated service.
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, service_id: str) -> asyncio.Lock:
+        lock = self._locks.get(service_id)
+        if lock is None:
+            lock = self._locks[service_id] = asyncio.Lock()
+        return lock
 
     def set_gpu_manager(self, gpu_manager: GPUManager) -> None:
         self._gpu_manager = gpu_manager
@@ -680,7 +691,7 @@ class ServiceManager:
         if not state.unload_path:
             if not state.docker_container_name:
                 raise RuntimeError(f"Service '{service_id}' does not expose an unload endpoint")
-            async with self._lock:
+            async with self._lock_for(service_id):
                 now = datetime.now(UTC)
                 if state.idle_action == "restart":
                     await self._restart_container(state)
@@ -692,7 +703,7 @@ class ServiceManager:
                 state.last_unload_at = now
                 state.detail = f"unloaded:{reason}"
                 logger.info("service_runtime_unloaded", service_id=service_id, reason=reason)
-                await self._publish_state(state, "runtime_unloaded")
+            await self._publish_state(state, "runtime_unloaded")
             await self.release_gpu_vram(service_id)
             return state
 
@@ -702,7 +713,8 @@ class ServiceManager:
         if state.unload_payload is not None:
             request_kwargs["json"] = state.unload_payload
 
-        async with self._lock:
+        error: Exception | None = None
+        async with self._lock_for(service_id):
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.request(method, url, **request_kwargs)
@@ -727,7 +739,6 @@ class ServiceManager:
                 # Do NOT stop the container — the REST unload already freed GPU memory.
                 # Stopping would cause Docker to restart it (restart: unless-stopped),
                 # which looks like the service keeps reloading.
-                await self.release_gpu_vram(service_id)
             except Exception as exc:
                 state.detail = str(exc)
                 logger.warning(
@@ -736,9 +747,14 @@ class ServiceManager:
                     reason=reason,
                     error=str(exc),
                 )
-                raise
-            finally:
-                await self._publish_state(state, "runtime_unloaded")
+                error = exc
+        # The lock only serialises the unload itself; releasing the VRAM
+        # reservation and publishing the state don't need to hold it.
+        if error is None:
+            await self.release_gpu_vram(service_id)
+        await self._publish_state(state, "runtime_unloaded")
+        if error is not None:
+            raise error
         return state
 
     # ── Idle eviction ─────────────────────────────────────────────────────
@@ -807,20 +823,21 @@ class ServiceManager:
                 if state.unload_path:
                     await self.unload(state.service_id, reason="idle")
                 elif state.docker_container_name:
-                    if state.idle_action == "restart":
-                        logger.info(
-                            "service_idle_container_restart",
-                            service_id=state.service_id,
-                            idle_seconds=idle_seconds,
-                        )
-                        await self._restart_container(state)
-                    else:
-                        logger.info(
-                            "service_idle_container_stop",
-                            service_id=state.service_id,
-                            idle_seconds=idle_seconds,
-                        )
-                        await self._stop_container(state)
+                    async with self._lock_for(state.service_id):
+                        if state.idle_action == "restart":
+                            logger.info(
+                                "service_idle_container_restart",
+                                service_id=state.service_id,
+                                idle_seconds=idle_seconds,
+                            )
+                            await self._restart_container(state)
+                        else:
+                            logger.info(
+                                "service_idle_container_stop",
+                                service_id=state.service_id,
+                                idle_seconds=idle_seconds,
+                            )
+                            await self._stop_container(state)
                     state.runtime_loaded = False
                     state.active_model_ref = None
                     state.is_generating = False
@@ -877,12 +894,13 @@ class ServiceManager:
                 spawn(self._persist_generation_event(state, evicted=True))
 
         if state.docker_container_name:
-            if state.idle_action == "restart":
-                await self._restart_container(state)
-                state.status = "restarting"
-            else:
-                await self._stop_container(state)
-                state.status = "idle"
+            async with self._lock_for(service_id):
+                if state.idle_action == "restart":
+                    await self._restart_container(state)
+                    state.status = "restarting"
+                else:
+                    await self._stop_container(state)
+                    state.status = "idle"
             state.runtime_loaded = False
             state.active_model_ref = None
             state.is_generating = False

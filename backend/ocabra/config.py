@@ -124,11 +124,10 @@ class Settings(BaseSettings):
     # requests recently". Higher = pickier, lower = trust noisy data.
     router_confidence_floor: float = 0.3
 
-    # ``router_fallback_delay_ms`` is inserted between failed target attempts
-    # inside the router — a tiny sleep that lets a concurrent load complete
-    # instead of piling up parallel loads on the same model. 200ms is enough
-    # for the model_manager to publish LOADED after ``_load_model`` returns.
-    router_fallback_delay_ms: int = 200
+    # ``router_fallback_delay_ms`` was removed (2026-11-18): the router picks
+    # its target in a single pass and never retries targets, so there was no
+    # "between attempts" for the delay to apply to and nothing read it. A value
+    # still stored in server_config is skipped at startup (no such field).
 
     # Hard cap on any single drain wait (pressure_eviction). Even if the
     # estimator says "80 minutes remaining", we never wait more than this.

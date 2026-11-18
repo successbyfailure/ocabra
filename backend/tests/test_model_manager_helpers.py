@@ -633,3 +633,34 @@ class TestResolveLlamaCppOptionAcceptsCamelCase:
         """Not nested under 'llama_cpp' — some paths store options flat."""
         state = _FakeState(backend_model_id="x", extra_config={"gpuLayers": 99})
         assert resolve_llama_cpp_option(state, "gpu_layers", 0) == 99
+
+
+def test_estimate_accepts_camel_case_keys(tmp_path: Path) -> None:
+    """BUG-28: the UI saves vLLM options in camelCase (``maxModelLen``,
+    ``kvCacheDtype``, ``vramEstimateMb``). The backend and model_manager read
+    both spellings; the estimator only read snake_case, returned 0 and the
+    scheduler fell back to the weights-only heuristic."""
+    weights_mb = 7300
+    _make_hf_snapshot(
+        tmp_path, "mattbucci/gemma-4-12B-AWQ", config=_GEMMA12_CONFIG, weights_mb=weights_mb
+    )
+
+    def _est(extra: dict[str, Any]) -> int:
+        return estimate_vllm_vram_from_config(
+            _FakeState(backend_model_id="mattbucci/gemma-4-12B-AWQ", extra_config=extra),
+            models_dir=tmp_path,
+            default_gpu_memory_utilization=0.94,
+        )
+
+    snake = _est({"vllm": {"max_model_len": 32768}})
+    assert snake > weights_mb
+    # camelCase, nested and top-level
+    assert _est({"vllm": {"maxModelLen": 32768}}) == snake
+    assert _est({"maxModelLen": 32768}) == snake
+    # camelCase kv dtype halves the KV part, like the snake_case one does
+    assert _est({"vllm": {"maxModelLen": 32768, "kvCacheDtype": "fp8"}}) == _est(
+        {"vllm": {"max_model_len": 32768, "kv_cache_dtype": "fp8"}}
+    )
+    assert _est({"vllm": {"maxModelLen": 32768, "kvCacheDtype": "fp8"}}) < snake
+    # camelCase operator override still means "don't estimate"
+    assert _est({"vllm": {"maxModelLen": 32768}, "vramEstimateMb": 9000}) == 0

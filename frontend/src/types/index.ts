@@ -725,7 +725,6 @@ export interface ServerConfig {
   // Bloque 20 — routing/estimator/sessions
   routingEnabled?: boolean;
   routerConfidenceFloor?: number;
-  routerFallbackDelayMs?: number;
   maxDrainTimeoutS?: number;
   sessionPauseThresholdS?: number;
   sessionMaxIdleS?: number;

@@ -3,7 +3,8 @@ import logging
 import os
 import sys
 import time
-from contextlib import asynccontextmanager, suppress
+from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 
 import structlog
 from fastapi import FastAPI
@@ -419,25 +420,122 @@ async def _scan_and_register_trtllm_engines(model_manager) -> None:
         logger.info("trtllm_engines_registered_on_startup", count=registered)
 
 
+# Teardown bounds. ``docker stop`` sends SIGKILL after 10 s by default, so a
+# shutdown that hangs gains nothing: each step gets at most a few seconds and
+# the whole teardown a global budget, after which the remaining steps still
+# run but only get a token wait. Worker processes are children of the api and
+# die with the container anyway; the teardown is about stopping our loops and
+# closing connections cleanly, never about unloading models.
+_SHUTDOWN_STEP_TIMEOUT_S = 5.0
+_SHUTDOWN_BUDGET_S = 25.0
+
+
+class _Teardown:
+    """Each started component registers its own stop on an ``AsyncExitStack``.
+
+    Teardown then runs in reverse start order, and it also runs when startup
+    fails halfway (before 0.112 nothing was stopped in that case and the loops
+    already started stayed alive). Every step is bounded and a failing one is
+    logged, never raised, so one stuck component can't stop the rest from
+    shutting down.
+    """
+
+    def __init__(self, stack: AsyncExitStack) -> None:
+        self._stack = stack
+        self._deadline: float | None = None
+
+    def begin(self) -> None:
+        """Start the global shutdown budget (on startup failure it starts at
+        the first step that runs)."""
+        self._deadline = asyncio.get_running_loop().time() + _SHUTDOWN_BUDGET_S
+
+    def push(self, name: str, stop: Callable[[], Awaitable[object]]) -> None:
+        async def _run() -> None:
+            loop = asyncio.get_running_loop()
+            if self._deadline is None:
+                self._deadline = loop.time() + _SHUTDOWN_BUDGET_S
+            timeout = max(0.1, min(_SHUTDOWN_STEP_TIMEOUT_S, self._deadline - loop.time()))
+            try:
+                await asyncio.wait_for(stop(), timeout)
+            except TimeoutError:
+                logger.warning("shutdown_step_timeout", step=name, timeout_s=round(timeout, 1))
+            except Exception as exc:  # noqa: BLE001 - keep tearing down the rest
+                logger.warning("shutdown_step_failed", step=name, error=str(exc))
+
+        self._stack.push_async_callback(_run)
+
+    def cancel_on_exit(self, task: asyncio.Task) -> None:
+        async def _cancel() -> None:
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        self.push(task.get_name(), _cancel)
+
+    def loop(
+        self, name: str, factory: Callable[[asyncio.Event], Awaitable[object]]
+    ) -> asyncio.Task:
+        """Start a ``while not stop.is_set()`` loop and register its stop."""
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(factory(stop_event), name=name)
+
+        async def _stop() -> None:
+            stop_event.set()
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        self.push(name, _stop)
+        return task
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── Startup ──────────────────────────────────────────────
+    async with AsyncExitStack() as stack:
+        teardown = _Teardown(stack)
+        try:
+            await _startup(app, teardown)
+        except BaseException as exc:
+            logger.error("ocabra_startup_failed", error=str(exc) or type(exc).__name__)
+            raise
+        logger.info("ocabra_ready")
+        try:
+            yield
+        finally:
+            # ── Shutdown: the stack runs every registered stop, newest first.
+            logger.info("shutting_down_ocabra")
+            teardown.begin()
+    logger.info("ocabra_stopped")
+
+
+async def _startup(app: FastAPI, teardown: _Teardown) -> None:
     logger.info("starting_ocabra", version=settings.app_version)
 
-    from ocabra.redis_client import init_redis
+    from ocabra.redis_client import close_redis, init_redis
 
     await init_redis()
+    teardown.push("redis", close_redis)
     logger.info("redis_connected")
 
     # Apply persisted settings before starting any background loop or backend.
     # Otherwise startup logs and the first maintenance iteration can observe
     # stale .env values before DB overrides take effect.
+    from ocabra import database
     from ocabra.database import AsyncSessionLocal as _ASL
     from ocabra.db.server_config import (
         apply_overrides_to_settings,
         load_overrides,
         save_override,
     )
+
+    # Runs after everything else that may still use a DB session.
+    teardown.push("db_engine", lambda: database.engine.dispose())
+
+    if settings.langfuse_enabled:
+        from ocabra.integrations.langfuse_tracer import shutdown as langfuse_shutdown
+
+        teardown.push("langfuse", langfuse_shutdown)
 
     async with _ASL() as _session:
         _overrides = await load_overrides(_session)
@@ -459,6 +557,7 @@ async def lifespan(app: FastAPI):
 
     gpu_manager = GPUManager()
     await gpu_manager.start()
+    teardown.push("gpu_manager", gpu_manager.stop)
     gpu_scheduler = GPUScheduler(gpu_manager)
     app.state.gpu_manager = gpu_manager
     app.state.gpu_scheduler = gpu_scheduler
@@ -478,9 +577,8 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001
             logger.warning("gpu_power_reapply_unexpected_error", error=str(exc))
 
-    gpu_power_reapply_task = asyncio.create_task(
-        _reapply_gpu_power_caps(),
-        name="gpu-power-reapply",
+    teardown.cancel_on_exit(
+        asyncio.create_task(_reapply_gpu_power_caps(), name="gpu-power-reapply")
     )
 
     # Stream 1-B: Worker Pool + Model Manager
@@ -576,27 +674,16 @@ async def lifespan(app: FastAPI):
         app.state.litellm_syncer = litellm_syncer
         logger.info("litellm_sync_enabled")
 
-    await model_manager.start()
+    # ── Everything ModelManager's background loops use is wired BEFORE
+    # model_manager.start() (BUG-26). They used to be injected afterwards,
+    # up to the end of startup, and it only worked because the PIN autoload
+    # waits ``pin_autoload_delay_s`` (60 s): with 0 the first PIN load ran
+    # with no pin_worker_resolver (loaded the bare model instead of the
+    # preset's worker), no service manager for pressure eviction, no
+    # duration estimator / session registry / batch coordinator.
 
-    from ocabra.core.backend_process_manager import BackendProcessManager
-
-    backend_process_manager = BackendProcessManager(model_manager, worker_pool, settings)
-    await backend_process_manager.start()
-    app.state.backend_process_manager = backend_process_manager
-    logger.info("backend_process_manager_ready")
-
-    from ocabra.registry.ollama_registry import OllamaRegistry
-
-    try:
-        installed_ollama = await OllamaRegistry().list_installed()
-        loaded_ollama = await OllamaRegistry().list_loaded()
-    except Exception:
-        installed_ollama = []
-        loaded_ollama = []
-    if installed_ollama or loaded_ollama:
-        await model_manager.sync_ollama_inventory(installed_ollama, loaded_ollama)
-    logger.info("model_manager_ready")
-
+    # External services (ComfyUI, A1111, Hunyuan…) — pressure eviction can
+    # unload them to make room.
     from ocabra.core.service_manager import ServiceManager
 
     service_manager = ServiceManager()
@@ -606,62 +693,8 @@ async def lifespan(app: FastAPI):
     service_manager.set_gpu_manager(gpu_manager)
     logger.info("service_manager_ready")
 
-    from ocabra.core.trtllm_compile_manager import TrtllmCompileManager
-
-    trtllm_compile_manager = TrtllmCompileManager(model_manager=model_manager)
-    await trtllm_compile_manager.start()
-    app.state.trtllm_compile_manager = trtllm_compile_manager
-    await _scan_and_register_trtllm_engines(model_manager)
-    logger.info("trtllm_compile_manager_ready")
-
-    idle_eviction_stop = asyncio.Event()
-    idle_eviction_task = asyncio.create_task(
-        _idle_eviction_loop(model_manager, idle_eviction_stop),
-        name="idle-eviction-loop",
-    )
-    schedule_maintenance_stop = asyncio.Event()
-    schedule_maintenance_task = asyncio.create_task(
-        _schedule_maintenance_loop(gpu_scheduler, schedule_maintenance_stop),
-        name="schedule-maintenance-loop",
-    )
-    # oCabra updating itself (core/self_update.py): looks for releases and,
-    # with policy "auto", applies one once the node is idle.
-    from ocabra.core.self_update import SelfUpdater
-
-    self_updater = SelfUpdater(app)
-    app.state.self_updater = self_updater
-    self_update_stop = asyncio.Event()
-    self_update_task = asyncio.create_task(
-        self_updater.run(self_update_stop), name="self-update-loop"
-    )
-    ollama_inventory_stop = asyncio.Event()
-    # ollama_inventory_task created after profile_registry (below)
-    service_idle_stop = asyncio.Event()
-    service_idle_task = asyncio.create_task(
-        _service_idle_unload_loop(service_manager, service_idle_stop),
-        name="service-idle-unload-loop",
-    )
-    service_health_stop = asyncio.Event()
-    service_health_task = asyncio.create_task(
-        _service_health_loop(service_manager, service_health_stop),
-        name="service-health-loop",
-    )
-    image_outputs_cleanup_stop = asyncio.Event()
-    image_outputs_cleanup_task = asyncio.create_task(
-        _image_outputs_cleanup_loop(image_outputs_cleanup_stop),
-        name="image-outputs-cleanup-loop",
-    )
-    # Batch/upload files: deleted once their retention passes (core/files_retention.py).
-    from ocabra.core.files_retention import retention_loop as _files_retention_loop
-    from ocabra.database import AsyncSessionLocal as _files_session_factory
-
-    files_retention_stop = asyncio.Event()
-    files_retention_task = asyncio.create_task(
-        _files_retention_loop(files_retention_stop, _files_session_factory),
-        name="files-retention-loop",
-    )
-
-    # Profile Registry
+    # Profile Registry: only the DB. The default presets need the models
+    # (model_manager.start loads them) and are seeded below.
     from ocabra.core.profile_registry import ProfileRegistry
 
     profile_registry = ProfileRegistry()
@@ -677,33 +710,6 @@ async def lifespan(app: FastAPI):
         if diarized_count:
             logger.info("diarized_profiles_seeded", count=diarized_count)
     app.state.profile_registry = profile_registry
-    # Every LLM gets a "normal" preset equal to what its base loads today; new
-    # models get theirs when registered (on_model_added).
-    from ocabra.core.default_presets import ensure_llm_default_presets
-
-    async def _seed_default_presets(model_id: str | None = None) -> None:
-        seeded = await ensure_llm_default_presets(
-            profile_registry, model_manager, only_model_id=model_id
-        )
-        if seeded["created"] or seeded["skipped"]:
-            logger.info("default_presets", **seeded)
-
-    profile_registry.default_preset_hook = _seed_default_presets
-    try:
-        await _seed_default_presets()
-    except Exception as exc:  # noqa: BLE001 - never block startup
-        logger.warning("default_presets_failed", error=str(exc))
-    from ocabra.core.context_probe_service import ContextProbeService
-
-    app.state.context_probe = ContextProbeService(model_manager, profile_registry, worker_pool)
-    # A full card makes room for an on-demand vision projector before the first
-    # image, instead of the worker dying with cudaMalloc (gemma4:26b, 2026-11-10).
-    worker_pool.set_before_prepare(model_manager.make_room_for_vision)
-    # Late-bind profile_registry into the compile manager (created earlier so
-    # it can start recovering stale jobs) so completed engines get a default
-    # profile alongside their model_config registration.
-    trtllm_compile_manager.set_profile_registry(profile_registry)
-    logger.info("profile_registry_ready")
 
     # The PIN autoload (and its reload watcher) must load the worker requests
     # use: the default preset's ``model::hash``, like a manual "Load" does.
@@ -727,6 +733,136 @@ async def lifespan(app: FastAPI):
         return worker_key
 
     model_manager.pin_worker_resolver = _pin_worker_resolver
+    # A full card makes room for an on-demand vision projector before the first
+    # image, instead of the worker dying with cudaMalloc (gemma4:26b, 2026-11-10).
+    worker_pool.set_before_prepare(model_manager.make_room_for_vision)
+
+    # Bloque 20 — DurationEstimator (Nivel 1). Runs a background refresh loop
+    # that recomputes per-model calibrations from request_stats every
+    # ``estimator_refresh_interval_s``. Kicked off eagerly here so /estimate
+    # can respond from the first request rather than falling back to
+    # FAMILY_DEFAULT for 30 minutes.
+    from ocabra.core.duration_estimator import DurationEstimator
+
+    duration_estimator = DurationEstimator()
+    await duration_estimator.start()
+    teardown.push("duration_estimator", duration_estimator.stop)
+    app.state.duration_estimator = duration_estimator
+    model_manager.set_duration_estimator(duration_estimator)
+    logger.info("duration_estimator_ready")
+
+    # Bloque 20 — SessionRegistry tracks live Realtime sessions holding
+    # worker models. Consumers today: pressure_eviction (veto), router
+    # (avoid stealing a reserved worker), Sessions admin UI.
+    from ocabra.core.session_registry import SessionRegistry
+
+    session_registry = SessionRegistry()
+    await session_registry.start()
+    teardown.push("session_registry", session_registry.stop)
+    app.state.session_registry = session_registry
+    model_manager.set_session_registry(session_registry)
+    logger.info("session_registry_ready")
+
+    # Batch-vs-interactive priority coordinator (2026-10-30 design) — tracks
+    # in-flight batch-origin requests per worker so an arriving interactive
+    # caller can preempt a saturated batch instead of queueing behind it.
+    # See fair_slot_gate.py (admission priority) + batch_priority.py
+    # (active preemption + cooldowns) for the two halves of the mechanism.
+    from ocabra.core.batch_priority import BatchPriorityCoordinator
+
+    batch_priority = BatchPriorityCoordinator()
+    app.state.batch_priority = batch_priority
+    worker_pool.set_batch_priority(batch_priority, duration_estimator)
+    # Progreso de prefill de llama.cpp -> peticion en vuelo (dashboard).
+    worker_pool.set_prompt_progress_sink(model_manager.update_prompt_progress)
+    model_manager.set_batch_priority(batch_priority)
+    logger.info("batch_priority_coordinator_ready")
+
+    # Wired: now the loops (busy/VRAM watchdogs, PIN autoload) may start.
+    await model_manager.start()
+    teardown.push("model_manager", model_manager.stop)
+
+    from ocabra.core.backend_process_manager import BackendProcessManager
+
+    backend_process_manager = BackendProcessManager(model_manager, worker_pool, settings)
+    await backend_process_manager.start()
+    teardown.push("backend_process_manager", backend_process_manager.stop)
+    app.state.backend_process_manager = backend_process_manager
+    logger.info("backend_process_manager_ready")
+
+    from ocabra.registry.ollama_registry import OllamaRegistry
+
+    try:
+        installed_ollama = await OllamaRegistry().list_installed()
+        loaded_ollama = await OllamaRegistry().list_loaded()
+    except Exception:
+        installed_ollama = []
+        loaded_ollama = []
+    if installed_ollama or loaded_ollama:
+        await model_manager.sync_ollama_inventory(installed_ollama, loaded_ollama)
+    logger.info("model_manager_ready")
+
+    from ocabra.core.trtllm_compile_manager import TrtllmCompileManager
+
+    trtllm_compile_manager = TrtllmCompileManager(model_manager=model_manager)
+    await trtllm_compile_manager.start()
+    teardown.push("trtllm_compile_manager", trtllm_compile_manager.stop)
+    app.state.trtllm_compile_manager = trtllm_compile_manager
+    # So completed engines get a default profile alongside their model_config
+    # registration.
+    trtllm_compile_manager.set_profile_registry(profile_registry)
+    await _scan_and_register_trtllm_engines(model_manager)
+    logger.info("trtllm_compile_manager_ready")
+
+    # Every LLM gets a "normal" preset equal to what its base loads today; new
+    # models get theirs when registered (on_model_added). Needs the models,
+    # hence after model_manager.start().
+    from ocabra.core.default_presets import ensure_llm_default_presets
+
+    async def _seed_default_presets(model_id: str | None = None) -> None:
+        seeded = await ensure_llm_default_presets(
+            profile_registry, model_manager, only_model_id=model_id
+        )
+        if seeded["created"] or seeded["skipped"]:
+            logger.info("default_presets", **seeded)
+
+    profile_registry.default_preset_hook = _seed_default_presets
+    try:
+        await _seed_default_presets()
+    except Exception as exc:  # noqa: BLE001 - never block startup
+        logger.warning("default_presets_failed", error=str(exc))
+    from ocabra.core.context_probe_service import ContextProbeService
+
+    app.state.context_probe = ContextProbeService(model_manager, profile_registry, worker_pool)
+    logger.info("profile_registry_ready")
+
+    teardown.loop("idle-eviction-loop", lambda stop: _idle_eviction_loop(model_manager, stop))
+    teardown.loop(
+        "schedule-maintenance-loop", lambda stop: _schedule_maintenance_loop(gpu_scheduler, stop)
+    )
+    # oCabra updating itself (core/self_update.py): looks for releases and,
+    # with policy "auto", applies one once the node is idle.
+    from ocabra.core.self_update import SelfUpdater
+
+    self_updater = SelfUpdater(app)
+    app.state.self_updater = self_updater
+    teardown.loop("self-update-loop", self_updater.run)
+    teardown.loop(
+        "service-idle-unload-loop", lambda stop: _service_idle_unload_loop(service_manager, stop)
+    )
+    teardown.loop("service-health-loop", lambda stop: _service_health_loop(service_manager, stop))
+    teardown.loop("image-outputs-cleanup-loop", _image_outputs_cleanup_loop)
+    # Batch/upload files: deleted once their retention passes (core/files_retention.py).
+    from ocabra.core.files_retention import retention_loop as _files_retention_loop
+    from ocabra.database import AsyncSessionLocal as _files_session_factory
+
+    teardown.loop(
+        "files-retention-loop", lambda stop: _files_retention_loop(stop, _files_session_factory)
+    )
+    teardown.loop(
+        "ollama-inventory-loop",
+        lambda stop: _ollama_inventory_loop(model_manager, stop, profile_registry),
+    )
 
     # OpenAI TTS voice-name compatibility shim — independent of routers on
     # purpose (see ocabra/core/openai_tts_compat.py).
@@ -746,33 +882,8 @@ async def lifespan(app: FastAPI):
         await openai_image_compat.load_all(_session)
     app.state.openai_image_compat = openai_image_compat
 
-    # Bloque 20 — DurationEstimator (Nivel 1). Runs a background refresh loop
-    # that recomputes per-model calibrations from request_stats every
-    # ``estimator_refresh_interval_s``. Kicked off eagerly here so /estimate
-    # can respond from the first request rather than falling back to
-    # FAMILY_DEFAULT for 30 minutes.
-    from ocabra.core.duration_estimator import DurationEstimator
-
-    duration_estimator = DurationEstimator()
-    await duration_estimator.start()
-    app.state.duration_estimator = duration_estimator
-    model_manager.set_duration_estimator(duration_estimator)
-    logger.info("duration_estimator_ready")
-
-    # Bloque 20 — SessionRegistry tracks live Realtime sessions holding
-    # worker models. Consumers today: pressure_eviction (veto), router
-    # (avoid stealing a reserved worker), Sessions admin UI.
-    from ocabra.core.session_registry import SessionRegistry
-
-    session_registry = SessionRegistry()
-    await session_registry.start()
-    app.state.session_registry = session_registry
-    model_manager.set_session_registry(session_registry)
-    logger.info("session_registry_ready")
-
     # Bloque 20 — RouterResolver walks routing_targets to pick the best
-    # candidate for router profiles. Wired now that both estimator and
-    # session registry are up.
+    # candidate for router profiles.
     from ocabra.core.router_resolver import RouterResolver
 
     router_resolver = RouterResolver(
@@ -784,12 +895,6 @@ async def lifespan(app: FastAPI):
     )
     app.state.router_resolver = router_resolver
     logger.info("router_resolver_ready")
-
-    # Start ollama inventory loop now that profile_registry is available
-    ollama_inventory_task = asyncio.create_task(
-        _ollama_inventory_loop(model_manager, ollama_inventory_stop, profile_registry),
-        name="ollama-inventory-loop",
-    )
 
     # Auth: seed first admin if the users table is empty
     from ocabra.core.auth_manager import seed_first_admin
@@ -819,6 +924,14 @@ async def lifespan(app: FastAPI):
 
     mcp_registry = MCPRegistry(session_factory=_ASL)
     await mcp_registry.start()
+
+    async def _stop_mcp() -> None:
+        try:
+            await mcp_registry.stop()
+        finally:
+            set_registry(None)
+
+    teardown.push("mcp_registry", _stop_mcp)
     app.state.mcp_registry = mcp_registry
     set_registry(mcp_registry)
     logger.info("mcp_registry_ready")
@@ -834,7 +947,10 @@ async def lifespan(app: FastAPI):
         federation_manager.gpu_manager = gpu_manager
         # «Mi servidor, mis reglas»: what is loaded here, and public names → ids.
         federation_manager.model_manager = model_manager
-        federation_manager.profile_registry = getattr(app.state, "profile_registry", None)
+        federation_manager.profile_registry = profile_registry
+        # Registered before start(): a start that fails halfway may already
+        # have opened clients / started dialers, and stop() copes with that.
+        teardown.push("federation_manager", federation_manager.stop)
         await federation_manager.start()
         app.state.federation_manager = federation_manager
         logger.info("federation_manager_ready")
@@ -843,108 +959,14 @@ async def lifespan(app: FastAPI):
 
     logger.info("vllm_backend_registered")
 
-    # Batch-vs-interactive priority coordinator (2026-10-30 design) — tracks
-    # in-flight batch-origin requests per worker so an arriving interactive
-    # caller can preempt a saturated batch instead of queueing behind it.
-    # See fair_slot_gate.py (admission priority) + batch_priority.py
-    # (active preemption + cooldowns) for the two halves of the mechanism.
-    from ocabra.core.batch_priority import BatchPriorityCoordinator
-
-    batch_priority = BatchPriorityCoordinator()
-    app.state.batch_priority = batch_priority
-    worker_pool.set_batch_priority(batch_priority, duration_estimator)
-    # Progreso de prefill de llama.cpp -> peticion en vuelo (dashboard).
-    worker_pool.set_prompt_progress_sink(model_manager.update_prompt_progress)
-    model_manager.set_batch_priority(batch_priority)
-    logger.info("batch_priority_coordinator_ready")
-
     # OpenAI Batches API processor
     from ocabra.core.batch_processor import BatchProcessor
 
     batch_processor = BatchProcessor(app, coordinator=batch_priority)
     await batch_processor.start()
+    teardown.push("batch_processor", batch_processor.stop)
     app.state.batch_processor = batch_processor
     logger.info("batch_processor_ready")
-
-    logger.info("ocabra_ready")
-    yield
-
-    # ── Shutdown ─────────────────────────────────────────────
-    logger.info("shutting_down_ocabra")
-
-    idle_eviction_stop.set()
-    idle_eviction_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await idle_eviction_task
-
-    schedule_maintenance_stop.set()
-    schedule_maintenance_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await schedule_maintenance_task
-
-    self_update_stop.set()
-    self_update_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await self_update_task
-
-    ollama_inventory_stop.set()
-    ollama_inventory_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await ollama_inventory_task
-
-    service_idle_stop.set()
-    service_idle_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await service_idle_task
-
-    service_health_stop.set()
-    service_health_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await service_health_task
-
-    image_outputs_cleanup_stop.set()
-    image_outputs_cleanup_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await image_outputs_cleanup_task
-
-    files_retention_stop.set()
-    files_retention_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await files_retention_task
-
-    if not gpu_power_reapply_task.done():
-        gpu_power_reapply_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await gpu_power_reapply_task
-
-    if getattr(app.state, "batch_processor", None) is not None:
-        await app.state.batch_processor.stop()
-
-    if getattr(app.state, "federation_manager", None) is not None:
-        await app.state.federation_manager.stop()
-
-    if getattr(app.state, "mcp_registry", None) is not None:
-        await app.state.mcp_registry.stop()
-        set_registry(None)
-
-    await backend_process_manager.stop()
-    await trtllm_compile_manager.stop()
-    if getattr(app.state, "duration_estimator", None) is not None:
-        await app.state.duration_estimator.stop()
-    if getattr(app.state, "session_registry", None) is not None:
-        await app.state.session_registry.stop()
-    await gpu_manager.stop()
-
-    if settings.langfuse_enabled:
-        from ocabra.integrations.langfuse_tracer import shutdown as langfuse_shutdown
-
-        await langfuse_shutdown()
-
-    from ocabra.redis_client import close_redis
-
-    await close_redis()
-
-    logger.info("ocabra_stopped")
 
 
 _API_DESCRIPTION = """

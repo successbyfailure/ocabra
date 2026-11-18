@@ -191,6 +191,41 @@ class TestPatchConfigRuntime:
         assert exc_info.value.status_code == 400
 
 
+class TestRetiredRouterFallbackDelay:
+    """BUG-32: ``router_fallback_delay_ms`` was editable and nothing read it.
+    It is gone from the settings and the GET response; PATCH still accepts it
+    (ignored, not persisted) so old clients don't get a 422, and a value
+    already stored in server_config doesn't break startup."""
+
+    def test_not_a_setting_anymore(self):
+        assert not hasattr(settings, "router_fallback_delay_ms")
+
+    @pytest.mark.asyncio
+    async def test_patch_accepts_and_ignores_it(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        patch_body = ServerConfigPatch.model_validate({"routerFallbackDelayMs": 500})
+        save = AsyncMock()
+        with (
+            patch.object(config_api, "save_override", new=save),
+            patch.object(config_api, "AsyncSessionLocal", new=_FakeSessionLocal),
+            patch.object(config_api, "_load_global_schedules", new=AsyncMock(return_value=[])),
+        ):
+            result = await config_api.patch_config(patch_body, request)
+        assert "routerFallbackDelayMs" not in result
+        save.assert_not_awaited()
+
+    def test_stored_override_is_skipped_at_startup(self):
+        from ocabra.config import Settings
+        from ocabra.db.server_config import apply_overrides_to_settings
+
+        fresh = Settings()
+        apply_overrides_to_settings(
+            fresh, {"router_fallback_delay_ms": "200", "idle_timeout_seconds": "123"}
+        )
+        assert fresh.idle_timeout_seconds == 123
+        assert not hasattr(fresh, "router_fallback_delay_ms")
+
+
 def patch_db_and_schedules():
     """Context manager to mock database persistence and schedule loading."""
     import contextlib

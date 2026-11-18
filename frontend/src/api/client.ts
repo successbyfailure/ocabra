@@ -1773,10 +1773,6 @@ function toServerConfig(raw: unknown): ServerConfig {
       data.routerConfidenceFloor == null
         ? undefined
         : Number(data.routerConfidenceFloor),
-    routerFallbackDelayMs:
-      data.routerFallbackDelayMs == null
-        ? undefined
-        : Number(data.routerFallbackDelayMs),
     maxDrainTimeoutS:
       data.maxDrainTimeoutS == null ? undefined : Number(data.maxDrainTimeoutS),
     sessionPauseThresholdS:
