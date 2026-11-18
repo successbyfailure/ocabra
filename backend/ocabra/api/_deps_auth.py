@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import secrets
 import uuid as _uuid
 from dataclasses import dataclass, field
 
@@ -332,11 +333,57 @@ async def _fetch_accessible_models(role: str, group_ids: list[str], session) -> 
 # ── Public dependencies ───────────────────────────────────────────────────────
 
 
+#: Token of in-process calls (the batch processor calling this same app over
+#: ASGI): fresh per process, never configured nor sent anywhere else.
+INTERNAL_TOKEN = secrets.token_urlsafe(32)
+INTERNAL_TOKEN_HEADER = "X-Ocabra-Internal-Token"
+
+
+async def _impersonated_context(user_id: str, request: Request) -> UserContext | None:
+    """The identity of active user ``user_id``, or ``None``."""
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.auth import User, UserGroup
+
+    try:
+        uid = _uuid.UUID(user_id)
+    except ValueError:
+        return None
+    try:
+        async with AsyncSessionLocal() as session:
+            user = (await session.execute(select(User).where(User.id == uid))).scalar_one_or_none()
+            if user is None or not user.is_active:
+                return None
+            group_ids = [
+                str(gid)
+                for gid in (
+                    await session.execute(
+                        select(UserGroup.group_id).where(UserGroup.user_id == user.id)
+                    )
+                )
+                .scalars()
+                .all()
+            ]
+            accessible = await _fetch_accessible_models(user.role, group_ids, session)
+    except Exception as exc:  # noqa: BLE001 - unknown is not available
+        logger.warning("auth_impersonate_failed", error=str(exc))
+        return None
+    return UserContext(
+        user_id=str(user.id),
+        username=user.username,
+        role=user.role,
+        group_ids=group_ids,
+        accessible_model_ids=accessible,
+        is_anonymous=False,
+        api_key_name=request.headers.get("X-Internal-Key-Name") or None,
+    )
+
+
 async def get_current_user(request: Request) -> UserContext:
     """Resolve the calling user from the current request.
 
     Resolution order:
-    1. ``X-Gateway-Token`` header (internal gateway service-to-service calls).
+    0. ``X-Ocabra-Internal-Token`` (in-process batch calls; may impersonate).
+    1. ``X-Gateway-Token`` header (companion services; model_manager, no impersonation).
     2. Cookie ``ocabra_session`` (dashboard / browser).
     3. ``Authorization: Bearer`` header — an API key (JWTs only travel in the
        cookie; a JWT here is rejected as an invalid key).
@@ -349,52 +396,32 @@ async def get_current_user(request: Request) -> UserContext:
     from ocabra.config import settings
     from ocabra.database import AsyncSessionLocal
 
-    # 0. Gateway service token (internal calls — no DB needed)
+    # 0a. In-process calls of this same api (the batch processor): the only
+    # ones that may act as another user (``X-Internal-User-Id``). The token is
+    # generated per process and never leaves it (INTERNAL_TOKEN).
+    internal = request.headers.get(INTERNAL_TOKEN_HEADER, "")
+    if internal and hmac.compare_digest(internal, INTERNAL_TOKEN):
+        impersonate_id = request.headers.get("X-Internal-User-Id", "")
+        ctx = await _impersonated_context(impersonate_id, request) if impersonate_id else None
+        if ctx is None:
+            # Never fall back to a broader identity: a batch whose owner was
+            # deleted or disabled must not run as a service user.
+            raise HTTPException(status_code=403, detail="Impersonated user not available")
+        request.state.auth_user = ctx
+        return ctx
+
+    # 0b. Service token of the companion services (gateway, TRELLIS): a
+    # model_manager identity, nothing more. Until 2026-11-17 it also accepted
+    # X-Internal-User-Id, so anything holding this token (several containers
+    # get it) could act as any user, admins included (SEG-09).
     gw_token = request.headers.get("X-Gateway-Token", "")
     if (
         gw_token
         and settings.gateway_service_token
         and hmac.compare_digest(gw_token, settings.gateway_service_token)
     ):
-        # Optional impersonation for the batch processor: act as the batch owner
-        # so per-user access controls and stats attribution still apply.
-        impersonate_id = request.headers.get("X-Internal-User-Id", "")
-        if impersonate_id:
-            try:
-                from ocabra.db.auth import User, UserGroup
-
-                async with AsyncSessionLocal() as session:
-                    user = (
-                        await session.execute(
-                            select(User).where(User.id == _uuid.UUID(impersonate_id))
-                        )
-                    ).scalar_one_or_none()
-                    if user is not None and user.is_active:
-                        group_ids = [
-                            str(gid)
-                            for gid in (
-                                await session.execute(
-                                    select(UserGroup.group_id).where(UserGroup.user_id == user.id)
-                                )
-                            )
-                            .scalars()
-                            .all()
-                        ]
-                        accessible = await _fetch_accessible_models(user.role, group_ids, session)
-                        ctx = UserContext(
-                            user_id=str(user.id),
-                            username=user.username,
-                            role=user.role,
-                            group_ids=group_ids,
-                            accessible_model_ids=accessible,
-                            is_anonymous=False,
-                            api_key_name=request.headers.get("X-Internal-Key-Name") or None,
-                        )
-                        request.state.auth_user = ctx
-                        return ctx
-            except Exception as exc:
-                logger.warning("auth_impersonate_failed", error=str(exc))
-
+        if request.headers.get("X-Internal-User-Id"):
+            logger.warning("auth_service_token_impersonation_refused")
         ctx = UserContext(
             user_id=None,
             username="__gateway__",

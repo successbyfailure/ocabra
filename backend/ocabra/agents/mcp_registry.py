@@ -19,8 +19,6 @@ Plan: docs/tasks/agents-mcp-plan.md — "Fase 1 — Schema + registry".
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import json
 import time
 from collections.abc import Mapping
@@ -29,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import structlog
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import InvalidToken
 
 from ocabra.agents.mcp_client import (
     HttpMCPClient,
@@ -53,9 +51,10 @@ logger = structlog.get_logger(__name__)
 
 
 def _derive_fernet_key(secret: str) -> bytes:
-    """Derive a Fernet-compatible key from an arbitrary secret string."""
-    digest = hashlib.sha256(secret.encode()).digest()
-    return base64.urlsafe_b64encode(digest)
+    """Kept for callers; the one implementation is ``secrets_box.derive_key``."""
+    from ocabra.core.secrets_box import derive_key
+
+    return derive_key(secret)
 
 
 # ── Data classes ─────────────────────────────────────────────
@@ -105,8 +104,9 @@ class MCPRegistry:
         cache_ttl_seconds: int | None = None,
     ) -> None:
         self._session_factory = session_factory
-        secret = fernet_secret or settings.jwt_secret
-        self._fernet = Fernet(_derive_fernet_key(secret))
+        from ocabra.core import secrets_box
+
+        self._fernet = secrets_box.fernet(legacy_secret=fernet_secret)
         self._cache_ttl = (
             cache_ttl_seconds
             if cache_ttl_seconds is not None

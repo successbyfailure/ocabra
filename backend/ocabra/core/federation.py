@@ -8,7 +8,6 @@ load balancing across federated nodes.
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextvars
 import hashlib
 import hmac
@@ -21,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
-from cryptography.fernet import Fernet
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -102,9 +100,10 @@ _MAX_BACKOFF_S = 300
 
 
 def _derive_fernet_key(secret: str) -> bytes:
-    """Derive a Fernet-compatible key from an arbitrary secret string."""
-    digest = hashlib.sha256(secret.encode()).digest()
-    return base64.urlsafe_b64encode(digest)
+    """Kept for callers; the one implementation is ``secrets_box.derive_key``."""
+    from ocabra.core.secrets_box import derive_key
+
+    return derive_key(secret)
 
 
 @dataclass
@@ -191,7 +190,9 @@ class FederationManager:
         self._session_factory = session_factory
         self._peers: dict[str, PeerState] = {}
         self._heartbeat_task: asyncio.Task | None = None
-        self._fernet = Fernet(_derive_fernet_key(settings.jwt_secret))
+        from ocabra.core import secrets_box
+
+        self._fernet = secrets_box.fernet()
         self._node_id = settings.federation_node_id or str(uuid.uuid4())
         self._started_at: float = 0.0
         self._http_client: httpx.AsyncClient | None = None
@@ -1224,6 +1225,7 @@ class FederationManager:
             "content-length",
             "x-api-key",
             "x-gateway-token",
+            "x-ocabra-internal-token",
             "x-internal-user-id",
             "x-internal-key-name",
         }

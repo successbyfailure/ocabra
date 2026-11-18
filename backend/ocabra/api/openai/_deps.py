@@ -1555,14 +1555,12 @@ def is_batch_origin_request(request: Request) -> bool:
     (``ocabra.core.batch_processor``), not a real client.
 
     The batch processor calls back into this same app over
-    ``httpx.ASGITransport`` carrying the trusted ``X-Gateway-Token`` (the
-    same mechanism ``get_current_user`` already uses to impersonate the
-    batch owner, see ``_deps_auth.py``) plus a dedicated origin header.
-    Only trust the origin header when the gateway token actually matches —
-    an external caller can send any header it likes, but can't forge
-    ``settings.gateway_service_token``.
+    ``httpx.ASGITransport`` carrying the per-process internal token (the
+    same one ``get_current_user`` uses to impersonate the batch owner, see
+    ``_deps_auth.py``) plus a dedicated origin header. Only trust the origin
+    header with that token: an external caller can send any header it likes,
+    but cannot know a token that never leaves this process.
     """
-    from ocabra.config import settings
 
     # «Mi servidor, mis reglas» — «me first»: a peer's requests get the batch
     # class, so local ones go ahead and may preempt them. Set from the
@@ -1571,12 +1569,10 @@ def is_batch_origin_request(request: Request) -> bool:
     if peer_rules is not None and getattr(peer_rules, "local_first", False):
         return True
 
-    gw_token = request.headers.get("X-Gateway-Token", "")
-    if (
-        not gw_token
-        or not settings.gateway_service_token
-        or not hmac.compare_digest(gw_token, settings.gateway_service_token)
-    ):
+    from ocabra.api._deps_auth import INTERNAL_TOKEN, INTERNAL_TOKEN_HEADER
+
+    internal = request.headers.get(INTERNAL_TOKEN_HEADER, "")
+    if not internal or not hmac.compare_digest(internal, INTERNAL_TOKEN):
         return False
     return request.headers.get("X-Internal-Request-Origin", "") == "batch"
 

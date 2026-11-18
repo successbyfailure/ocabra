@@ -263,6 +263,7 @@ _SERVER_STRIP = _HOP_BY_HOP | {
     "content-length",
     "x-api-key",
     "x-gateway-token",
+    "x-ocabra-internal-token",
     "x-internal-user-id",
     "x-internal-key-name",
 }

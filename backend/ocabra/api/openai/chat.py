@@ -123,6 +123,12 @@ async def chat_completions(
     model_id: str = body.get("model", "")
     stream: bool = body.get("stream", False)
 
+    # Before anything is forwarded (also to a federation peer): media URLs
+    # may not point at private addresses (SEG-11).
+    from ocabra.api.openai._media_urls import check_media_urls
+
+    await check_media_urls(body)
+
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
 

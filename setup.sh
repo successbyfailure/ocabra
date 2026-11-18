@@ -145,6 +145,8 @@ fi
 
 [ -n "$(env_value JWT_SECRET)" ] || set_env_value JWT_SECRET "$(random_hex 32)"
 [ -n "$(env_value GATEWAY_SERVICE_TOKEN)" ] || set_env_value GATEWAY_SERVICE_TOKEN "$(random_hex 32)"
+[ -n "$(env_value REDIS_PASSWORD)" ] || set_env_value REDIS_PASSWORD "$(random_hex 32)"
+[ -n "$(env_value OCABRA_SECRETS_KEY)" ] || set_env_value OCABRA_SECRETS_KEY "$(random_hex 32)"
 
 if $ENV_CREATED && [ -t 0 ]; then
     read -rp "$(echo -e "${CYAN}Admin username${NC} [ocabra]: ")" admin_user

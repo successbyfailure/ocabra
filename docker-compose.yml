@@ -68,6 +68,8 @@ services:
       OCABRA_ADMIN_USER: ${OCABRA_ADMIN_USER:-ocabra}
       OCABRA_ADMIN_PASS: ${OCABRA_ADMIN_PASS:-ocabra}
       JWT_SECRET: ${JWT_SECRET:-}
+      # Built from REDIS_PASSWORD (see the redis service), over .env's REDIS_URL.
+      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379/0
       # Not root: no /root. HOME holds throwaway caches (as /root did, the
       # container filesystem); Hugging Face downloads that use the default
       # cache (faster-whisper's) go to the persistent cache, not re-downloaded
@@ -181,7 +183,8 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    env_file: .env
+    # Only its own three variables: `env_file: .env` handed it every secret
+    # of the stack (SEG-09).
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ocabra}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ocabra}
@@ -197,8 +200,18 @@ services:
 
   redis:
     image: redis:7-alpine
+    # With REDIS_PASSWORD set (setup.sh generates it), every client has to
+    # authenticate (SEG-21): before, anything on the compose network could read
+    # and write oCabra's state and publish on its channels, such as the GPU
+    # power limits hw-monitor applies. Unset, Redis runs open as before.
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command:
+      - sh
+      - -c
+      - 'if [ -n "$$REDIS_PASSWORD" ]; then exec redis-server --requirepass "$$REDIS_PASSWORD"; else exec redis-server; fi'
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", 'redis-cli $${REDIS_PASSWORD:+-a "$$REDIS_PASSWORD" --no-auth-warning} ping | grep -q PONG']
       interval: 5s
       timeout: 3s
       retries: 10
@@ -211,7 +224,7 @@ services:
     privileged: true
     gpus: all
     environment:
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379/0
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://ocabra:ocabra@postgres:5432/ocabra}
       NVIDIA_VISIBLE_DEVICES: all
       THERMAL_CAP_ENABLED: ${THERMAL_CAP_ENABLED:-true}
@@ -484,10 +497,15 @@ services:
     build:
       context: ./gateway
       dockerfile: Dockerfile
-    env_file: .env
+    # Only what gateway/config.py reads, not the whole .env (SEG-09).
     environment:
       OCABRA_API_URL: http://api:8000
       GATEWAY_PORT: "9000"
+      GATEWAY_SERVICE_TOKEN: ${GATEWAY_SERVICE_TOKEN:-}
+      AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
+      DIRECTORY_UI_URL: ${DIRECTORY_UI_URL:-}
+      GATEWAY_STARTUP_TIMEOUT_S: ${GATEWAY_STARTUP_TIMEOUT_S:-180}
+      GATEWAY_TOUCH_INTERVAL_S: ${GATEWAY_TOUCH_INTERVAL_S:-30}
     ports:
       - "${GATEWAY_PORT:-9000}:9000"
     depends_on:

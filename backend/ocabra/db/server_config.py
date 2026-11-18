@@ -31,6 +31,7 @@ _ENV_ONLY_FIELDS: frozenset[str] = frozenset({
     "api_port",
     "app_version",
     "gateway_service_token",
+    "ocabra_secrets_key",
     "llama_cpp_server_bin",
     "bitnet_server_bin",
     "sglang_python_bin",

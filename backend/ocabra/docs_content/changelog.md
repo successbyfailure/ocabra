@@ -16,6 +16,36 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.108.0 — 2026-11-18
+
+### Cambiado
+
+- **Acción** — Las URLs `http(s)` en partes `image_url`, `video_url` y
+  `audio_url` de `/v1/chat/completions` (y de los Batches que lo usan) ya no
+  pueden apuntar a direcciones privadas: localhost, la LAN, la red de Docker o
+  la de metadatos. Antes el backend descargaba lo que le pidieras desde dentro
+  de la red del servidor. Ahora esa petición da `400` con
+  `code: "media_url_not_allowed"`. Las URLs públicas y las `data:` funcionan
+  igual. Si tus imágenes están en un servidor interno, mándalas como `data:`
+  o pide al administrador que añada el host a `MEDIA_URL_ALLOWED_HOSTS`.
+- **Acción** — Las opciones de modelo que ejecutan código (`trust_remote_code`,
+  `extra_args`, `tool_parser_plugin`, y `python_bin`/`serve_bin`/`serve_module`
+  de TensorRT-LLM) solo las puede activar un `system_admin`. Con el rol
+  `model_manager`, una petición a `/ocabra/*` que las active da `403` y dice
+  cuáles son. Desactivarlas o editar otros campos de un modelo que ya las
+  tiene no cambia.
+- **Acción** — El token de servicio (`X-Gateway-Token`) ya no permite actuar
+  como otro usuario con `X-Internal-User-Id`: se ignora la cabecera y la
+  petición sigue con la identidad del servicio. Solo el procesador de Batches,
+  dentro del propio servidor, puede hacerlo.
+
+### Corregido
+
+- Un Batch cuyo dueño se había borrado ya no se ejecuta con permisos de
+  servicio, que eran más amplios que los suyos: ahora sus peticiones dan `403`.
+
+---
+
 ## 0.107.2 — 2026-11-18
 
 ### Corregido

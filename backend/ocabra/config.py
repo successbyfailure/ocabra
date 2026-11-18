@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.107.2"
+APP_VERSION = "0.108.0"
 
 
 class Settings(BaseSettings):
@@ -730,6 +730,14 @@ class Settings(BaseSettings):
 
     # Auth
     jwt_secret: str = Field(default_factory=lambda: secrets.token_hex(32))
+    # Encrypts the stored secrets (federation keys, MCP auth/env); only in
+    # .env, never in the database (SEG-17, core/secrets_box.py). Keep it once
+    # set: losing it means losing what it encrypted.
+    ocabra_secrets_key: str = ""
+    # Media URLs in chat requests (SEG-11, api/openai/_media_urls.py): private
+    # addresses are refused unless allowed here (hostnames or CIDRs).
+    media_url_allow_private: bool = False
+    media_url_allowed_hosts: str = ""
     jwt_ttl_hours: int = 24
     jwt_remember_days: int = 30
     ocabra_admin_user: str = "ocabra"

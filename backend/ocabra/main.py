@@ -805,6 +805,15 @@ async def lifespan(app: FastAPI):
             await _session.commit()
         logger.info("jwt_secret_persisted")
 
+    # Stored secrets onto OCABRA_SECRETS_KEY (SEG-17): after the overrides, so
+    # the old session-secret key is the persisted one and still decrypts them.
+    from ocabra.core.secrets_box import rotate_stored_secrets
+
+    try:
+        await rotate_stored_secrets(_ASL)
+    except Exception as exc:  # noqa: BLE001 - the old key still reads them
+        logger.error("stored_secrets_rotation_failed", error=str(exc))
+
     # MCP registry (agents + MCP, Fase 1)
     from ocabra.agents.mcp_registry import MCPRegistry, set_registry
 
@@ -1449,6 +1458,12 @@ from ocabra.core.privacy import PrivacyHeaderMiddleware  # noqa: E402
 
 # X-Ocabra-Privacy on every response: which privacy mode served it.
 app.add_middleware(PrivacyHeaderMiddleware)
+
+from ocabra.api._risky_config import RiskyConfigMiddleware  # noqa: E402
+
+# Options that run arbitrary code (trust_remote_code, extra_args, …) are for
+# system_admin only, however they get in (SEG-04).
+app.add_middleware(RiskyConfigMiddleware)
 
 # ── ROUTERS ──────────────────────────────────────────────────
 # Each stream adds its router here. Do not remove this comment.

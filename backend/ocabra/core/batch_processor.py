@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
-import secrets
 import time
 import uuid
 from contextlib import suppress
@@ -100,14 +99,12 @@ class BatchProcessor:
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
-        # Internal service token used to call the FastAPI app on behalf of a
-        # batch owner. We piggyback on the gateway token machinery; if no
-        # gateway token is configured we generate an ephemeral one and inject
-        # it into settings for this process only.
-        if not settings.gateway_service_token:
-            settings.gateway_service_token = secrets.token_urlsafe(32)
-            logger.info("batch_processor_generated_service_token")
-        self._token = settings.gateway_service_token
+        # In-process token to call this app on behalf of a batch owner. Not the
+        # gateway's service token: that one reaches other containers and must
+        # not allow impersonation (SEG-09).
+        from ocabra.api._deps_auth import INTERNAL_TOKEN
+
+        self._token = INTERNAL_TOKEN
 
     def notify(self) -> None:
         """Wake the processor immediately (e.g. on batch creation)."""
@@ -755,7 +752,7 @@ class BatchProcessor:
         body.pop("stream_options", None)
 
         headers = {
-            "X-Gateway-Token": self._token,
+            "X-Ocabra-Internal-Token": self._token,
             "X-Internal-User-Id": user_id,
             "X-Internal-Request-Origin": "batch",
         }
