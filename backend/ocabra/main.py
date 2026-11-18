@@ -1417,6 +1417,48 @@ async def _vision_no_room_handler(request, exc):  # noqa: ANN001
     )
 
 
+from starlette.exceptions import HTTPException as _StarletteHTTPException  # noqa: E402
+
+
+@app.exception_handler(_StarletteHTTPException)
+async def _peer_fallback_not_found_handler(request, exc):  # noqa: ANN001
+    """A model only a peer has, whose peer failed: 503, not "does not exist".
+
+    When the chosen peer refuses or is unreachable the request falls back to
+    local, and a model that exists only on that peer (a pod's) then answered
+    404 "model not found": wrong, and not retryable. The fallback is recorded
+    in ``federation_info``; here a 404 after it becomes a retryable 503 that
+    names the node.
+    """
+    from fastapi.exception_handlers import http_exception_handler
+    from fastapi.responses import JSONResponse
+
+    info = getattr(request.state, "federation_info", None) or {}
+    if exc.status_code == 404 and info.get("fallback"):
+        peer = info.get("fallback_peer") or "a federation peer"
+        detail = info.get("fallback_detail")
+        message = (
+            f"The model is only available on node '{peer}', which did not serve the "
+            f"request ({detail}). Retry shortly." if detail
+            else f"The model is only available on node '{peer}', which did not serve "
+            "the request. Retry shortly."
+        )  # fmt: skip
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "error": {
+                        "message": message,
+                        "type": "server_error",
+                        "code": "peer_unavailable",
+                    }
+                }
+            },
+            headers={"Retry-After": "15"},
+        )
+    return await http_exception_handler(request, exc)
+
+
 @app.exception_handler(Exception)
 async def _log_unhandled_exception(request, exc):
     import traceback as _tb

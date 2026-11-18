@@ -55,7 +55,9 @@ def _post(app, state, profile):
 
 
 def test_an_upscale_is_recorded_and_resolves_routers():
-    app, state, profile = _app(AsyncMock(return_value=(b"mp4", {"X-Fps": "24"})))
+    app, state, profile = _app(
+        AsyncMock(return_value=(b"mp4", {"x-ocabra-fps": "24", "x-ocabra-frames": "120"}))
+    )
     resp, resolve, record = _post(app, state, profile)
 
     assert resp.status_code == 200
@@ -64,7 +66,7 @@ def test_an_upscale_is_recorded_and_resolves_routers():
     assert kw["request_kind"] == "video_upscale"
     assert kw["status_code"] == 200
     assert kw["endpoint_path"] == "/ocabra/video/upscale"
-    assert kw["work_size_meta"] == {"input_bytes": 1024}
+    assert kw["work_size_meta"] == {"input_bytes": 1024, "input_frames": 120}
 
 
 def test_a_failed_upscale_is_recorded_with_its_status():

@@ -47,3 +47,12 @@ def test_speech_embeddings_rerank_images():
 
 def test_chat_has_no_work_speed_here():
     assert work_speeds([_row("chat", 1000, None, inp=10, out=100)]) == []
+
+
+def test_video_upscale_is_frames_per_second():
+    rows = [
+        _row("video_upscale", 10000, {"input_frames": 240, "input_bytes": 1}),
+        _row("video_upscale", 5000, {"input_bytes": 1}),  # worker gave no frames
+    ]
+    s = _by_unit(rows)[(("video_upscale",), "frames_per_s")]
+    assert s["value"] == 24.0 and s["samples"] == 1

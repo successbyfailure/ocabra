@@ -7,6 +7,7 @@ POST /v1/audio/generate      — ACE-Step music generation
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Annotated, Any, NoReturn
 
@@ -69,19 +70,23 @@ def _parse_float_param(value: Any, param: str, default: float) -> float:
 
     ``float()`` on a client value used to run unguarded, so
     ``temperature=abc`` or ``speed="fast"`` escaped as a generic 500. A
-    missing field (or JSON ``null``) takes *default*.
+    missing field (or JSON ``null``) takes *default*. ``nan`` and ``inf``
+    parse as floats but are not numbers a model can use: also a 400.
     """
     if value is None:
         return default
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
+        number = math.nan
+    if not math.isfinite(number):
         raise _openai_error(
             f"Invalid value for '{param}': {str(value)[:50]!r} is not a number.",
             "invalid_request_error",
             param=param,
             code="invalid_value",
-        ) from None
+        )
+    return number
 
 
 def _is_diarize_requested(raw: str | None) -> bool:

@@ -514,7 +514,7 @@ class TestOpenAITTSWorkerAndFederationErrors:
         assert response.status_code == 503
         assert response.json()["detail"]["error"]["type"] == "server_error"
 
-    @pytest.mark.parametrize("speed", ["fast", [1], {"x": 1}])
+    @pytest.mark.parametrize("speed", ["fast", [1], {"x": 1}, "nan", "inf", "-Infinity"])
     def test_non_numeric_speed_is_a_400_naming_the_param(self, speed):
         client = TestClient(_make_tts_app())
         send = AsyncMock()

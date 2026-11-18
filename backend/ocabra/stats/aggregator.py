@@ -41,6 +41,7 @@ _WORK_SPEEDS: tuple[tuple[tuple[str, ...], str, str, bool], ...] = (
     (("embedding", "ollama_embedding"), "tokens_per_s", "input_tokens", True),
     (("rerank", "score", "classify", "pooling"), "documents_per_s", "n_documents", True),
     (("image_generation",), "s_per_image", "n_images", False),
+    (("video_upscale",), "frames_per_s", "input_frames", True),
     (("realtime_chat",), "tokens_per_s", "output_tokens", True),
 )
 

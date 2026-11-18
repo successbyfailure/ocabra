@@ -36,6 +36,18 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["video"])
 
 
+def _frames_from(stats: dict) -> int | None:
+    """Frame count the upscale worker reports (``x-ocabra-frames``)."""
+    for key, value in (stats or {}).items():
+        if key.lower() == "x-ocabra-frames":
+            try:
+                frames = int(float(value))
+            except (TypeError, ValueError):
+                return None
+            return frames if frames > 0 else None
+    return None
+
+
 @router.post(
     "/video/upscale",
     summary="Upscale a video segment",
@@ -78,6 +90,7 @@ async def upscale_video(
     started_at = datetime.now(UTC)
     started = time.monotonic()
     status_code, error = 200, None
+    work: dict = {"input_bytes": len(payload)}
     inflight_request_id = model_manager.begin_request(worker_key, user=_user)
     try:
         for attempt in range(2):
@@ -105,6 +118,11 @@ async def upscale_video(
                     target_height=target_height,
                     crf=crf,
                 )
+                frames = _frames_from(stats)
+                if frames:
+                    # What the duration estimator and the Stats speed column
+                    # read (frames per second).
+                    work["input_frames"] = frames
                 break
             except httpx.TransportError as exc:
                 logger.warning(
@@ -147,7 +165,7 @@ async def upscale_video(
                 request_kind="video_upscale",
                 status_code=status_code,
                 error_message=error,
-                work_size_meta={"input_bytes": len(payload)},
+                work_size_meta=work,
             )
         except Exception as exc:  # noqa: BLE001 -- stats must not break the response
             logger.warning("video_upscale_stats_failed", error=str(exc))

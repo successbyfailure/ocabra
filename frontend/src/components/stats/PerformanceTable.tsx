@@ -155,6 +155,7 @@ const WORK_UNIT: Record<string, (v: number) => string> = {
   tokens_per_s: (v) => `${v.toFixed(0)} tok/s`,
   documents_per_s: (v) => `${v.toFixed(1)} docs/s`,
   s_per_image: (v) => `${v.toFixed(1)} s/imagen`,
+  frames_per_s: (v) => `${v.toFixed(1)} fps`,
 }
 
 export function fmtWorkSpeed(w: WorkSpeed): string {
