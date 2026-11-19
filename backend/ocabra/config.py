@@ -823,6 +823,15 @@ class Settings(BaseSettings):
         ge=1,
         description="Max size in MB for image uploads at /v1/images/edits and /v1/images/upscale.",
     )
+    # Cap for the video segment uploaded to /ocabra/video/upscale. Segments are
+    # short and video-only (the client splits and remuxes), so 512 MB leaves
+    # plenty of room for a high-bitrate SD/HD chunk while stopping a runaway
+    # upload from filling memory or the worker's temp dir.
+    video_upscale_max_upload_mb: int = Field(
+        default=512,
+        ge=1,
+        description="Max size in MB of the video segment uploaded to /ocabra/video/upscale.",
+    )
     # Seconds before a generated image file is garbage-collected. OpenAI's URLs
     # are valid for 60 min; mirror that by default.
     image_url_ttl_seconds: int = 3600

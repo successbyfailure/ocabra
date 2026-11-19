@@ -30,10 +30,65 @@ from ocabra.api.openai._deps import (
     get_profile_registry,
     resolve_profile,
 )
+from ocabra.config import settings
 from ocabra.stats.collector import record_direct_request
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["video"])
+
+_READ_CHUNK_BYTES = 1024 * 1024
+
+# Stats headers the upscale workers (upscaler, FlashVSR) emit and that are
+# forwarded to the client. Anything else the worker answers with
+# (content-length, server, date, a future debug header...) is dropped: the
+# response is rebuilt here and must not inherit framing or internal headers.
+_FORWARDED_STATS_HEADERS = frozenset(
+    {
+        "x-ocabra-frames",
+        "x-ocabra-input-resolution",
+        "x-ocabra-model-resolution",
+        "x-ocabra-delivered-height",
+        "x-ocabra-seconds",
+        "x-ocabra-fps",
+        "x-ocabra-vram-peak-mb",
+    }
+)
+_MAX_HEADER_VALUE_LEN = 128
+
+
+def _forwarded_headers(stats: dict) -> dict[str, str]:
+    """Whitelisted worker stats headers, with values safe to re-emit."""
+    out: dict[str, str] = {}
+    for key, value in (stats or {}).items():
+        name = str(key).lower()
+        if name not in _FORWARDED_STATS_HEADERS:
+            continue
+        text = str(value)
+        if any(ch in text for ch in "\r\n\x00") or len(text) > _MAX_HEADER_VALUE_LEN:
+            continue
+        out[name] = text
+    return out
+
+
+async def _read_capped(file: UploadFile, max_bytes: int) -> bytes:
+    """Read the upload in chunks and stop with 413 as soon as it passes the cap.
+
+    ``file.size`` (known once Starlette has spooled the part) rejects without
+    reading at all; otherwise the chunked read never holds more than
+    ``max_bytes`` + one chunk in memory.
+    """
+    too_large = HTTPException(
+        status_code=413,
+        detail=f"Video segment exceeds the {max_bytes // (1024 * 1024)} MB upload limit",
+    )
+    if file.size is not None and file.size > max_bytes:
+        raise too_large
+    buffer = bytearray()
+    while chunk := await file.read(_READ_CHUNK_BYTES):
+        buffer.extend(chunk)
+        if len(buffer) > max_bytes:
+            raise too_large
+    return bytes(buffer)
 
 
 def _frames_from(stats: dict) -> int | None:
@@ -53,7 +108,8 @@ def _frames_from(stats: dict) -> int | None:
     summary="Upscale a video segment",
     description=(
         "Upscale/restore one self-contained video segment. Send video only "
-        "(no audio) and reassemble on the client side. Returns video/mp4."
+        "(no audio) and reassemble on the client side. Returns video/mp4. "
+        "Segments above VIDEO_UPSCALE_MAX_UPLOAD_MB (default 512 MB) get 413."
     ),
 )
 async def upscale_video(
@@ -78,16 +134,20 @@ async def upscale_video(
         crf: Encoder CRF of the output (default 14).
 
     Returns:
-        The upscaled segment as ``video/mp4``; the worker's stats headers
-        (frames, fps, VRAM, resolution) are forwarded.
+        The upscaled segment as ``video/mp4`` with the worker's stats headers
+        (``x-ocabra-frames``, ``-fps``, ``-seconds``, ``-input-resolution``,
+        ``-model-resolution``, ``-delivered-height``, ``-vram-peak-mb``); no
+        other worker header is forwarded.
 
     Raises:
         HTTPException 400: empty segment, or the model lacks the capability.
+        HTTPException 413: segment larger than ``VIDEO_UPSCALE_MAX_UPLOAD_MB``.
         HTTPException 503: the upscaler worker is unavailable (``Retry-After``).
         HTTPException: the worker's own error status (e.g. 507 for VRAM) is
             passed through.
     """
-    payload = await file.read()
+    max_bytes = max(1, int(settings.video_upscale_max_upload_mb)) * 1024 * 1024
+    payload = await _read_capped(file, max_bytes)
     if not payload:
         raise HTTPException(status_code=400, detail="Empty video segment")
 
@@ -150,7 +210,9 @@ async def upscale_video(
             except httpx.TransportError as exc:
                 logger.warning(
                     "upscale_worker_transport_error",
-                    model_id=worker_key, attempt=attempt + 1, error=str(exc),
+                    model_id=worker_key,
+                    attempt=attempt + 1,
+                    error=str(exc),
                 )
                 if attempt == 0:
                     await model_manager.unload(worker_key, reason="worker_transport_error")
@@ -195,4 +257,4 @@ async def upscale_video(
 
     # Las estadísticas del worker (fps, VRAM, resolución) se reenvían: son lo
     # único que permite a un cliente saber qué le costó de verdad su segmento.
-    return Response(content=body, media_type="video/mp4", headers=stats)
+    return Response(content=body, media_type="video/mp4", headers=_forwarded_headers(stats))
