@@ -266,6 +266,9 @@ class _ModelCalibration:
     sample_count: int
     residual_ratio: float       # relative spread, drives percentile confidence
     cold_start_p95_s: float     # from model_load_stats, 0 if unknown
+    # Median load time: what ``expected_s`` adds (the p95 goes to ``p95_s``).
+    # Adding the p95 to the expectation promised 68 s for a 17 s load.
+    cold_start_p50_s: float = 0.0
     chat_regression: _ChatRegression | None = None
     family_regression: _FamilyRegression | None = None
     # Largest output_tokens actually delivered for this model in the
@@ -480,6 +483,18 @@ def _fit_family_regression(
     )
 
 
+# Lo que tardo la peticion una vez servida: sin la espera a que cargase su
+# modelo (``load_ms``) ni la cola de admision (``queue_ms``). Con la duracion
+# bruta, una peticion de 1 s tras una carga en frio de 17 s pasaba por una de
+# 18 s y una sola dejaba la mediana del modelo en 18 s. Las filas sin esa
+# telemetria (antiguas o de rutas que no la anotan) quedan como estaban.
+_SERVICE_MS_SQL = (
+    "GREATEST(duration_ms"
+    " - COALESCE((runtime_telemetry->>'load_ms')::numeric, 0)"
+    " - COALESCE((runtime_telemetry->>'queue_ms')::numeric, 0), 0)"
+)
+
+
 class DurationEstimator:
     """Baseline percentile-based estimator (Nivel 1)."""
 
@@ -540,8 +555,10 @@ class DurationEstimator:
         """
         cal = self._calibrations.get(model_id)
         cold_start = 0.0
+        cold_start_p95 = 0.0
         if cal is not None and not currently_loaded:
-            cold_start = cal.cold_start_p95_s
+            cold_start = cal.cold_start_p50_s or cal.cold_start_p95_s
+            cold_start_p95 = cal.cold_start_p95_s
 
         if cal is None or cal.sample_count == 0:
             # Warmup path — nothing in request_stats yet.
@@ -553,7 +570,7 @@ class DurationEstimator:
             return Estimate(
                 expected_s=expected,
                 p50_s=p50,
-                p95_s=min(settings.estimator_max_estimate_s, p95 + cold_start),
+                p95_s=min(settings.estimator_max_estimate_s, p95 + cold_start_p95),
                 confidence=0.0,
                 source="family_default",
                 sample_count=0,
@@ -578,7 +595,7 @@ class DurationEstimator:
                 return Estimate(
                     expected_s=expected,
                     p50_s=pred_s,
-                    p95_s=min(settings.estimator_max_estimate_s, p95 + cold_start),
+                    p95_s=min(settings.estimator_max_estimate_s, p95 + cold_start_p95),
                     confidence=min(
                         1.0,
                         cal.confidence() * (
@@ -622,7 +639,7 @@ class DurationEstimator:
             return Estimate(
                 expected_s=expected,
                 p50_s=pred_s,
-                p95_s=min(settings.estimator_max_estimate_s, p95 + cold_start),
+                p95_s=min(settings.estimator_max_estimate_s, p95 + cold_start_p95),
                 # Regression confidence is the base cal.confidence() scaled up
                 # by how tight the residuals are relative to the prediction.
                 # Tight residuals + enough samples ≈ 1.0.
@@ -643,7 +660,7 @@ class DurationEstimator:
         return Estimate(
             expected_s=expected,
             p50_s=p50,
-            p95_s=min(settings.estimator_max_estimate_s, p95 + cold_start),
+            p95_s=min(settings.estimator_max_estimate_s, p95 + cold_start_p95),
             confidence=cal.confidence(),
             source="percentile",
             sample_count=cal.sample_count,
@@ -696,13 +713,13 @@ class DurationEstimator:
                 # 404s or timeouts at ``inference_request_timeout_seconds``.
                 rows = (await session.execute(
                     sa.text(
-                        """
+                        f"""
                         SELECT
                             model_id,
                             backend_type,
                             COUNT(*)                                                                  AS n,
-                            PERCENTILE_DISC(0.5)  WITHIN GROUP (ORDER BY duration_ms)::float / 1000.0 AS p50_s,
-                            PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY duration_ms)::float / 1000.0 AS p95_s,
+                            PERCENTILE_DISC(0.5)  WITHIN GROUP (ORDER BY {_SERVICE_MS_SQL})::float / 1000.0 AS p50_s,
+                            PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY {_SERVICE_MS_SQL})::float / 1000.0 AS p95_s,
                             MAX(output_tokens)                                                        AS max_output_tokens
                         FROM request_stats
                         WHERE started_at > :cutoff
@@ -721,18 +738,33 @@ class DurationEstimator:
                     sa.text(
                         """
                         SELECT
-                            model_id,
+                            split_part(model_id, '::', 1) AS model_id,
+                            PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY duration_ms)::float / 1000.0 AS p50_s,
                             PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY duration_ms)::float / 1000.0 AS p95_s
                         FROM model_load_stats
                         WHERE started_at > :cutoff
                           AND duration_ms IS NOT NULL
-                        GROUP BY model_id
+                        GROUP BY split_part(model_id, '::', 1)
                         """
                     ),
                     {"cutoff": load_cutoff},
                 )).all()
 
-            cold_by_model: dict[str, float] = {row.model_id: float(row.p95_s or 0.0) for row in loads}
+                # model_load_stats va por modelo base (``llamacpp_mks/qwen3:8b``,
+                # con ``::<hash>`` si es un peldaño) y request_stats por perfil
+                # (``qwen3:8b``): sin traducirlo no casaba ninguno y el
+                # arranque en frío salía siempre 0.
+                profile_rows = (await session.execute(
+                    sa.text("SELECT profile_id, base_model_id FROM model_profiles")
+                )).all()
+
+            cold_by_base: dict[str, tuple[float, float]] = {
+                row.model_id: (float(row.p50_s or 0.0), float(row.p95_s or 0.0)) for row in loads
+            }
+            cold_by_model: dict[str, tuple[float, float]] = dict(cold_by_base)
+            for row in profile_rows:
+                if row.base_model_id in cold_by_base:
+                    cold_by_model[row.profile_id] = cold_by_base[row.base_model_id]
 
             # Regression path — only chat-shaped families and only for
             # models with enough rows carrying BOTH input_tokens and
@@ -743,11 +775,11 @@ class DurationEstimator:
             async with AsyncSessionLocal() as session:
                 fit_rows = (await session.execute(
                     sa.text(
-                        """
+                        f"""
                         SELECT model_id,
                                input_tokens,
                                output_tokens,
-                               duration_ms::float AS duration_ms
+                               {_SERVICE_MS_SQL}::float AS duration_ms
                         FROM request_stats
                         WHERE started_at > :cutoff
                           AND status_code < 400
@@ -784,11 +816,11 @@ class DurationEstimator:
             async with AsyncSessionLocal() as session:
                 fam_rows = (await session.execute(
                     sa.text(
-                        """
+                        f"""
                         SELECT model_id,
                                backend_type,
                                work_size_meta,
-                               duration_ms::float AS duration_ms
+                               {_SERVICE_MS_SQL}::float AS duration_ms
                         FROM request_stats
                         WHERE started_at > :cutoff
                           AND status_code < 400
@@ -828,7 +860,8 @@ class DurationEstimator:
                     p95_s=p95,
                     sample_count=int(row.n),
                     residual_ratio=residual,
-                    cold_start_p95_s=cold_by_model.get(row.model_id, 0.0),
+                    cold_start_p95_s=cold_by_model.get(row.model_id, (0.0, 0.0))[1],
+                    cold_start_p50_s=cold_by_model.get(row.model_id, (0.0, 0.0))[0],
                     chat_regression=fit_by_model.get(row.model_id),
                     family_regression=fam_fit_by_model.get(row.model_id),
                     max_output_tokens_observed=int(row.max_output_tokens or 0),

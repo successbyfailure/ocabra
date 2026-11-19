@@ -28,6 +28,7 @@ from ocabra.core.model_manager_helpers import (  # noqa: F401
     strip_diarization_overrides,
 )
 from ocabra.core.model_ref import is_llama_cpp_family
+from ocabra.core.request_telemetry import current_runtime_telemetry
 from ocabra.core.runtime_coordinator import (
     OutputTokenLimitError,
     RuntimePlan,
@@ -1306,6 +1307,11 @@ async def prepare_worker_state(
     return await model_manager.get_state(worker_key)
 
 
+# Por debajo de esto, la vuelta de un modelo ya cargado (leer su estado y
+# tocar last_request_at); por encima, la peticion espero a que cargase.
+_LOAD_WAIT_NOTE_MIN_MS = 200
+
+
 async def _do_ensure_loaded(
     model_manager: ModelManager,
     model_id: str,
@@ -1313,8 +1319,24 @@ async def _do_ensure_loaded(
     """Core loading logic extracted from ``ensure_loaded``.
 
     Triggers on-demand loading, waits for LOADING state, and touches
-    ``last_request_at``.
+    ``last_request_at``. The wait goes to the request's telemetry as
+    ``load_ms`` (all routes, batches included): the stats row keeps the total
+    the client waited, and the duration estimator subtracts it so a cold start
+    does not pass for a slow request.
     """
+    started = time.monotonic()
+    state = await _do_ensure_loaded_inner(model_manager, model_id)
+    waited_ms = int((time.monotonic() - started) * 1000)
+    telemetry = current_runtime_telemetry.get()
+    if telemetry is not None and waited_ms >= _LOAD_WAIT_NOTE_MIN_MS:
+        telemetry.note_load_wait(waited_ms)
+    return state
+
+
+async def _do_ensure_loaded_inner(
+    model_manager: ModelManager,
+    model_id: str,
+) -> ModelState:
     from ocabra.core.model_manager import ModelStatus
 
     state = await model_manager.get_state(model_id)

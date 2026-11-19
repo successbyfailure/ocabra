@@ -16,6 +16,27 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.118.1 — 2026-11-19
+
+### Arreglos
+
+- **`POST /ocabra/estimate` ya no confunde una carga en frío con una petición
+  lenta.** La duración que aprende cada modelo incluía la espera a que se
+  cargase: una sola petición de 1 s tras una carga de 17 s dejaba la mediana
+  de ese modelo en 18 s. Solo el chat con streaming descontaba la carga; las
+  peticiones sin streaming, las líneas de batch y el resto de endpoints no.
+  Ahora se descuentan la carga y la cola en todas, y `expected_s` vuelve a ser
+  lo que tarda la petición con el modelo ya cargado (las filas antiguas se van
+  saliendo de la ventana de 7 días).
+- **`cold_start_seconds` daba siempre 0** y `expected_s` de un modelo
+  descargado no sumaba su carga: las cargas se guardan por modelo base y las
+  peticiones por perfil, y no se casaban. Ahora casan, y se suma la mediana
+  de sus cargas (el p95 solo a `p95_s`). La duración esperada de las
+  peticiones en `/ocabra/models/activity` hereda el arreglo cuando el modelo
+  aún no tiene ritmos medidos.
+
+---
+
 ## 0.118.0 — 2026-11-19
 
 ### Cambiado

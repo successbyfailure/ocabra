@@ -46,6 +46,7 @@ def _put(estimator: DurationEstimator, model_id: str, **kwargs) -> None:
         sample_count=kwargs.pop("sample_count", 200),
         residual_ratio=kwargs.pop("residual_ratio", 0.5),
         cold_start_p95_s=kwargs.pop("cold_start_p95_s", 0.0),
+        cold_start_p50_s=kwargs.pop("cold_start_p50_s", 0.0),
         max_output_tokens_observed=kwargs.pop("max_output_tokens_observed", 0),
         updated_at=kwargs.pop("updated_at", datetime.now(UTC)),
     )
@@ -162,6 +163,17 @@ class TestColdStart:
         assert result.cold_start_s == 42
         assert result.expected_s == 47.0
         # p95 is also inflated so drain-grace factors the cold-start.
+        assert result.p95_s == 62.0
+
+    @pytest.mark.asyncio
+    async def test_expected_adds_median_load_and_p95_adds_p95(self):
+        """Sumar el p95 de carga a lo esperado prometía 68 s para una carga
+        de 17 s (qwen3:8b, 19/11): lo esperado lleva la mediana."""
+        estimator = DurationEstimator()
+        _put(estimator, "vllm/x", p50_s=5, p95_s=20, cold_start_p95_s=42, cold_start_p50_s=12)
+        result = await estimator.estimate("vllm/x", currently_loaded=False)
+        assert result.cold_start_s == 12
+        assert result.expected_s == 17.0
         assert result.p95_s == 62.0
 
 

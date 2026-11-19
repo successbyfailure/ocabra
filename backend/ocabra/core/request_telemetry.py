@@ -20,6 +20,14 @@ current_inflight_request_id: ContextVar[str | None] = ContextVar(
 )
 
 
+# La telemetria de la peticion HTTP actual, para quien no tiene ``request``
+# a mano (``_do_ensure_loaded``). Lo fija el middleware de stats igual que el
+# id de arriba; fuera de el solo se MUTA el objeto, que si llega de vuelta.
+current_runtime_telemetry: ContextVar[RequestRuntimeTelemetry | None] = ContextVar(
+    "ocabra_current_runtime_telemetry", default=None
+)
+
+
 @dataclass
 class RequestRuntimeTelemetry:
     """Timings and admission facts collected while one inference is served.
@@ -45,6 +53,16 @@ class RequestRuntimeTelemetry:
 
     def mark_load(self, duration_ms: int) -> None:
         self.load_ms = max(0, int(duration_ms))
+
+    def note_load_wait(self, duration_ms: int) -> None:
+        """Espera a que el modelo cargue, si nadie la anotó antes.
+
+        La anota ``_do_ensure_loaded`` para todas las rutas (sin streaming,
+        batches, audio…); el chat con streaming la mide él mismo con
+        ``mark_load`` y esa manda.
+        """
+        if self.load_ms is None:
+            self.load_ms = max(0, int(duration_ms))
 
     def mark_prefill_since(self, started: float, now: float | None = None) -> None:
         """Prefill = lo que tardó el worker desde ``started`` (``time.monotonic``).

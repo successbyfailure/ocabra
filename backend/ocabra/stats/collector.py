@@ -34,7 +34,7 @@ from ocabra.core.admission import request_bound_for_peer as _request_bound_for_p
 from ocabra.core.admission import resolve_inflight_model_id as _resolve_inflight_model_id
 from ocabra.core.admission import should_track as _should_track
 from ocabra.core.background_tasks import spawn
-from ocabra.core.request_telemetry import RequestRuntimeTelemetry
+from ocabra.core.request_telemetry import RequestRuntimeTelemetry, current_runtime_telemetry
 
 logger = structlog.get_logger(__name__)
 
@@ -887,6 +887,9 @@ class StatsMiddleware(BaseHTTPMiddleware):
         else:
             start, started_at = time.monotonic(), datetime.now(UTC)
         request.state.runtime_telemetry = RequestRuntimeTelemetry(started_monotonic=start)
+        # call_next corre la app en un contexto copiado de este: ahi la ve
+        # ``_do_ensure_loaded`` para anotar la espera de carga.
+        telemetry_token = current_runtime_telemetry.set(request.state.runtime_telemetry)
         if admission.PAYLOAD_STATE_KEY in request.scope.get("state", {}):
             request_payload = request.scope["state"][admission.PAYLOAD_STATE_KEY]
         else:  # no admission layer in front (some tests): read it here
@@ -898,7 +901,12 @@ class StatsMiddleware(BaseHTTPMiddleware):
             mm = None
 
         try:
-            response = await call_next(request)
+            try:
+                response = await call_next(request)
+            finally:
+                # Quien llame a la app despues en este mismo contexto (el
+                # procesador de batches por ASGI) no debe heredarla.
+                current_runtime_telemetry.reset(telemetry_token)
         except asyncio.CancelledError:
             # Admin or owner cancelled via /ocabra/stats/requests/{id}/cancel.
             # ``CancelledError`` is BaseException on 3.8+, so the generic
