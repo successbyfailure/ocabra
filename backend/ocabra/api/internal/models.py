@@ -2353,12 +2353,29 @@ async def estimate_model_memory(
     model_id: str,
     body: ModelMemoryEstimateRequest,
     request: Request,
-    _user: UserContext = Depends(require_role("user")),
+    user: UserContext = Depends(require_role("user")),
 ) -> dict:
-    """Estimate memory requirements for the current backend/config combination."""
+    """Estimate memory requirements for the current backend/config combination.
+
+    Any authenticated user, for a model they have been granted (the model or
+    one of its profiles); otherwise 404, as for a model that does not exist.
+
+    Args:
+        model_id: Canonical model id.
+        body: ``ModelMemoryEstimateRequest`` (``extra_config`` to estimate
+            instead of the saved one, ``preferred_gpu``, ``run_probe``).
+
+    Returns:
+        The estimate payload (per-GPU MB, totals, notes).
+
+    Raises:
+        HTTPException 404: unknown model, or not granted to the caller.
+    """
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
-    if not state:
+    if not state or not await _user_can_access_model(
+        user, model_id, getattr(request.app.state, "profile_registry", None)
+    ):
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
 
     extra_config = (

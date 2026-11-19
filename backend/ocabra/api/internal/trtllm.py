@@ -7,6 +7,7 @@ Endpoints:
     DELETE /ocabra/trtllm/compile/{job_id}            — cancel a job
     DELETE /ocabra/trtllm/engines/{engine_name}       — delete engine + unregister model
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -185,6 +186,7 @@ async def stream_compile_job(
 
     # If already terminal, return final state immediately
     if state.status in {"done", "failed", "cancelled"}:
+
         async def _final_stream():
             data = json.dumps(state.to_dict())
             yield f"data: {data}\n\n"
@@ -198,7 +200,9 @@ async def stream_compile_job(
                 if await request.is_disconnected():
                     break
                 try:
-                    msg = await asyncio.wait_for(pubsub.get_message(ignore_subscribe_messages=True), timeout=1.0)
+                    msg = await asyncio.wait_for(
+                        pubsub.get_message(ignore_subscribe_messages=True), timeout=1.0
+                    )
                 except TimeoutError:
                     # Send keepalive comment
                     yield ": keepalive\n\n"
@@ -305,13 +309,17 @@ async def delete_engine(
         try:
             await model_manager.delete_model(model_id)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to unregister model: {exc}") from exc
+            raise HTTPException(
+                status_code=500, detail=f"Failed to unregister model: {exc}"
+            ) from exc
 
     if engine_root.exists():
         try:
             await asyncio.to_thread(shutil.rmtree, str(engine_root))
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to delete engine files: {exc}") from exc
+            raise HTTPException(
+                status_code=500, detail=f"Failed to delete engine files: {exc}"
+            ) from exc
 
     # Remove compile job records for this engine from DB
     try:
@@ -319,6 +327,7 @@ async def delete_engine(
 
         from ocabra.database import AsyncSessionLocal
         from ocabra.db.trtllm import TrtllmCompileJob
+
         async with AsyncSessionLocal() as session:
             await session.execute(
                 sa.delete(TrtllmCompileJob).where(TrtllmCompileJob.engine_name == engine_name)
@@ -345,9 +354,13 @@ async def estimate_compile(
     dtype: str = "fp16",
     max_batch_size: int = 1,
     max_seq_len: int = 4096,
-    _user: UserContext = Depends(require_role("user")),
+    _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
     """Estimate VRAM required to build and serve a TRT-LLM engine.
+
+    Requires ``model_manager``, like the compilation it plans: the source model
+    is any HuggingFace folder on disk, not necessarily a catalog model a group
+    could grant, so the per-model ACL has nothing to check here.
 
     Args:
         model_id: Canonical model id (e.g. vllm/Qwen/Qwen3-32B-AWQ).
@@ -432,25 +445,27 @@ def _estimate_vram(
 
         name_lower_full = model_id.lower()
         is_awq = "awq" in name_lower_full
-        is_gptq = "gptq" in name_lower_full or "int4" in name_lower_full or "int8" in name_lower_full
+        is_gptq = (
+            "gptq" in name_lower_full or "int4" in name_lower_full or "int8" in name_lower_full
+        )
 
     # ── Bytes per parameter ──────────────────────────────────────
     if is_awq or is_gptq:
-        bytes_per_param = 0.5   # 4-bit
+        bytes_per_param = 0.5  # 4-bit
     elif dtype in ("int8",):
         bytes_per_param = 1.0
     elif dtype in ("fp8",):
         bytes_per_param = 1.0
     else:
-        bytes_per_param = 2.0   # fp16 / bf16
+        bytes_per_param = 2.0  # fp16 / bf16
 
     # ── Weights VRAM per GPU ─────────────────────────────────────
-    weights_mb = (params_b * 1e9 * bytes_per_param) / (1024 ** 2) / tp_size
+    weights_mb = (params_b * 1e9 * bytes_per_param) / (1024**2) / tp_size
 
     # ── KV cache VRAM ────────────────────────────────────────────
     # TRT-LLM uses fp16 KV cache (2 bytes) regardless of model dtype
     kv_bytes_per_token = 2 * num_layers * num_kv_heads * head_dim * 2  # K+V, fp16
-    kv_mb = (kv_bytes_per_token * max_seq_len * max_batch_size) / (1024 ** 2) / tp_size
+    kv_mb = (kv_bytes_per_token * max_seq_len * max_batch_size) / (1024**2) / tp_size
 
     # ── Overhead (CUDA context + TRT plugins + activations) ──────
     overhead_mb = 2048  # ~2GB base
@@ -463,7 +478,7 @@ def _estimate_vram(
     # Calibrated from real builds:
     #   Qwen3-8B fp16 TP=1: built on 24GB (peak ~22GB) → 17GB weights + 0.3x = ~24GB
     #   Qwen3-32B AWQ TP=1: built on 24GB (failed disk, not OOM) → 15GB + 0.3x = ~22GB
-    build_extra_mb = weights_mb * 0.3   # TRT engine build workspace
+    build_extra_mb = weights_mb * 0.3  # TRT engine build workspace
     build_mb_per_gpu = weights_mb + build_extra_mb + overhead_mb
     build_total_mb = build_mb_per_gpu * tp_size
 
@@ -530,7 +545,9 @@ def _estimate_warnings(
         for i in range(count):
             h = pynvml.nvmlDeviceGetHandleByIndex(i)
             info = pynvml.nvmlDeviceGetMemoryInfo(h)
-            gpus.append({"index": i, "free_mb": info.free // (1024 ** 2), "total_mb": info.total // (1024 ** 2)})
+            gpus.append(
+                {"index": i, "free_mb": info.free // (1024**2), "total_mb": info.total // (1024**2)}
+            )
         pynvml.nvmlShutdown()
 
         if tp_size > len(gpus):
@@ -554,17 +571,21 @@ def _estimate_warnings(
 
             if build_mb > smallest_free:
                 if build_mb - smallest_free <= tight_margin_mb:
-                    warnings.append(_format_tight_message("build", build_mb, smallest_index, smallest_free))
+                    warnings.append(
+                        _format_tight_message("build", build_mb, smallest_index, smallest_free)
+                    )
                 else:
                     warnings.append(
-                        f"Build probablemente no cabe: necesita ~{build_mb/1024:.1f}GB/GPU y la GPU {smallest_index} tiene {smallest_free/1024:.1f}GB libres ahora"
+                        f"Build probablemente no cabe: necesita ~{build_mb / 1024:.1f}GB/GPU y la GPU {smallest_index} tiene {smallest_free / 1024:.1f}GB libres ahora"
                     )
             elif serve_mb > smallest_free:
                 if serve_mb - smallest_free <= tight_margin_mb:
-                    warnings.append(_format_tight_message("serving", serve_mb, smallest_index, smallest_free))
+                    warnings.append(
+                        _format_tight_message("serving", serve_mb, smallest_index, smallest_free)
+                    )
                 else:
                     warnings.append(
-                        f"Serving probablemente no cabe: necesita ~{serve_mb/1024:.1f}GB/GPU y la GPU {smallest_index} tiene {smallest_free/1024:.1f}GB libres ahora"
+                        f"Serving probablemente no cabe: necesita ~{serve_mb / 1024:.1f}GB/GPU y la GPU {smallest_index} tiene {smallest_free / 1024:.1f}GB libres ahora"
                     )
     except Exception:
         pass

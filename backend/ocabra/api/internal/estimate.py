@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ocabra.api._deps_auth import UserContext, require_role
+from ocabra.api.internal.models import _user_can_access_model
 from ocabra.core.duration_estimator import DurationEstimator
 
 logger = structlog.get_logger(__name__)
@@ -61,13 +62,17 @@ class EstimateResponse(BaseModel):
 async def estimate_request(
     body: EstimateRequest,
     request: Request,
-    _user: UserContext = Depends(require_role("user")),
+    user: UserContext = Depends(require_role("user")),
 ) -> EstimateResponse:
     """Predict how long an inference request would take, without running it.
 
-    Any authenticated user (role ``user``). ``model`` may be a profile id, a
-    router (its first enabled target is used) or a canonical ``backend/model``
-    id. The cold-start cost is added when the model is not loaded.
+    Any authenticated user (role ``user``), for models they have been granted:
+    a profile or router must be in their groups, a canonical id must be granted
+    directly or through one of its profiles (same rule as ``GET /models``).
+    Anything else answers 404, like a model that does not exist, so its name is
+    not leaked. ``model`` may be a profile id, a router (its first enabled
+    target is used) or a canonical ``backend/model`` id. The cold-start cost is
+    added when the model is not loaded.
 
     Args:
         body: ``EstimateRequest`` with ``model`` and the would-be request
@@ -80,12 +85,10 @@ async def estimate_request(
         ``p95_seconds``.
 
     Raises:
-        HTTPException 404: unknown model or profile.
+        HTTPException 404: unknown model or profile, or not granted to the caller.
         HTTPException 503: the estimator is not initialised yet (``Retry-After``).
     """
-    estimator: DurationEstimator | None = getattr(
-        request.app.state, "duration_estimator", None
-    )
+    estimator: DurationEstimator | None = getattr(request.app.state, "duration_estimator", None)
     if estimator is None:
         raise HTTPException(
             status_code=503,
@@ -111,10 +114,13 @@ async def estimate_request(
     stats_key: str | None = None
     base_model_id: str | None = None
     backend_type: str | None = None
+    not_found = HTTPException(status_code=404, detail=f"Model '{body.model}' not found")
 
     if profile_registry is not None:
         profile = await profile_registry.get(body.model)
         if profile is not None:
+            if not user.can_access_model(profile.profile_id):
+                raise not_found
             stats_key = profile.profile_id
             if getattr(profile, "profile_kind", "execution") == "router":
                 for target_id in profile.routing_targets or []:
@@ -129,17 +135,17 @@ async def estimate_request(
         # Legacy path: canonical model_id.
         state = await model_manager.get_state(body.model)
         if state is not None:
+            if not await _user_can_access_model(user, state.model_id, profile_registry):
+                raise not_found
             stats_key = state.model_id
             base_model_id = state.model_id
             backend_type = state.backend_type
 
     if stats_key is None or base_model_id is None:
-        raise HTTPException(status_code=404, detail=f"Model '{body.model}' not found")
+        raise not_found
 
     state = await model_manager.get_state(base_model_id)
-    currently_loaded = bool(
-        state is not None and getattr(state.status, "value", "") == "loaded"
-    )
+    currently_loaded = bool(state is not None and getattr(state.status, "value", "") == "loaded")
     if backend_type is None and state is not None:
         backend_type = state.backend_type
 
