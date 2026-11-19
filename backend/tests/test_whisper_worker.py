@@ -292,3 +292,235 @@ def test_progress_endpoint_lists_jobs():
     assert 1500 <= jobs["req-1"]["elapsedMs"] <= 3500
     assert jobs["req-1"]["transcribingMs"] is None
     whisper_worker.runtime.progress.clear()
+
+
+# --- Preparación rápida de audios largos (19/11) ------------------------------
+#
+# Copias literales de lo que hace faster-whisper 1.2.1 (collect_chunks y
+# FeatureExtractor.__call__/stft), para comprobar sin faster-whisper instalado
+# que las versiones del worker dan exactamente lo mismo. Si faster-whisper está
+# (entorno del worker), se compara además contra el original de verdad.
+
+
+def _reference_collect_chunks(audio, chunks, sampling_rate=16000, max_duration=float("inf")):
+    if not chunks:
+        return [np.array([], dtype=np.float32)], [{"offset": 0, "duration": 0, "segments": []}]
+    audio_chunks, chunks_metadata, current_segments = [], [], []
+    current_duration = total_duration = 0
+    current_audio = np.array([], dtype=np.float32)
+    for chunk in chunks:
+        if current_duration + chunk["end"] - chunk["start"] > max_duration * sampling_rate:
+            audio_chunks.append(current_audio)
+            chunks_metadata.append({
+                "offset": total_duration / sampling_rate,
+                "duration": current_duration / sampling_rate,
+                "segments": current_segments,
+            })
+            total_duration += current_duration
+            current_segments = []
+            current_audio = audio[chunk["start"] : chunk["end"]]
+            current_duration = chunk["end"] - chunk["start"]
+        else:
+            current_segments.append(chunk)
+            current_audio = np.concatenate((current_audio, audio[chunk["start"] : chunk["end"]]))
+            current_duration += chunk["end"] - chunk["start"]
+    audio_chunks.append(current_audio)
+    chunks_metadata.append({
+        "offset": total_duration / sampling_rate,
+        "duration": current_duration / sampling_rate,
+        "segments": current_segments,
+    })
+    return audio_chunks, chunks_metadata
+
+
+class _ReferenceFeatureExtractor:
+    """El log-mel de faster-whisper 1.2.1, sin las comprobaciones de entrada."""
+
+    def __init__(self, feature_size=128, sampling_rate=16000, hop_length=160, chunk_length=30, n_fft=400):
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.chunk_length = chunk_length
+        self.n_samples = chunk_length * sampling_rate
+        self.nb_max_frames = self.n_samples // hop_length
+        self.time_per_frame = hop_length / sampling_rate
+        self.sampling_rate = sampling_rate
+        rng = np.random.default_rng(7)
+        self.mel_filters = rng.random((feature_size, n_fft // 2 + 1)).astype("float32") / 50
+
+    @staticmethod
+    def stft(
+        input_array,
+        n_fft,
+        hop_length=None,
+        win_length=None,
+        window=None,
+        center=True,
+        mode="reflect",
+        normalized=False,
+        onesided=None,
+        return_complex=None,
+    ):
+        _ = win_length, normalized, onesided, return_complex
+        squeeze = input_array.ndim == 1
+        if squeeze:
+            input_array = np.expand_dims(input_array, axis=0)
+        if center:
+            pad = n_fft // 2
+            input_array = np.pad(input_array, ((0, 0), (pad, pad)), mode=mode)
+        batch, length = input_array.shape
+        n_frames = 1 + (length - n_fft) // hop_length
+        frames = np.lib.stride_tricks.as_strided(
+            input_array,
+            (batch, n_frames, n_fft),
+            (input_array.strides[0], hop_length * input_array.strides[1], input_array.strides[1]),
+        )
+        output = np.fft.rfft(frames * window, n=n_fft, axis=-1).transpose((0, 2, 1))
+        return output.squeeze(0) if squeeze else output
+
+    def __call__(self, waveform, padding=160, chunk_length=None):
+        if chunk_length is not None:
+            self.n_samples = chunk_length * self.sampling_rate
+            self.nb_max_frames = self.n_samples // self.hop_length
+        if waveform.dtype is not np.float32:
+            waveform = waveform.astype(np.float32)
+        if padding:
+            waveform = np.pad(waveform, (0, padding))
+        window = np.hanning(self.n_fft + 1)[:-1].astype("float32")
+        stft = self.stft(
+            waveform, self.n_fft, self.hop_length, window=window, return_complex=True
+        ).astype("complex64")
+        magnitudes = np.abs(stft[..., :-1]) ** 2
+        mel_spec = self.mel_filters @ magnitudes
+        log_spec = np.log10(np.clip(mel_spec, a_min=1e-10, a_max=None))
+        log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
+        return (log_spec + 4.0) / 4.0
+
+
+def _speech_chunks(rng, total, n):
+    cuts = np.sort(rng.choice(np.arange(1, total), size=2 * n, replace=False))
+    return [{"start": int(cuts[2 * i]), "end": int(cuts[2 * i + 1])} for i in range(n)]
+
+
+@pytest.mark.parametrize("max_duration", [float("inf"), 1.0, 0.25, 0.0001])
+def test_collect_chunks_linear_is_identical_to_faster_whisper(max_duration):
+    """faster-whisper 1.2.1 junta los trozos con voz concatenando uno a uno
+    (cuadrático): con 1 h 35 min eran 150 s de los ~190 de preparación. La
+    versión lineal tiene que dar los mismos arrays, dtype y metadatos."""
+    rng = np.random.default_rng(1)
+    audio = rng.standard_normal(16000 * 20).astype(np.float32)
+    chunks = _speech_chunks(rng, audio.shape[0], 40)
+    references = [_reference_collect_chunks]
+    try:
+        from faster_whisper.vad import collect_chunks as real
+    except ImportError:
+        pass
+    else:
+        references.append(real)
+    got_audio, got_meta = whisper_worker._collect_chunks_linear(
+        audio, chunks, max_duration=max_duration
+    )
+    for reference in references:
+        ref_audio, ref_meta = reference(audio, chunks, max_duration=max_duration)
+        assert got_meta == ref_meta
+        assert len(got_audio) == len(ref_audio)
+        for got, ref in zip(got_audio, ref_audio, strict=True):
+            assert got.dtype == ref.dtype
+            assert np.array_equal(got, ref)
+
+
+def test_collect_chunks_linear_without_speech():
+    audio, meta = whisper_worker._collect_chunks_linear(np.zeros(10, dtype=np.float32), [])
+    ref_audio, ref_meta = _reference_collect_chunks(np.zeros(10, dtype=np.float32), [])
+    assert meta == ref_meta
+    assert audio[0].dtype == ref_audio[0].dtype
+    assert audio[0].size == 0
+
+
+@pytest.mark.parametrize("samples", [0, 1, 159, 400, 16000 * 3 + 7, 16000 * 9])
+def test_blocked_log_mel_is_bit_identical(monkeypatch, samples):
+    """El log-mel por tramos y en hilos da exactamente lo mismo que el de
+    faster-whisper, incluido el suelo relativo al máximo GLOBAL (no por
+    tramo). Tramos pequeños para que haya muchos y un resto."""
+    monkeypatch.setattr(whisper_worker, "_LOG_MEL_FRAMES_PER_BLOCK", 37)
+    monkeypatch.setattr(whisper_worker, "_log_mel_threads", lambda: 4)
+    rng = np.random.default_rng(samples)
+    wave = (rng.standard_normal(samples) * 0.1).astype(np.float32)
+    if samples > 16000 * 5:
+        wave[: 16000 * 2] *= 1e-6  # un tramo casi en silencio: lo toca el suelo global
+    base = _ReferenceFeatureExtractor()
+    fast = whisper_worker._make_fast_feature_extractor(base)
+    expected = base(wave)
+    got = fast(wave)
+    assert got.dtype == expected.dtype == np.float32
+    assert got.shape == expected.shape
+    assert np.array_equal(got, expected)
+    # Conserva lo que faster-whisper lee del extractor.
+    assert fast.nb_max_frames == base.nb_max_frames
+    assert fast.sampling_rate == base.sampling_rate
+
+
+def test_blocked_log_mel_matches_real_faster_whisper(monkeypatch):
+    feature_extractor = pytest.importorskip("faster_whisper.feature_extractor")
+    monkeypatch.setattr(whisper_worker, "_LOG_MEL_FRAMES_PER_BLOCK", 101)
+    base = feature_extractor.FeatureExtractor(feature_size=128)
+    fast = whisper_worker._make_fast_feature_extractor(base)
+    wave = (np.random.default_rng(3).standard_normal(16000 * 45) * 0.1).astype(np.float32)
+    assert np.array_equal(fast(wave), base(wave))
+    assert np.array_equal(fast(wave, chunk_length=20), base(wave, chunk_length=20))
+    assert fast.nb_max_frames == base.nb_max_frames
+
+
+def test_install_fast_preprocessing_patches_faster_whisper_once(monkeypatch):
+    fake_transcribe = SimpleNamespace(collect_chunks=_reference_collect_chunks)
+    fake_vad = SimpleNamespace(collect_chunks=_reference_collect_chunks)
+    fake_package = SimpleNamespace(transcribe=fake_transcribe, vad=fake_vad)
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_package)
+    monkeypatch.setitem(sys.modules, "faster_whisper.transcribe", fake_transcribe)
+    monkeypatch.setitem(sys.modules, "faster_whisper.vad", fake_vad)
+    model = SimpleNamespace(feature_extractor=_ReferenceFeatureExtractor())
+
+    whisper_worker._install_fast_preprocessing(model, "cuda")
+    first = model.feature_extractor
+    assert fake_transcribe.collect_chunks is whisper_worker._collect_chunks_linear
+    assert fake_vad.collect_chunks is whisper_worker._collect_chunks_linear
+    assert isinstance(first, _ReferenceFeatureExtractor)
+    assert first._ocabra_fast
+    whisper_worker._install_fast_preprocessing(model, "cpu")
+    assert model.feature_extractor is first  # idempotente
+
+
+def test_run_transcription_reports_audio_seconds_while_preparing(monkeypatch):
+    """La duración sale de la cabecera antes de decodificar: el panel la
+    enseña durante la preparación. Luego manda la del audio decodificado."""
+    progress: dict = {"phase": "preparing", "startedMonotonic": 0.0, "updatedMonotonic": 0.0}
+    seen: dict = {}
+    monkeypatch.setattr(whisper_worker, "_probe_audio_seconds", lambda path: 5700.0)
+
+    class FakeModel:
+        def transcribe(self, *args, **kwargs):
+            seen.update(phase=progress["phase"], audio=progress.get("audioSeconds"))
+            return iter(()), SimpleNamespace(duration=5699.999, language="es")
+
+    whisper_worker._run_transcription(
+        "/tmp/x.mp3", FakeModel(), None, None, 0.0, False, None, ["segment"], progress=progress
+    )
+    assert seen == {"phase": "preparing", "audio": 5700.0}
+    assert progress["audioSeconds"] == 5699.999
+
+
+def test_run_transcription_keeps_probed_seconds_without_info_duration(monkeypatch):
+    progress: dict = {"phase": "preparing", "startedMonotonic": 0.0, "updatedMonotonic": 0.0}
+    monkeypatch.setattr(whisper_worker, "_probe_audio_seconds", lambda path: 12.5)
+
+    class FakeModel:
+        def transcribe(self, *args, **kwargs):
+            return iter(()), SimpleNamespace(language="es")
+
+    whisper_worker._run_transcription(
+        "/tmp/x.mp3", FakeModel(), None, None, 0.0, False, None, ["segment"], progress=progress
+    )
+    assert progress["audioSeconds"] == 12.5
+
+
+def test_probe_audio_seconds_unknown_file_is_none(tmp_path):
+    assert whisper_worker._probe_audio_seconds(str(tmp_path / "missing.mp3")) is None

@@ -149,8 +149,10 @@ def create_app(
 
         Por cada una: ``phase`` (``preparing`` mientras decodifica el audio y
         busca la voz, luego ``transcribing`` y ``diarizing``), duración del
-        audio, segundos de audio ya transcritos, segmentos, tiempo desde que
-        llegó y desde que empezó a transcribir (``transcribingMs``, null antes).
+        audio (ya en ``preparing``, leída de la cabecera; al empezar a
+        transcribir, la exacta del audio decodificado), segundos de audio ya
+        transcritos, segmentos, tiempo desde que llegó y desde que empezó a
+        transcribir (``transcribingMs``, null antes).
         Solo lectura; vacío si no hay ninguna.
         """
         now = time.monotonic()
@@ -416,12 +418,221 @@ def _create_whisper_model(
 
     from faster_whisper import WhisperModel
 
-    return WhisperModel(
+    model = WhisperModel(
         model_id,
         device=device,
         compute_type=compute_type,
         num_workers=max(1, num_workers),
     )
+    _install_fast_preprocessing(model, device)
+    return model
+
+
+# --- Preparación rápida de audios largos -------------------------------------
+#
+# Antes de entregar el primer segmento, faster-whisper decodifica el audio
+# entero, pasa el VAD, junta los trozos con voz y calcula el log-mel de todo.
+# Con 1 h 35 min eso eran 190-250 s (medido 19/11 en el 3060, host cargado):
+# 150-200 s se iban en juntar los trozos (``collect_chunks`` de faster-whisper 1.2.1
+# concatena trozo a trozo, cuadrático en el número de trozos) y 18-55 s en el
+# log-mel con numpy (y ~5 GB de RAM de intermedios). Las dos piezas se cambian
+# por equivalentes que dan el mismo resultado bit a bit; ver los tests.
+
+
+def _collect_chunks_linear(
+    audio: "np.ndarray",
+    chunks: list[dict],
+    sampling_rate: int = 16000,
+    max_duration: float = float("inf"),
+) -> tuple[list["np.ndarray"], list[dict[str, Any]]]:
+    """Igual que ``faster_whisper.vad.collect_chunks``, pero lineal.
+
+    Mismos trozos, mismos metadatos (incluida su rareza: el trozo que abre un
+    grupo nuevo al pasarse de ``max_duration`` no entra en ``segments``); solo
+    cambia que cada grupo se concatena una vez en vez de trozo a trozo.
+    """
+    import numpy as np
+
+    if not chunks:
+        return [np.array([], dtype=np.float32)], [{"offset": 0, "duration": 0, "segments": []}]
+
+    audio_chunks: list[np.ndarray] = []
+    chunks_metadata: list[dict[str, Any]] = []
+    current_segments: list[dict] = []
+    current_duration = 0
+    total_duration = 0
+    # El original arranca de un array float32 vacío y, tras partir un grupo,
+    # del propio trozo: se respeta para que el dtype salga igual.
+    pieces: list[np.ndarray] = [np.array([], dtype=np.float32)]
+
+    def _join(parts: list[np.ndarray]) -> np.ndarray:
+        return parts[0] if len(parts) == 1 else np.concatenate(parts)
+
+    for chunk in chunks:
+        length = chunk["end"] - chunk["start"]
+        if current_duration + length > max_duration * sampling_rate:
+            audio_chunks.append(_join(pieces))
+            chunks_metadata.append({
+                "offset": total_duration / sampling_rate,
+                "duration": current_duration / sampling_rate,
+                "segments": current_segments,
+            })
+            total_duration += current_duration
+            current_segments = []
+            pieces = [audio[chunk["start"] : chunk["end"]]]
+            current_duration = length
+        else:
+            current_segments.append(chunk)
+            pieces.append(audio[chunk["start"] : chunk["end"]])
+            current_duration += length
+
+    audio_chunks.append(_join(pieces))
+    chunks_metadata.append({
+        "offset": total_duration / sampling_rate,
+        "duration": current_duration / sampling_rate,
+        "segments": current_segments,
+    })
+    return audio_chunks, chunks_metadata
+
+
+# Fotogramas por tramo de la STFT: 8192 = ~82 s de audio, ~30 MB de
+# intermedios por tramo (el original sacaba ~5 GB de golpe con 1 h 35 min).
+_LOG_MEL_FRAMES_PER_BLOCK = 1 << 13
+
+
+def _log_mel_threads() -> int:
+    # numpy suelta el GIL en la FFT. 8 hilos bajaron de 18-53 s a 7-10 s el
+    # log-mel de 1 h 35 min con el host cargado; en máquinas pequeñas, la mitad.
+    return max(1, min(8, (os.cpu_count() or 2) // 2))
+
+
+def _make_fast_feature_extractor(base: Any) -> Any:
+    """Copia de ``base`` (FeatureExtractor de faster-whisper) con la STFT por tramos.
+
+    Lo caro del original es la STFT de todo el audio de una vez, en un hilo y
+    con intermedios de varios GB. Aquí la STFT y las magnitudes van por tramos
+    de fotogramas en varios hilos (cada fotograma es una FFT independiente:
+    mismo resultado bit a bit), y el resto se hace como el original y sobre el
+    array entero: el producto por los filtros mel con la MISMA forma y
+    disposición en memoria (OpenBLAS no da lo mismo por columnas si cambia la
+    forma o el número de hilos: hacerlo por tramos difería en el último bit),
+    log10, suelo 8 por debajo del máximo global y ``(x + 4) / 4``. Resultado
+    idéntico al de faster-whisper (tests y 1 h 35 min reales). Probado también
+    en GPU con torch: 2,4 s en vez de 7-10, pero difiere en ~1e-4 y eso cambió
+    la puntuación o el corte de 12 de 1.379 segmentos; no compensa.
+    """
+    import numpy as np
+
+    base_cls = type(base)
+
+    class _BlockedFeatureExtractor(base_cls):  # type: ignore[misc, valid-type]
+        def __call__(self, waveform: "np.ndarray", padding: int = 160, chunk_length: Any = None):
+            if chunk_length is not None:
+                self.n_samples = chunk_length * self.sampling_rate
+                self.nb_max_frames = self.n_samples // self.hop_length
+
+            if waveform.dtype is not np.float32:
+                waveform = waveform.astype(np.float32)
+            if padding:
+                waveform = np.pad(waveform, (0, padding))
+
+            n_fft, hop = self.n_fft, self.hop_length
+            # El centrado del original: reflexión de n_fft // 2 a cada lado.
+            pad = n_fft // 2
+            padded = np.pad(waveform[None, :], ((0, 0), (pad, pad)), mode="reflect")[0]
+            # El original calcula 1 + (len - n_fft) // hop fotogramas y tira el último.
+            n_frames = (padded.shape[0] - n_fft) // hop
+            window = np.hanning(n_fft + 1)[:-1].astype("float32")
+            # Misma disposición que las magnitudes del original (frecuencia
+            # contigua por fotograma): el producto mel recibe exactamente lo mismo.
+            magnitudes = np.empty((n_frames, n_fft // 2 + 1), dtype=np.float32).T
+            block = _LOG_MEL_FRAMES_PER_BLOCK
+
+            def _work(start: int) -> None:
+                stop = min(start + block, n_frames)
+                samples = padded[start * hop : (stop - 1) * hop + n_fft]
+                stft = self.stft(
+                    samples, n_fft, hop, window=window, center=False, return_complex=True
+                ).astype("complex64")
+                magnitudes[:, start:stop] = np.abs(stft) ** 2
+
+            starts = range(0, n_frames, block)
+            threads = min(_log_mel_threads(), len(starts))
+
+            def _each_block(fn: Any) -> list[Any]:
+                if threads <= 1:
+                    return [fn(start) for start in starts]
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(threads, thread_name_prefix="log-mel") as pool:
+                    return list(pool.map(fn, starts))
+
+            _each_block(_work)
+            log_spec = self.mel_filters @ magnitudes
+
+            # De aquí en adelante todo es elemento a elemento (mismo valor esté
+            # donde esté cada uno; comprobado), así que va por tramos y en hilos
+            # sobre el propio array: con el host cargado, de una vez eran 11 s.
+            def _log(start: int) -> Any:
+                part = log_spec[:, start : start + block]
+                np.clip(part, 1e-10, None, out=part)
+                np.log10(part, out=part)
+                return part.max() if part.size else None
+
+            peak = max(value for value in _each_block(_log) if value is not None)
+            floor = peak - 8.0
+
+            def _normalize(start: int) -> None:
+                part = log_spec[:, start : start + block]
+                np.maximum(part, floor, out=part)
+                part += 4.0
+                part /= 4.0
+
+            _each_block(_normalize)
+            return log_spec
+
+    fast = _BlockedFeatureExtractor.__new__(_BlockedFeatureExtractor)
+    fast.__dict__.update(base.__dict__)
+    fast._ocabra_fast = True
+    return fast
+
+
+def _install_fast_preprocessing(model: Any, device: str) -> None:
+    """Cambia en faster-whisper las dos piezas lentas con audios largos.
+
+    ``collect_chunks`` lineal y log-mel por tramos en varios hilos; los dos dan
+    el mismo resultado que los originales. Idempotente; sin faster-whisper
+    (modelos de prueba) no hace nada.
+    """
+    _ = device  # el log-mel va en CPU en los dos casos (ver arriba por qué)
+    try:
+        import faster_whisper.transcribe as fw_transcribe
+        import faster_whisper.vad as fw_vad
+    except Exception:  # noqa: BLE001 - sin faster-whisper no hay nada que cambiar
+        return
+    fw_transcribe.collect_chunks = _collect_chunks_linear
+    fw_vad.collect_chunks = _collect_chunks_linear
+
+    extractor = getattr(model, "feature_extractor", None)
+    if extractor is None or getattr(extractor, "_ocabra_fast", False):
+        return
+    model.feature_extractor = _make_fast_feature_extractor(extractor)
+
+
+def _probe_audio_seconds(audio_path: str) -> float | None:
+    """Duración del audio por la cabecera (PyAV), sin decodificarlo; None si no se sabe."""
+    try:
+        import av
+
+        with av.open(audio_path, mode="r", metadata_errors="ignore") as container:
+            if container.duration:
+                return float(container.duration) / 1_000_000  # AV_TIME_BASE
+            stream = container.streams.audio[0]
+            if stream.duration and stream.time_base:
+                return float(stream.duration * stream.time_base)
+    except Exception:  # noqa: BLE001 - solo es para el panel
+        return None
+    return None
 
 
 def _create_nemo_model(model_id: str, device: str) -> _NemoModelAdapter:
@@ -669,6 +880,14 @@ def _run_transcription(
     # also internally for diarization so segments can be split on speaker turns.
     need_words = expose_words or diarizing
 
+    if progress is not None and not progress.get("audioSeconds"):
+        # La cabecera ya dice cuánto dura: el panel lo enseña durante la
+        # preparación en vez de esperar a que faster-whisper decodifique todo.
+        probed = _probe_audio_seconds(audio_path)
+        if probed:
+            progress["audioSeconds"] = probed
+            progress["updatedMonotonic"] = time.monotonic()
+
     segments, info = model.transcribe(
         audio_path,
         language=language,
@@ -686,9 +905,13 @@ def _run_transcription(
     segment_list: list[dict[str, Any]] = []
     text_parts: list[str] = []
     if progress is not None:
-        # Duración total del audio: se conoce antes de decodificar nada.
+        # Duración exacta (la del audio decodificado) en cuanto se conoce; la
+        # de la cabecera queda si faster-whisper no da ninguna.
         duration = getattr(info, "duration", None)
-        progress["audioSeconds"] = float(duration) if duration else None
+        if duration:
+            progress["audioSeconds"] = float(duration)
+        else:
+            progress.setdefault("audioSeconds", None)
         now = time.monotonic()
         progress["phase"] = "transcribing"
         progress["transcribeStartedMonotonic"] = now
