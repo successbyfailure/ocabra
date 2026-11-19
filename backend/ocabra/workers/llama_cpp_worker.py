@@ -70,6 +70,9 @@ def parse_args() -> argparse.Namespace:
     # for GGUFs that ship without a baked ``tokenizer.chat_template`` — see the
     # backend's option docstring for context.
     parser.add_argument("--chat-template", default=None)
+    # LoRA adapters, forwarded as given (see LlamaCppBackend.lora_args).
+    parser.add_argument("--lora", default=None)
+    parser.add_argument("--lora-scaled", default=None)
     parser.add_argument("--jinja", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--reasoning", choices=("on", "off", "auto"), default=None)
     parser.add_argument(
@@ -189,6 +192,10 @@ def build_command(args: argparse.Namespace) -> list[str]:
         cmd.extend(["--mmproj-device", args.mmproj_device])
     if args.chat_template:
         cmd.extend(["--chat-template", args.chat_template])
+    if args.lora:
+        cmd.extend(["--lora", args.lora])
+    if args.lora_scaled:
+        cmd.extend(["--lora-scaled", args.lora_scaled])
     if args.jinja is not None:
         cmd.append("--jinja" if args.jinja else "--no-jinja")
     if args.reasoning is not None:

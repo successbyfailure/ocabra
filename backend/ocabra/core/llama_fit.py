@@ -93,6 +93,7 @@ def build_args(
     split_mode: str | None = None,
     tensor_split: list[float] | None = None,
     main_gpu: int | None = None,
+    lora: list[str] | None = None,
 ) -> list[str]:
     """CLI arguments for ``llama-fit-params --fit-print`` mirroring a launch.
 
@@ -124,6 +125,8 @@ def build_args(
         args += ["-ts", ",".join(_fmt(r) for r in tensor_split)]
     if main_gpu is not None:
         args += ["-mg", str(int(main_gpu))]
+    if lora:
+        args += list(lora)
     return args
 
 
@@ -261,7 +264,16 @@ def args_from_options(model_file: str, options: dict[str, Any]) -> list[str]:
         split_mode=options.get("split_mode"),
         tensor_split=options.get("tensor_split"),
         main_gpu=options.get("main_gpu"),
+        lora=_lora_args(options.get("lora")),
     )
+
+
+def _lora_args(adapters: Any) -> list[str] | None:
+    if not adapters:
+        return None
+    from ocabra.backends.llama_cpp_backend import LlamaCppBackend
+
+    return LlamaCppBackend.lora_args(adapters)
 
 
 # ── calibration from real loads ──────────────────────────────────────────

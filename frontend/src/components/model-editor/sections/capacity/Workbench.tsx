@@ -703,4 +703,5 @@ const PART_LABEL: Record<string, string> = {
   model: "modelo",
   measured: "medido (todo el modelo)",
   calibration: "ajuste por lo medido en cargas anteriores",
+  lora: "adaptador LoRA",
 }

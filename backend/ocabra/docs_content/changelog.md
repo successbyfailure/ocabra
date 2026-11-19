@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.114.0 — 2026-11-19
+
+### Nuevo
+
+- Modelos llama.cpp con adaptadores LoRA: `extra_config.llama_cpp.lora` (una
+  ruta a un LoRA en GGUF, o una lista de rutas o de `{path, scale}`) los aplica
+  sobre los pesos del modelo al cargar (`--lora` / `--lora-scaled`). Sirve
+  para correr un fine-tune publicado como adaptador sobre el GGUF que ya está
+  instalado, por ejemplo en un perfil propio (`load_overrides`) sin duplicar
+  el modelo base en disco. La memoria del adaptador entra en la proyección.
+
+---
+
 ## 0.113.2 — 2026-11-18
 
 ### Corregido

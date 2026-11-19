@@ -384,6 +384,17 @@ class LlamaCppBackend(BackendInterface):
                     extras["draft"] += int(Path(draft_path).stat().st_size / 1048576)  # noqa: ASYNC240 — stat, microsegundos
                 except OSError:
                     pass
+        # LoRA adapters: llama-fit-params ignores --lora (its projection is the
+        # same with and without one), and llama.cpp keeps them in VRAM next to
+        # the weights they modify.
+        lora_mb = 0
+        for path, _scale in options.get("lora") or []:
+            try:
+                lora_mb += int(Path(path).stat().st_size / 1048576)  # noqa: ASYNC240 — stat
+            except OSError:
+                pass
+        if lora_mb and main is not None:
+            extras["lora"] = lora_mb
         if str(options.get("vision_mode")) == "enabled" and main is not None:
             mmproj_id = options.get("mmproj_model_id")
             try:
@@ -593,6 +604,7 @@ class LlamaCppBackend(BackendInterface):
             cmd.append("--cont-batching")
         if options.get("chat_template"):
             cmd.extend(["--chat-template", str(options["chat_template"])])
+        cmd.extend(self.lora_args(options.get("lora")))
         if options.get("jinja") is not None:
             cmd.append("--jinja" if options["jinja"] else "--no-jinja")
         if options.get("reasoning") is not None:
@@ -1176,6 +1188,11 @@ class LlamaCppBackend(BackendInterface):
             "chat_template": self._normalize_str(
                 self._get_option(extra_config, "chat_template", None)
             ),
+            # LoRA adapters (GGUF, converted with convert_lora_to_gguf.py) applied
+            # on top of the base weights at load: a path, or a list of paths or
+            # {"path", "scale"}. Lets a fine-tune published as an adapter (e.g.
+            # harness-hub/Qwen3.8-27B-pi-adapted) run on the GGUF we already have.
+            "lora": self._normalize_lora(self._get_option(extra_config, "lora", None)),
             "jinja": self._to_bool_or_none(self._get_option(extra_config, "jinja", None)),
             "reasoning": self._normalize_choice(
                 self._get_option(extra_config, "reasoning", None),
@@ -1461,6 +1478,39 @@ class LlamaCppBackend(BackendInterface):
             return None
         text = str(value).strip().lower()
         return text if text in _VALID_SPLIT_STRATEGIES else None
+
+    @staticmethod
+    def _normalize_lora(value: Any) -> list[tuple[str, float]] | None:
+        """``[(path, scale), ...]`` from a path, a list of paths or of
+        ``{"path", "scale"}``; ``None`` when there is none."""
+        if value in (None, "", []):
+            return None
+        items = value if isinstance(value, list) else [value]
+        out: list[tuple[str, float]] = []
+        for item in items:
+            if isinstance(item, str) and item.strip():
+                out.append((item.strip(), 1.0))
+            elif isinstance(item, dict) and str(item.get("path") or "").strip():
+                try:
+                    scale = float(item.get("scale", 1.0))
+                except (TypeError, ValueError):
+                    raise ValueError(f"invalid LoRA scale: {item.get('scale')!r}") from None
+                out.append((str(item["path"]).strip(), scale))
+            else:
+                raise ValueError(f"invalid LoRA adapter: {item!r}")
+        for path, _ in out:
+            if "," in path or ":" in Path(path).name:
+                raise ValueError(f"LoRA path cannot contain ',' or ':' in its name: {path}")
+        return out or None
+
+    @staticmethod
+    def lora_args(adapters: list[tuple[str, float]] | None) -> list[str]:
+        """llama-server / llama-fit-params arguments for the adapters."""
+        if not adapters:
+            return []
+        if all(scale == 1.0 for _, scale in adapters):
+            return ["--lora", ",".join(path for path, _ in adapters)]
+        return ["--lora-scaled", ",".join(f"{path}:{scale:g}" for path, scale in adapters)]
 
     def _normalize_str(self, value: Any) -> str | None:
         if value is None:
