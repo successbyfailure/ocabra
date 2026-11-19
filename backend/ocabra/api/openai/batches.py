@@ -152,13 +152,30 @@ def _is_manager_or_admin(user: UserContext) -> bool:
     return user.role in ("model_manager", "system_admin")
 
 
+async def _usernames(session: AsyncSession, user_ids: set[uuid.UUID]) -> dict[uuid.UUID, str]:
+    """``user_id -> username`` for a page of batches, in one query (INF-13)."""
+    if not user_ids:
+        return {}
+    rows = await session.execute(select(User.id, User.username).where(User.id.in_(user_ids)))
+    return {uid: name for uid, name in rows.all()}
+
+
 async def _with_username(
-    session: AsyncSession, batch: OpenAIBatch, request: Request | None = None
+    session: AsyncSession,
+    batch: OpenAIBatch,
+    request: Request | None = None,
+    usernames: dict[uuid.UUID, str] | None = None,
 ) -> dict[str, Any]:
+    """``Batch`` payload with ``user`` and ``ocabra``. ``usernames`` comes from
+    :func:`_usernames` when building a list, so a page doesn't look up its
+    owners one batch at a time; without it, one query for this batch."""
     d = batch.to_openai_dict()
-    username = (await session.execute(
-        select(User.username).where(User.id == batch.user_id)
-    )).scalar_one_or_none()
+    if usernames is not None:
+        username = usernames.get(batch.user_id)
+    else:
+        username = (await session.execute(
+            select(User.username).where(User.id == batch.user_id)
+        )).scalar_one_or_none()
     d["user"] = {"id": str(batch.user_id), "username": username}
     d["ocabra"] = await _live_field(session, batch, request) if request is not None else None
     return d
@@ -624,7 +641,11 @@ async def list_batches(
                 stmt = stmt.where(OpenAIBatch.created_at < cursor.created_at)
         stmt = stmt.order_by(desc(OpenAIBatch.created_at)).limit(limit)
         rows = (await session.execute(stmt)).scalars().all()
-        data = [await _with_username(session, r, request) for r in rows]
+        # One query for every owner on the page instead of one per batch
+        # (INF-13). ``ocabra`` stays per batch: it is None for finished ones and
+        # only a queued batch with no live snapshot runs its queue count.
+        usernames = await _usernames(session, {r.user_id for r in rows})
+        data = [await _with_username(session, r, request, usernames) for r in rows]
         return {
             "object": "list",
             "data": data,
