@@ -318,11 +318,14 @@ class BackendInterface(ABC):
         """Rerank documents by relevance to the query."""
         raise NotImplementedError(f"{type(self).__name__} does not support reranking")
 
-    async def upscale_video(self, model_id: str, video: bytes, **kwargs: Any) -> bytes:
-        """Upscale/restore a video segment. Returns the encoded segment bytes.
+    async def upscale_video(
+        self, model_id: str, video: bytes, **kwargs: Any
+    ) -> tuple[bytes, dict[str, str]]:
+        """Upscale/restore a video segment (``/ocabra/video/upscale``).
 
-        Callers send one self-contained segment without audio and get the
-        upscaled segment back; the backend keeps no state between calls so the
+        Returns ``(encoded segment bytes, x-ocabra-* stats headers)``. Callers
+        send one self-contained segment without audio and get the upscaled
+        segment back; the backend keeps no state between calls so the
         scheduler stays free to evict the model in between.
         """
         raise NotImplementedError(f"{type(self).__name__} does not support video upscaling")
