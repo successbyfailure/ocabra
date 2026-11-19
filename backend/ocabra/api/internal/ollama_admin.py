@@ -1,4 +1,5 @@
 """Ollama daemon admin endpoints: version probe + server update."""
+
 from __future__ import annotations
 
 import asyncio
@@ -154,11 +155,20 @@ async def start_server_update(
         ``UpdateStartResponse`` with ``status="pulling"``.
 
     Raises:
-        HTTPException 409: an update is already pulling or restarting.
+        HTTPException 409: an update is already pulling or restarting, or the
+            container is being recreated to apply settings.
     """
-    if _update_state.status in {"pulling", "restarting"}:
+    if _update_state.status in {"pulling", "restarting"} or _apply_state.status == "applying":
         raise HTTPException(status_code=409, detail="An Ollama update is already running")
 
+    # Claim the slot before yielding to the loop: the background task only sets
+    # ``pulling`` once it runs, so two POSTs racing both saw ``idle`` and the
+    # update ran twice (the lock just serialised them). No await between the
+    # check above and this assignment, so it is atomic on the event loop.
+    _update_state.status = "pulling"
+    _update_state.detail = "update started"
+    _update_state.started_at = datetime.now(UTC)
+    _update_state.finished_at = None
     spawn(_run_server_update(), name="ollama-server-update")
     return UpdateStartResponse(status="pulling", detail="update started")
 
@@ -207,7 +217,9 @@ async def _run_server_update() -> None:
             code, stdout, stderr = await _docker("ollama.recreate")
             if code != 0:
                 _update_state.status = "error"
-                _update_state.detail = (stderr or stdout or f"docker compose up exit_code={code}")[:1000]
+                _update_state.detail = (stderr or stdout or f"docker compose up exit_code={code}")[
+                    :1000
+                ]
                 _update_state.finished_at = datetime.now(UTC)
                 logger.warning("ollama_update_up_failed", error=_update_state.detail)
                 return
@@ -370,7 +382,12 @@ async def apply_server_settings(
     container. Every model Ollama has loaded is dropped. Runs in the
     background; poll ``GET /ollama/server/settings``."""
     if _apply_state.status == "applying" or _update_state.status in {"pulling", "restarting"}:
-        raise HTTPException(status_code=409, detail="The Ollama container is already being recreated")
+        raise HTTPException(
+            status_code=409, detail="The Ollama container is already being recreated"
+        )
+    # Claimed synchronously, same race as ``start_server_update``.
+    _apply_state.status = "applying"
+    _apply_state.detail = "writing settings and recreating the container"
     spawn(_run_apply_settings(), name="ollama-apply-settings")
     return UpdateStartResponse(status="restarting", detail="recreating the Ollama container")
 

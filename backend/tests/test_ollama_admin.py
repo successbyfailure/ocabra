@@ -47,6 +47,7 @@ def _compose_returns(result):
 def _no_docker_agent(monkeypatch):
     monkeypatch.setattr("ocabra.core.docker_ops.settings.docker_agent_url", "")
 
+
 # ── _service_uses_build_key ─────────────────────────────────
 
 
@@ -62,19 +63,13 @@ class TestServiceUsesBuildKey:
             }
         }
         with _compose_returns((0, json.dumps(payload), "")):
-            assert (
-                await ollama_admin._service_uses_build_key()
-                is True
-            )
+            assert await ollama_admin._service_uses_build_key() is True
 
     @pytest.mark.asyncio
     async def test_returns_false_when_service_only_has_image(self):
         payload = {"services": {"ollama": {"image": "ollama/ollama:latest"}}}
         with _compose_returns((0, json.dumps(payload), "")):
-            assert (
-                await ollama_admin._service_uses_build_key()
-                is False
-            )
+            assert await ollama_admin._service_uses_build_key() is False
 
     @pytest.mark.asyncio
     async def test_returns_false_on_compose_failure(self):
@@ -82,27 +77,18 @@ class TestServiceUsesBuildKey:
         caller falls back to plain pull (previous behaviour) instead of
         blowing up the update flow."""
         with _compose_returns((1, "", "boom")):
-            assert (
-                await ollama_admin._service_uses_build_key()
-                is False
-            )
+            assert await ollama_admin._service_uses_build_key() is False
 
     @pytest.mark.asyncio
     async def test_returns_false_on_unparseable_json(self):
         with _compose_returns((0, "not json at all", "")):
-            assert (
-                await ollama_admin._service_uses_build_key()
-                is False
-            )
+            assert await ollama_admin._service_uses_build_key() is False
 
     @pytest.mark.asyncio
     async def test_returns_false_when_service_absent(self):
         payload = {"services": {"api": {"image": "foo"}}}
         with _compose_returns((0, json.dumps(payload), "")):
-            assert (
-                await ollama_admin._service_uses_build_key()
-                is False
-            )
+            assert await ollama_admin._service_uses_build_key() is False
 
 
 # ── _run_server_update dispatch ──────────────────────────────
@@ -181,9 +167,9 @@ class TestRunServerUpdateDispatch:
             await ollama_admin._run_server_update()
 
         cmds = [a for a in calls if "config" not in a]
-        assert any(
-            "pull" in c and "build" not in c and "ollama" in c for c in cmds
-        ), f"Expected `compose pull ollama`; got {cmds}"
+        assert any("pull" in c and "build" not in c and "ollama" in c for c in cmds), (
+            f"Expected `compose pull ollama`; got {cmds}"
+        )
         assert not any("build" in c for c in cmds), (
             f"Should NOT have `compose build` for a plain-image service; got {cmds}"
         )
@@ -219,3 +205,55 @@ class TestRunServerUpdateDispatch:
 
         assert ollama_admin._update_state.status == "error"
         assert "dockerfile parse error" in (ollama_admin._update_state.detail or "")
+
+
+# ── Concurrent POSTs ────────────────────────────────────────
+
+
+class TestConcurrentStart:
+    """Two POSTs racing used to both see ``idle`` (the task sets ``pulling``
+    only once it runs) and the update ran twice; the second must get 409."""
+
+    @staticmethod
+    def _reset() -> None:
+        ollama_admin._update_state.status = "idle"
+        ollama_admin._apply_state.status = "idle"
+
+    @staticmethod
+    def _fake_spawn(spawned: list[str]):
+        def fake_spawn(coro, name=None):
+            coro.close()
+            spawned.append(name)
+
+        return fake_spawn
+
+    async def test_second_update_post_gets_409(self, monkeypatch):
+        self._reset()
+        spawned: list[str] = []
+        monkeypatch.setattr(ollama_admin, "spawn", self._fake_spawn(spawned))
+        try:
+            first = await ollama_admin.start_server_update(_user=None)
+            with pytest.raises(ollama_admin.HTTPException) as exc:
+                await ollama_admin.start_server_update(_user=None)
+            assert first.status == "pulling"
+            assert exc.value.status_code == 409
+            assert spawned == ["ollama-server-update"]
+            # Nor can the settings be applied while the update holds the container.
+            with pytest.raises(ollama_admin.HTTPException):
+                await ollama_admin.apply_server_settings(_user=None)
+        finally:
+            self._reset()
+
+    async def test_second_apply_post_gets_409(self, monkeypatch):
+        self._reset()
+        spawned: list[str] = []
+        monkeypatch.setattr(ollama_admin, "spawn", self._fake_spawn(spawned))
+        try:
+            await ollama_admin.apply_server_settings(_user=None)
+            for start in (ollama_admin.apply_server_settings, ollama_admin.start_server_update):
+                with pytest.raises(ollama_admin.HTTPException) as exc:
+                    await start(_user=None)
+                assert exc.value.status_code == 409
+            assert spawned == ["ollama-apply-settings"]
+        finally:
+            self._reset()
