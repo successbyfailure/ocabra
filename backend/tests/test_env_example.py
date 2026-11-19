@@ -67,9 +67,7 @@ def _compose_defaults(key: str) -> set[str]:
 def test_cada_clave_del_env_example_la_lee_alguien():
     fields = {name.upper() for name in Settings.model_fields}
     text = _consumers_text()
-    nadie = sorted(
-        {key for key, _, _ in _entries() if key not in fields and key not in text}
-    )
+    nadie = sorted({key for key, _, _ in _entries() if key not in fields and key not in text})
     assert not nadie, f"variables de .env.example que nada lee: {nadie}"
 
 
