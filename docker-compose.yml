@@ -584,6 +584,19 @@ services:
       DIRECTORY_UI_URL: ${DIRECTORY_UI_URL:-}
       GATEWAY_STARTUP_TIMEOUT_S: ${GATEWAY_STARTUP_TIMEOUT_S:-180}
       GATEWAY_TOUCH_INTERVAL_S: ${GATEWAY_TOUCH_INTERVAL_S:-30}
+      # The services it routes by Host (gateway/config.py _SERVICE_DEFS).
+      # Missing since v0.108.0 (SEG-09 dropped env_file): the host map was
+      # empty and the gateway routed nothing.
+      TRELLIS2_UI_URL: ${TRELLIS2_UI_URL:-}
+      TRELLIS2_BASE_URL: ${TRELLIS2_BASE_URL:-}
+      COMFYUI_UI_URL: ${COMFYUI_UI_URL:-}
+      COMFYUI_BASE_URL: ${COMFYUI_BASE_URL:-}
+      A1111_UI_URL: ${A1111_UI_URL:-}
+      A1111_BASE_URL: ${A1111_BASE_URL:-}
+      ACESTEP_UI_URL: ${ACESTEP_UI_URL:-}
+      ACESTEP_BASE_URL: ${ACESTEP_BASE_URL:-}
+      UNSLOTH_UI_URL: ${UNSLOTH_UI_URL:-}
+      UNSLOTH_BASE_URL: ${UNSLOTH_BASE_URL:-}
     ports:
       - "${GATEWAY_PORT:-9000}:9000"
     depends_on:

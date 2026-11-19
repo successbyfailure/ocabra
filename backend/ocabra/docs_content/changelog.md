@@ -16,6 +16,26 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.119.0 — 2026-11-19
+
+### Corregido
+
+- **El gateway de servicios (ComfyUI, ACE-Step, Unsloth, TRELLIS.2,
+  Automatic1111) no enrutaba nada desde la 0.108.0**: al dejar de pasarle el
+  `.env` entero se quedó sin las direcciones de los servicios. Vuelve a
+  recibirlas.
+- **El listado de batches** (`GET /v1/batches`) hace una sola consulta por
+  página en vez de una por lote. La respuesta es la misma.
+
+### Cambiado
+
+- La documentación servida y la del repositorio están al día: `docs/API.md`
+  lista las 284 rutas (y un test impide que se quede atrás), `docs/INSTALL.md`
+  describe la instalación actual, `.env.example` documenta todos los ajustes con
+  sus valores por defecto reales, y todos los endpoints tienen descripción.
+
+---
+
 ## 0.118.2 — 2026-11-19
 
 ### Arreglos
