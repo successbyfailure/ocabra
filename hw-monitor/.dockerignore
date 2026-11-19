@@ -1,0 +1,8 @@
+# Build context of hw-monitor/Dockerfile (INF-08): it copies only
+# requirements.txt and hw_monitor.py.
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.venv
+.env

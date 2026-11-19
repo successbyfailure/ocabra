@@ -1,0 +1,27 @@
+# Repo root as a build context (INF-08). No image builds from `.` today
+# (every build: in docker-compose.yml has its own context: backend/,
+# frontend/, gateway/, hw-monitor/, services/*, TRELLIS.2/), but until
+# 2026-11-17 the ollama image did, and that sent the daemon .env with every
+# secret, data/ (Postgres, uploaded files) and TRELLIS.2/ to the builder.
+# This keeps a future `build: .` from doing it again. Each subdirectory
+# context has its own .dockerignore; this file doesn't apply to them.
+.git
+.env
+.env.*
+!.env.example
+data/
+caddy/caddy_data/
+caddy/caddy_config/
+TRELLIS.2/
+Hunyuan3D-2.1/
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+frontend/dist
+benchmark/results/
+*.gguf
+*.safetensors

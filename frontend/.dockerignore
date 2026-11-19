@@ -1,0 +1,14 @@
+# Build context of frontend/Dockerfile (INF-04). The image installs its own
+# dependencies with `npm ci` from package-lock.json; without this file
+# `COPY . .` copied the host's node_modules on top of them (another platform's
+# native binaries, whatever version was installed locally) and the build output.
+node_modules
+dist
+.vite
+coverage
+test-results
+playwright-report
+*.tsbuildinfo
+*.log
+.env
+.env.*
