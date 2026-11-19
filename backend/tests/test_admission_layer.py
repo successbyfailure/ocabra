@@ -26,24 +26,12 @@ from fastapi.testclient import TestClient
 from ocabra.core.request_telemetry import current_inflight_request_id
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
 from ocabra.stats.collector import StatsMiddleware
+from tests._request_stack import install_request_stack as _install
 from tests.test_vram_eviction import _add_loaded_model, _make_mm
 
 # The handlers' tests patch ``httpx.AsyncClient`` (the worker call) on the
 # module itself; the test client must be the real one.
 _HttpClient = httpx.AsyncClient
-
-
-def _install(app: FastAPI) -> None:
-    """The request middlewares as ``ocabra.main`` registers them."""
-    try:
-        from ocabra.core.admission import AdmissionMiddleware
-    except ImportError:  # before REF-08 admission lived in StatsMiddleware
-        app.add_middleware(StatsMiddleware)
-        return
-    from ocabra.stats.collector import record_admission_rejection
-
-    app.add_middleware(StatsMiddleware)
-    app.add_middleware(AdmissionMiddleware, on_reject=record_admission_rejection)
 
 
 def _profile(pid: str, base: str, **extra) -> SimpleNamespace:
@@ -658,7 +646,6 @@ async def test_upload_is_counted_once_while_the_worker_transcribes(monkeypatch, 
     assert mm.active_requests_snapshot() == []
 
 
-@pytest.mark.xfail(strict=True, reason="REF-08: admission still in StatsMiddleware")
 @pytest.mark.asyncio
 async def test_burst_of_uploads_never_overshoots_the_cap(monkeypatch, record_stat):
     """Eight uploads at once against a cap of 4 (one slot x 4): exactly four
@@ -749,7 +736,6 @@ def _image_app(monkeypatch, in_worker: list):
     return app, mm
 
 
-@pytest.mark.xfail(strict=True, reason="REF-08: admission still in StatsMiddleware")
 def test_image_generation_is_counted_once(monkeypatch, record_stat):
     in_worker: list = []
     app, mm = _image_app(monkeypatch, in_worker)
@@ -772,4 +758,53 @@ def test_image_edit_upload_is_counted_once(monkeypatch, record_stat):
     )
     assert response.status_code == 200, response.text
     assert in_worker == [{"diffusers/sdxl": 1}]
+    assert mm.inflight_snapshot() == {}
+
+
+def test_main_registers_admission_between_the_federation_hop_and_the_stats():
+    """Outermost first. Admission must see ``federation_info`` (set by the
+    hop marker) and wrap the stats, so its slot spans the whole response."""
+    from ocabra.core.admission import AdmissionMiddleware
+    from ocabra.core.federation import FederationHopMiddleware
+    from ocabra.main import app
+    from ocabra.stats.collector import record_admission_rejection
+
+    order = [m.cls for m in app.user_middleware]
+    hop, adm, stats = (
+        order.index(FederationHopMiddleware),
+        order.index(AdmissionMiddleware),
+        order.index(StatsMiddleware),
+    )
+    assert hop < adm < stats
+    assert adm + 1 == stats
+    (entry,) = [m for m in app.user_middleware if m.cls is AdmissionMiddleware]
+    assert entry.kwargs == {"on_reject": record_admission_rejection}
+
+
+def test_endpoint_inflight_takes_the_admitted_slot_and_moves_it_to_the_runtime():
+    from ocabra.core.admission import EndpointInflight
+
+    mm = _make_mm()
+    rid = mm.try_begin_request("gpt-image-1", 0)
+    request = SimpleNamespace(
+        state=SimpleNamespace(inflight_request_id=rid, inflight_model_id="gpt-image-1")
+    )
+    inflight = EndpointInflight(request, mm, "diffusers/sdxl")
+    assert inflight.acquire() == rid
+    assert mm.inflight_snapshot() == {"diffusers/sdxl": 1}
+    assert request.state.inflight_model_id == "diffusers/sdxl"
+    inflight.release()  # admission's to release, not the endpoint's
+    assert mm.inflight_snapshot() == {"diffusers/sdxl": 1}
+
+
+def test_endpoint_inflight_without_admission_opens_and_closes_its_own():
+    from ocabra.core.admission import EndpointInflight
+
+    mm = _make_mm()
+    inflight = EndpointInflight(SimpleNamespace(state=SimpleNamespace()), mm, "w/x")
+    rid = inflight.acquire()
+    assert mm.inflight_snapshot() == {"w/x": 1}
+    assert [a.request_id for a in mm.active_requests_snapshot()] == [rid]
+    inflight.release()
+    inflight.release()  # idempotent: never ends a request twice
     assert mm.inflight_snapshot() == {}

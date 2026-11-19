@@ -1558,10 +1558,16 @@ async def _log_unhandled_exception(request, exc):
         },
     )
 
-# Stream 3-A: Stats middleware for /v1/* endpoints
-from ocabra.stats.collector import StatsMiddleware  # noqa: E402
+# Stream 3-A: Stats middleware for /v1/* endpoints. Records only.
+from ocabra.core.admission import AdmissionMiddleware  # noqa: E402
+from ocabra.stats.collector import StatsMiddleware, record_admission_rejection  # noqa: E402
 
 app.add_middleware(StatsMiddleware)
+# Admission (in-flight cap, maintenance, circuit breaker; REF-08): just outside
+# the stats, so its slot spans the whole response, and inside the federation
+# hop marker, whose ``federation_info`` it reads. Its rejections never reach
+# the stats middleware: they are recorded through ``on_reject``.
+app.add_middleware(AdmissionMiddleware, on_reject=record_admission_rejection)
 # Outermost: marks requests that came from a federation peer before anything
 # else runs, so they are never forwarded to yet another peer.
 from ocabra.core.federation import FederationHopMiddleware  # noqa: E402

@@ -1,5 +1,6 @@
 """StatsMiddleware: incremental stream parsing (BUG-36), no buffering of
-uploads (BUG-37) and admission for multipart/WebSocket (BUG-38)."""
+uploads (BUG-37) and admission for multipart/WebSocket (BUG-38, now in
+``AdmissionMiddleware``, REF-08)."""
 
 from __future__ import annotations
 
@@ -22,7 +23,6 @@ from ocabra.core.model_manager import ModelStatus
 from ocabra.core.request_telemetry import RequestRuntimeTelemetry
 from ocabra.stats import collector
 from ocabra.stats.collector import (
-    StatsMiddleware,
     _audio_duration_s,
     _extract_last_payload_from_stream,
     _extract_stream_error,
@@ -30,6 +30,7 @@ from ocabra.stats.collector import (
     _stream_output_tokens,
     _StreamAccumulator,
 )
+from tests._request_stack import install_request_stack
 
 # ── BUG-36: the running parse gives what the whole-body parse gave ──────────
 
@@ -135,7 +136,7 @@ def _streaming_app(chunks: list[bytes], media_type: str, path: str = "/v1/chat/c
 
         return StreamingResponse(gen(), media_type=media_type)
 
-    app.add_middleware(StatsMiddleware)
+    install_request_stack(app)
     return app, mm
 
 
@@ -264,7 +265,7 @@ def _upload_app(mm) -> tuple[FastAPI, dict]:
         request.state.stats_model_id = "whisper-public"
         return JSONResponse({"text": "hola que tal"})
 
-    app.add_middleware(StatsMiddleware)
+    install_request_stack(app)
     return app, seen
 
 
@@ -375,8 +376,9 @@ def test_multipart_gets_503_under_maintenance():
     mm.is_in_maintenance.assert_called_with("whisper/large")
 
 
-def test_multipart_gets_429_at_capacity_and_is_never_double_counted():
+def test_multipart_gets_429_at_capacity_and_is_counted_once():
     mm = _plain_mm(inflight=4, cap=4)
+    mm.try_begin_request.return_value = None  # at the cap
     app, seen = _upload_app(mm)
     with patch("ocabra.stats.collector._record_stat", new=AsyncMock()):
         response = _post_upload(app)
@@ -384,17 +386,24 @@ def test_multipart_gets_429_at_capacity_and_is_never_double_counted():
     assert response.headers["retry-after"] == "10"
     assert response.json()["error"]["code"] == "model_at_capacity"
     assert seen == {}
+    assert mm.effective_inflight_cap.call_args.kwargs["request_kind"] == "audio_transcription"
+    mm.end_request.assert_not_called()
 
     mm = _plain_mm(inflight=3, cap=4)
+    mm.try_begin_request.return_value = "req-1"
     app, seen = _upload_app(mm)
     with patch("ocabra.stats.collector._record_stat", new=AsyncMock()):
         response = _post_upload(app)
     assert response.status_code == 200
     assert seen["model"] == "whisper-public"
-    # The endpoint registers itself (begin_request); the middleware only checks.
-    mm.try_begin_request.assert_not_called()
-    mm.end_request.assert_not_called()
-    assert mm.effective_inflight_cap.call_args.kwargs["request_kind"] == "audio_transcription"
+    # REF-08: admission counts the upload (check and count in one step), once,
+    # and releases it after the response; the endpoint takes that slot.
+    mm.try_begin_request.assert_called_once()
+    assert mm.try_begin_request.call_args.args[0] == "whisper/large"
+    assert mm.try_begin_request.call_args.kwargs["request_kind"] == "audio_transcription"
+    assert mm.try_begin_request.call_args.kwargs["profile_id"] == "whisper-public"
+    mm.begin_request.assert_not_called()
+    mm.end_request.assert_called_once_with("whisper/large", "req-1")
 
 
 def _ws_app(mm) -> FastAPI:
@@ -410,7 +419,7 @@ def _ws_app(mm) -> FastAPI:
         await websocket.send_json({"type": "session.created"})
         await websocket.close()
 
-    app.add_middleware(StatsMiddleware)
+    install_request_stack(app)
     return app
 
 

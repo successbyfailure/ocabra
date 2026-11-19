@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
+from ocabra.core.admission import EndpointInflight
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError, WorkerGoneError
 
 from ._deps import (
@@ -256,13 +257,13 @@ async def image_generations(
     }
 
     worker_pool = request.app.state.worker_pool
-    # begin_request marks the model as in-flight so model_manager's idle
-    # eviction loop doesn't unload it mid-generation. The stats middleware
-    # tracks the same thing but keyed by the user-facing profile_id, which
-    # doesn't match the canonical state key — image generation requests can
-    # take minutes (sequential offload on contended GPUs), well past the
-    # 300s idle_timeout, so we need the canonical-keyed marker too.
-    inflight_request_id = model_manager.begin_request(worker_key, user=user)
+    # The model must look in flight under its worker key so the idle eviction
+    # loop doesn't unload it mid-generation (image requests can take minutes,
+    # past the 300 s idle_timeout). Admission already counts this request:
+    # take its slot, moved to ``worker_key`` if it predicted another runtime
+    # (an OpenAI compat name, a router), instead of counting it twice.
+    inflight = EndpointInflight(request, model_manager, worker_key, user=user)
+    inflight.acquire()
     try:
         result = await worker_pool.forward_request(worker_key, "/generate", worker_body)
     except httpx.HTTPStatusError as exc:
@@ -270,7 +271,7 @@ async def image_generations(
     except (InferenceTimeoutError, WorkerDegradedError, WorkerGoneError) as exc:
         raise_inference_dispatch_error(exc)
     finally:
-        model_manager.end_request(worker_key, inflight_request_id)
+        inflight.release()
 
     # Translate back to OpenAI format
     images = result.get("images", [])
@@ -556,7 +557,9 @@ async def image_edits(
     )
 
     worker_pool = request.app.state.worker_pool
-    inflight_request_id = model_manager.begin_request(worker_key, user=user)
+    # The upload's admission slot (see image_generations).
+    inflight = EndpointInflight(request, model_manager, worker_key, user=user)
+    inflight.acquire()
     try:
         result = await worker_pool.forward_request(worker_key, "/edit", worker_body)
     except httpx.HTTPStatusError as exc:
@@ -590,7 +593,7 @@ async def image_edits(
     except (InferenceTimeoutError, WorkerDegradedError, WorkerGoneError) as exc:
         raise_inference_dispatch_error(exc)
     finally:
-        model_manager.end_request(worker_key, inflight_request_id)
+        inflight.release()
 
     images = result.get("images", [])
     if response_format == "url":

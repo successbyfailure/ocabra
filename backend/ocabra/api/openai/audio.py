@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response, Streami
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
+from ocabra.core.admission import EndpointInflight
 from ocabra.core.model_manager_helpers import overrides_enable_diarization
 
 from ._deps import (
@@ -303,8 +304,11 @@ async def transcriptions(
     sidecar_result: Any = None
     last_error: Exception | None = None
 
-    inflight_request_id = model_manager.begin_request(worker_key, user=user)
-    # Everything after begin_request() runs inside the try: an exception in
+    # The slot admission opened for this upload (moved to ``worker_key`` if it
+    # predicted another runtime); counting it again here halved the cap.
+    inflight = EndpointInflight(request, model_manager, worker_key, user=user)
+    inflight_request_id = inflight.acquire()
+    # Everything after acquire() runs inside the try: an exception in
     # make_room_for_whisper() used to skip the finally and leak the in-flight
     # slot for good (the model then never looked idle again).
     try:
@@ -506,7 +510,7 @@ async def transcriptions(
                     ) from exc
                 raise_upstream_http_error(exc)
     finally:
-        model_manager.end_request(worker_key, inflight_request_id)
+        inflight.release()
 
     if resp is None and sidecar_result is None:
         raise _openai_error(

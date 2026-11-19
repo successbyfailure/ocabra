@@ -29,6 +29,7 @@ from ocabra.stats.collector import (
     _update_engine_runtime_telemetry,
     record_realtime_request,
 )
+from tests._request_stack import install_request_stack
 
 
 def _fake_request(
@@ -526,7 +527,7 @@ def test_stats_middleware_returns_504_and_releases_canonical_worker() -> None:
             900,
         )
 
-    app.add_middleware(StatsMiddleware)
+    install_request_stack(app)
 
     with (
         patch("ocabra.stats.collector._record_stat", new=AsyncMock()),
@@ -584,7 +585,7 @@ def test_stats_middleware_returns_503_when_model_is_in_maintenance() -> None:
     async def _unreachable() -> None:
         raise AssertionError("maintenance check must short-circuit before the endpoint")
 
-    app.add_middleware(StatsMiddleware)
+    install_request_stack(app)
 
     with patch("ocabra.stats.collector._record_stat", new=AsyncMock()):
         response = TestClient(app, raise_server_exceptions=False).post(

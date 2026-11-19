@@ -17,94 +17,26 @@ from typing import Any
 
 import structlog
 from fastapi import Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import HTTPConnection
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp
 
 from ocabra.config import settings
 from ocabra.core import admission, privacy
+
+# What a request is and which worker it counts against: owned by admission
+# (REF-08), shared with the stats. The old private names stay for this module
+# and its tests.
+from ocabra.core.admission import approx_text_tokens as _approx_text_tokens
+from ocabra.core.admission import classify_request_kind as _classify_request_kind
+from ocabra.core.admission import count_input_tokens as _count_input_tokens
+from ocabra.core.admission import request_bound_for_peer as _request_bound_for_peer  # noqa: F401
+from ocabra.core.admission import resolve_inflight_model_id as _resolve_inflight_model_id
+from ocabra.core.admission import should_track as _should_track
 from ocabra.core.background_tasks import spawn
-from ocabra.core.model_manager_helpers import compute_worker_key
-from ocabra.core.request_telemetry import RequestRuntimeTelemetry, current_inflight_request_id
-from ocabra.core.runtime_coordinator import _text_size
-from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError
-
-
-async def _resolve_inflight_auth_meta(request: Request) -> dict:
-    """Best-effort auth lookup for the stats middleware.
-
-    Runs BEFORE ``call_next``, so ``request.state.auth_user`` isn't populated
-    yet (that happens inside endpoint handlers). We re-resolve the bearer
-    token here solely so ``/stats/recent`` can show *who* is driving the
-    currently in-flight request instead of a bare "anónimo" row. Failures
-    are swallowed — this never gates the request.
-    """
-    header = request.headers.get("authorization") or ""
-    if not header.lower().startswith("bearer "):
-        return {}
-    token = header[7:].strip()
-    if not token:
-        return {}
-    try:
-        from ocabra.api._deps_auth import _resolve_api_key
-        from ocabra.database import AsyncSessionLocal
-    except Exception:  # noqa: BLE001
-        return {}
-    try:
-        async with AsyncSessionLocal() as session:
-            ctx = await _resolve_api_key(token, session)
-    except Exception:  # noqa: BLE001
-        return {}
-    if ctx is None or ctx.is_anonymous:
-        return {}
-    return {
-        "user_id": ctx.user_id,
-        "username": ctx.username,
-        "api_key_name": ctx.api_key_name,
-    }
-
+from ocabra.core.request_telemetry import RequestRuntimeTelemetry
 
 logger = structlog.get_logger(__name__)
-
-_TRACKED_API_PATHS = {
-    "/api/chat",
-    "/api/generate",
-    "/api/embeddings",
-    "/api/embed",
-}
-
-
-def _classify_request_kind(path: str) -> str:
-    mapping = {
-        "/v1/chat/completions": "chat",
-        "/v1/completions": "completion",
-        # Responses API: text generation with the same usage block
-        # (input_tokens/output_tokens); it was recorded as "other".
-        "/v1/responses": "responses",
-        "/v1/audio/generate": "music",
-        "/v1/embeddings": "embedding",
-        "/v1/images/generations": "image_generation",
-        "/v1/images/edits": "image_generation",
-        "/v1/audio/transcriptions": "audio_transcription",
-        "/v1/audio/speech": "tts",
-        "/v1/rerank": "rerank",
-        "/v1/pooling": "pooling",
-        "/v1/score": "score",
-        "/v1/classify": "classify",
-        "/api/chat": "ollama_chat",
-        "/api/generate": "ollama_generate",
-        "/api/embeddings": "ollama_embedding",
-        "/api/embed": "ollama_embedding",
-    }
-    return mapping.get(path, "other")
-
-
-def _approx_text_tokens(text: object) -> int | None:
-    """Rough token estimate (~word count) for endpoints without a usage payload."""
-    if isinstance(text, str) and text.strip():
-        return len(text.split())
-    return None
 
 
 def _extract_work_size_meta(
@@ -251,54 +183,6 @@ def _apply_token_kind_defaults(
 # Kinds that generate text output (so a stream/content fallback makes sense when
 # the backend doesn't return a usage payload).
 _TEXT_GEN_KINDS = {"chat", "completion", "ollama_chat", "ollama_generate", "responses"}
-
-
-def _count_input_tokens(request_payload: dict | None, request_kind: str) -> int | None:
-    """Approx input tokens (~word count) from the request, for text-gen kinds whose
-    streamed response lacked a usage payload.
-
-    Includes ``tools`` (function-calling schemas), same as the context-preset
-    estimator (``estimate_request_token_budget`` / ``_text_size`` in
-    runtime_coordinator.py). 2026-10-29: without this, a tool-heavy request
-    (e.g. Home Assistant's large function schemas) showed as "~128 tok
-    entrada" live while the real prompt — confirmed via the preset
-    selector's own ``required_tokens`` — was 18,240. That gap made a request
-    legitimately busy on a huge prompt look suspiciously idle."""
-    if not isinstance(request_payload, dict):
-        return None
-    if request_kind in ("chat", "ollama_chat"):
-        total = 0
-        for m in request_payload.get("messages") or []:
-            if not isinstance(m, dict):
-                continue
-            content = m.get("content")
-            if isinstance(content, str):
-                total += len(content.split())
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and isinstance(part.get("text"), str):
-                        total += len(part["text"].split())
-            # Mismo agujero que tenian las ``tools`` antes de 2026-10-29, en el
-            # otro lado de la conversacion: lo que el asistente pide a una
-            # herramienta viaja en ``tool_calls``, no en ``content``. Con un
-            # cliente de codigo eso es la mitad del prompt, y la tarjeta
-            # mostraba "~35.383 tok entrada" para una peticion que el motor
-            # conto en 196.549 (flint:40b, 2026-11-09).
-            for call in m.get("tool_calls") or []:
-                if not isinstance(call, dict):
-                    continue
-                fn = call.get("function")
-                if isinstance(fn, dict):
-                    _chars, words = _text_size(fn.get("arguments"))
-                    total += words
-                    if isinstance(fn.get("name"), str):
-                        total += 1
-        _tools_chars, tools_words = _text_size(request_payload.get("tools"))
-        total += tools_words
-        return total or None
-    if request_kind in ("completion", "ollama_generate"):
-        return _approx_text_tokens(request_payload.get("prompt"))
-    return None
 
 
 def _stream_output_tokens(
@@ -852,44 +736,6 @@ def _mark_stream_first_token_from(request: Request, acc: _StreamAccumulator) -> 
         telemetry.mark_first_token(None)
 
 
-def _payload_streaming(payload: object, path: str = "") -> bool | None:
-    """Si la petición va en streaming.
-
-    Sin ``stream`` en el cuerpo, la API de OpenAI responde de una vez y la
-    nativa de Ollama (``/api/*``) hace streaming. Antes la ausencia se tomaba
-    como "desconocido" y la UI trataba como streaming peticiones que no lo
-    eran: les salía "sin actividad del worker" a los 15 s porque no emiten
-    nada hasta el final (2026-11-10, tráfico real de benchmark).
-    """
-    if not isinstance(payload, dict):
-        return None
-    if "stream" in payload:
-        return bool(payload.get("stream"))
-    if path.startswith("/api/"):
-        return True
-    if path.startswith("/v1/"):
-        return False
-    return None
-
-
-def _payload_max_output_tokens(payload: object) -> int | None:
-    """Tope de salida pedido, en cualquiera de sus nombres (OpenAI y Ollama)."""
-    if not isinstance(payload, dict):
-        return None
-    candidates = [
-        payload.get("max_completion_tokens"),
-        payload.get("max_tokens"),
-        payload.get("max_output_tokens"),
-    ]
-    options = payload.get("options")
-    if isinstance(options, dict):
-        candidates.append(options.get("num_predict"))
-    for value in candidates:
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-            return int(value)
-    return None
-
-
 def _stream_ttft_known(request: Request) -> bool:
     """Si ``_mark_stream_first_token`` ya vio el primer token de este stream."""
     telemetry = getattr(request.state, "runtime_telemetry", None)
@@ -1019,274 +865,46 @@ class StatsMiddleware(BaseHTTPMiddleware):
     For non-streaming JSON responses, token counts are extracted from usage payloads.
     Streaming responses record request-level latency/errors but token counts may be
     unavailable depending on upstream chunk format.
+
+    Records only. Admission (in-flight cap, maintenance, circuit breaker)
+    is ``ocabra.core.admission.AdmissionMiddleware``, registered just outside
+    this one (REF-08): it leaves the parsed body, the start time and the
+    in-flight id in ``request.state``, and passes its rejections to
+    :func:`record_admission_rejection`.
     """
 
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """ASGI entry: the two cases ``BaseHTTPMiddleware.dispatch`` can't see.
-
-        * WebSocket (``/v1/realtime``): ``BaseHTTPMiddleware`` passes it
-          through untouched, so a Realtime session skipped maintenance mode
-          and the in-flight cap (BUG-38). Checked here, before the handshake
-          is accepted.
-        * Multipart upload: the ``model`` field is peeked from the form
-          without reading the file part (BUG-37/38) and left in the scope for
-          ``dispatch``; the body is replayed to the endpoint as it came.
-        """
-        if scope["type"] == "websocket":
-            if _should_track(HTTPConnection(scope).url.path):
-                if await _deny_websocket(scope, receive, send):
-                    return
-            await self.app(scope, receive, send)
-            return
-        if scope["type"] == "http":
-            conn = HTTPConnection(scope)
-            content_type = conn.headers.get("content-type", "")
-            if _should_track(conn.url.path) and admission.is_multipart(content_type):
-                try:
-                    model, receive = await admission.peek_multipart_field(receive, content_type)
-                except Exception as exc:  # noqa: BLE001 - admission must not break uploads
-                    logger.warning("multipart_model_peek_failed", error=str(exc))
-                    model = None
-                if model:
-                    scope[_MULTIPART_MODEL_SCOPE_KEY] = model
-        await super().__call__(scope, receive, send)
-
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        import asyncio
-
         path = request.url.path
         if not _should_track(path):
             return await call_next(request)
 
-        start = time.monotonic()
-        started_at = datetime.now(UTC)
+        admitted_at = request.scope.get("state", {}).get(admission.STARTED_STATE_KEY)
+        if admitted_at is not None:
+            start, started_at = admitted_at
+        else:
+            start, started_at = time.monotonic(), datetime.now(UTC)
         request.state.runtime_telemetry = RequestRuntimeTelemetry(started_monotonic=start)
-        request_payload = await _extract_request_payload(request)
+        if admission.PAYLOAD_STATE_KEY in request.scope.get("state", {}):
+            request_payload = request.scope["state"][admission.PAYLOAD_STATE_KEY]
+        else:  # no admission layer in front (some tests): read it here
+            request_payload = await _extract_request_payload(request)
         request_kind = _classify_request_kind(path)
-
-        # Track in-flight requests so the pressure eviction loop can avoid
-        # evicting models that are currently serving a request.
-        requested_model_id = _extract_model_id(request=request, body=request_payload)
-        # A multipart upload has no JSON body to read ``model`` from; ``__call__``
-        # peeked it from the form. Admission only: the stats keep taking the
-        # name the endpoint leaves in ``request.state.stats_model_id``.
-        admission_model_id = requested_model_id or request.scope.get(_MULTIPART_MODEL_SCOPE_KEY)
-        inflight_model_id = await _resolve_inflight_model_id(request, admission_model_id)
-        inflight_request_id: str | None = None
         try:
             mm = request.app.state.model_manager
         except AttributeError:
             mm = None
-        if mm and inflight_model_id and mm.is_in_maintenance(inflight_model_id):
-            # Maintenance window: reject new requests fast and clear so
-            # whoever is testing against this model doesn't have real
-            # traffic contending for the same GPU/worker. Requests already
-            # admitted before the window opened are untouched — this check
-            # runs before try_begin_request ever marks one in-flight.
-            spawn(
-                _record_stat(
-                    request=request,
-                    model_id=inflight_model_id,
-                    started_at=started_at,
-                    duration_ms=(time.monotonic() - start) * 1000,
-                    error_message="model_maintenance",
-                    status_code=503,
-                    endpoint_path=path,
-                    request_kind=request_kind,
-                    input_tokens=None,
-                    output_tokens=None,
-                )
-            )
-            return admission.maintenance_response(inflight_model_id)
-        if mm and inflight_model_id and requested_model_id is None:
-            # Multipart upload (BUG-38): ``model`` came from a peek at the
-            # form (see ``__call__``), not from a JSON body. Its endpoint
-            # marks the request in-flight itself (``begin_request``), so here
-            # it is only checked against the cap, never counted: counting it
-            # twice would halve the worker's real cap. Not registered, so
-            # nothing below may end it either.
-            remote_bound = await _request_bound_for_peer(request, mm, inflight_model_id)
-            effective_cap = mm.effective_inflight_cap(
-                inflight_model_id,
-                settings.max_inflight_per_model,
-                request_kind=request_kind,
-                remote_bound=remote_bound,
-            )
-            if effective_cap > 0 and mm.inflight_count(inflight_model_id) >= effective_cap:
-                spawn(
-                    _record_stat(
-                        request=request,
-                        model_id=inflight_model_id,
-                        started_at=started_at,
-                        duration_ms=(time.monotonic() - start) * 1000,
-                        error_message="model_at_capacity",
-                        status_code=429,
-                        endpoint_path=path,
-                        request_kind=request_kind,
-                        input_tokens=None,
-                        output_tokens=None,
-                    )
-                )
-                return admission.capacity_response(inflight_model_id, effective_cap)
-            inflight_model_id = None
-        if mm and inflight_model_id:
-            auth_meta = await _resolve_inflight_auth_meta(request)
-            _apply_peer_rules(request, auth_meta)
-            remote_bound = await _request_bound_for_peer(request, mm, inflight_model_id)
-            inflight_request_id = mm.try_begin_request(
-                inflight_model_id,
-                settings.max_inflight_per_model,
-                user_id=auth_meta.get("user_id"),
-                username=auth_meta.get("username"),
-                api_key_name=auth_meta.get("api_key_name"),
-                # ``requested_model_id`` is the public ``model`` field the
-                # client sent — a profile id ("qwen3.8:27b") or router id
-                # ("recomendado-ha-chatbots"). We keep it alongside the
-                # resolved worker key so the UI can show the friendly name
-                # instead of ``ollama/qwen3.8:27b::<hash>``.
-                profile_id=requested_model_id,
-                # Approximate, available immediately (exact prompt_tokens
-                # isn't known until the backend responds) — same heuristic
-                # used for the completed-request row further down.
-                input_tokens_estimate=_count_input_tokens(request_payload, request_kind),
-                # Lets admission exempt single-pass encoder endpoints from the
-                # generative slot scaling without depending on whether the
-                # model happens to be loaded locally.
-                request_kind=request_kind,
-                remote_bound=remote_bound,
-                streaming=_payload_streaming(request_payload, path),
-                max_output_tokens=_payload_max_output_tokens(request_payload),
-                federation_info=getattr(request.state, "federation_info", None),
-            )
-            if inflight_request_id is None:
-                # Admission control: the worker is already at capacity. Reject
-                # rather than pile on so one client's burst can't starve others.
-                effective_cap = mm.effective_inflight_cap(
-                    inflight_model_id,
-                    settings.max_inflight_per_model,
-                    request_kind=request_kind,
-                    remote_bound=remote_bound,
-                )
-                spawn(
-                    _record_stat(
-                        request=request,
-                        model_id=inflight_model_id,
-                        started_at=started_at,
-                        duration_ms=(time.monotonic() - start) * 1000,
-                        error_message="model_at_capacity",
-                        status_code=429,
-                        endpoint_path=path,
-                        request_kind=request_kind,
-                        input_tokens=None,
-                        output_tokens=None,
-                    )
-                )
-                return admission.capacity_response(inflight_model_id, effective_cap)
-            request.state.inflight_model_id = inflight_model_id
-            request.state.inflight_request_id = inflight_request_id
-            # Antes de ``call_next``: la app interna hereda el contexto y asi
-            # WorkerPool/FairSlotGate saben a que peticion pertenece su lease
-            # o el progreso de prefill que ven pasar.
-            current_inflight_request_id.set(inflight_request_id)
 
         try:
             response = await call_next(request)
-        except InferenceTimeoutError as exc:
-            if mm and inflight_model_id:
-                mm.end_request(
-                    getattr(request.state, "inflight_model_id", inflight_model_id),
-                    inflight_request_id,
-                )
-            model_id = _extract_model_id(request=request, body=request_payload)
-            if model_id:
-                spawn(
-                    _record_stat(
-                        request=request,
-                        model_id=model_id,
-                        started_at=started_at,
-                        duration_ms=(time.monotonic() - start) * 1000,
-                        error_message=str(exc),
-                        status_code=504,
-                        endpoint_path=path,
-                        request_kind=request_kind,
-                        input_tokens=None,
-                        output_tokens=None,
-                    )
-                )
-            if path.startswith("/api/"):
-                return JSONResponse(
-                    status_code=504,
-                    content={"error": str(exc)},
-                )
-            return JSONResponse(
-                status_code=504,
-                content={
-                    "error": {
-                        "message": str(exc),
-                        "type": "server_error",
-                        "code": "generation_timeout",
-                    }
-                },
-            )
-        except WorkerDegradedError as exc:
-            # Circuit breaker tripped: this worker just failed several times
-            # in a row in a way that means its process died (see
-            # worker_pool._looks_like_dead_backend). Fail fast with a clear
-            # 503 instead of letting the request sit behind a dead runner for
-            # a full upstream timeout only to fail the same way anyway.
-            if mm and inflight_model_id:
-                mm.end_request(
-                    getattr(request.state, "inflight_model_id", inflight_model_id),
-                    inflight_request_id,
-                )
-            model_id = _extract_model_id(request=request, body=request_payload)
-            if model_id:
-                spawn(
-                    _record_stat(
-                        request=request,
-                        model_id=model_id,
-                        started_at=started_at,
-                        duration_ms=(time.monotonic() - start) * 1000,
-                        error_message=str(exc),
-                        status_code=503,
-                        endpoint_path=path,
-                        request_kind=request_kind,
-                        input_tokens=None,
-                        output_tokens=None,
-                    )
-                )
-            if path.startswith("/api/"):
-                return JSONResponse(
-                    status_code=503,
-                    headers={"Retry-After": str(settings.worker_circuit_breaker_cooldown_s)},
-                    content={"error": str(exc)},
-                )
-            return JSONResponse(
-                status_code=503,
-                headers={"Retry-After": str(settings.worker_circuit_breaker_cooldown_s)},
-                content={
-                    "error": {
-                        "message": str(exc),
-                        "type": "server_error",
-                        "code": "worker_degraded",
-                    }
-                },
-            )
         except asyncio.CancelledError:
             # Admin or owner cancelled via /ocabra/stats/requests/{id}/cancel.
             # ``CancelledError`` is BaseException on 3.8+, so the generic
-            # ``except Exception`` below never catches it. Clean up the
-            # in-flight slot (otherwise the counter leaks until the ActiveRequest
-            # ages out) and record the stat as a 499 — the canonical "client
-            # closed request" code — so the UI shows the cancelled turn.
-            if mm and inflight_model_id:
-                mm.end_request(
-                    getattr(request.state, "inflight_model_id", inflight_model_id),
-                    inflight_request_id,
-                )
+            # ``except Exception`` below never catches it. Recorded as a 499 —
+            # the canonical "client closed request" code — so the UI shows the
+            # cancelled turn. Admission releases the in-flight slot.
             model_id = _extract_model_id(request=request, body=request_payload)
             if model_id:
                 spawn(
@@ -1305,11 +923,10 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 )
             raise
         except Exception as exc:
-            if mm and inflight_model_id:
-                mm.end_request(
-                    getattr(request.state, "inflight_model_id", inflight_model_id),
-                    inflight_request_id,
-                )
+            # Generation timeout (504) and circuit breaker (503) get their
+            # response from admission (``dispatch_error_response``), anything
+            # else is a 500; recorded here with the same status.
+            mapped = admission.dispatch_error_response(exc, path)
             model_id = _extract_model_id(request=request, body=request_payload)
             if model_id:
                 spawn(
@@ -1319,7 +936,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         started_at=started_at,
                         duration_ms=(time.monotonic() - start) * 1000,
                         error_message=str(exc),
-                        status_code=500,
+                        status_code=mapped.status_code if mapped is not None else 500,
                         endpoint_path=path,
                         request_kind=request_kind,
                         input_tokens=None,
@@ -1327,6 +944,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     )
                 )
             raise
+        inflight_request_id = getattr(request.state, "inflight_request_id", None)
 
         # Detect streaming by content-type (SSE or NDJSON) or by response
         # shape (any Starlette response that exposes ``body_iterator``). The
@@ -1440,11 +1058,6 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         except Exception:  # noqa: BLE001 - cleanup must not hide the stream result
                             logger.exception("stream_iterator_close_failed", model_id=model_id)
                     duration_ms = (time.monotonic() - start) * 1000
-                    if mm and inflight_model_id:
-                        mm.end_request(
-                            getattr(request.state, "inflight_model_id", inflight_model_id),
-                            inflight_request_id,
-                        )
                     if model_id:
                         acc.finish()
                         stream_error = acc.stream_error()
@@ -1509,13 +1122,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
             response.body_iterator = tee_and_record()
             return response
 
-        # Non-streaming: end in-flight immediately, buffer body, extract tokens.
-        if mm and inflight_model_id:
-            mm.end_request(
-                getattr(request.state, "inflight_model_id", inflight_model_id),
-                inflight_request_id,
-            )
-
+        # Non-streaming: buffer body, extract tokens.
         duration_ms = (time.monotonic() - start) * 1000
         response_payload, response = await _extract_response_payload_and_rebuild(response)
         error_message = _extract_error_message(response_payload, response.status_code)
@@ -1603,81 +1210,6 @@ class StatsMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# Where ``StatsMiddleware.__call__`` leaves the ``model`` of a multipart form.
-_MULTIPART_MODEL_SCOPE_KEY = "ocabra.multipart_model"
-
-
-async def _deny_websocket(scope: Scope, receive: Receive, send: Send) -> bool:
-    """Maintenance mode and in-flight cap for a WebSocket handshake (BUG-38).
-
-    The model is the ``model`` query parameter (``/v1/realtime?model=``).
-    Same answers as an HTTP request: 503 + ``Retry-After`` under maintenance,
-    429 + ``Retry-After`` when the worker is at its cap. The session is not
-    counted in-flight here: it can last for hours, and each of its turns
-    marks itself in-flight (``RealtimeSession`` → ``begin_request``); the
-    check only stops a new session from piling onto a saturated worker.
-    Returns True when the handshake was denied. Best effort: a failure
-    lets the session through, as before.
-    """
-    conn = HTTPConnection(scope)
-    requested = (conn.query_params.get("model") or "").strip()
-    if not requested:
-        return False
-    try:
-        mm = getattr(conn.app.state, "model_manager", None)
-    except AttributeError:
-        mm = None
-    if mm is None:
-        return False
-    path = conn.url.path
-    request_kind = (
-        "realtime_transcription"
-        if (conn.query_params.get("intent") or "").strip().lower() == "transcription"
-        else "realtime_session"
-    )
-    try:
-        model_id = await _resolve_inflight_model_id(conn, requested)  # type: ignore[arg-type]
-        if not model_id:
-            return False
-        response = None
-        error_code = None
-        if mm.is_in_maintenance(model_id):
-            response = admission.maintenance_response(model_id)
-            error_code, status = "model_maintenance", 503
-        else:
-            remote_bound = await _request_bound_for_peer(conn, mm, model_id)  # type: ignore[arg-type]
-            effective_cap = mm.effective_inflight_cap(
-                model_id,
-                settings.max_inflight_per_model,
-                request_kind=request_kind,
-                remote_bound=remote_bound,
-            )
-            if effective_cap > 0 and mm.inflight_count(model_id) >= effective_cap:
-                response = admission.capacity_response(model_id, effective_cap)
-                error_code, status = "model_at_capacity", 429
-    except Exception as exc:  # noqa: BLE001 - never block a session on this
-        logger.warning("realtime_admission_check_failed", model=requested, error=str(exc))
-        return False
-    if response is None:
-        return False
-    spawn(
-        _record_stat(
-            request=conn,  # type: ignore[arg-type]
-            model_id=model_id,
-            started_at=datetime.now(UTC),
-            duration_ms=0.0,
-            error_message=error_code,
-            status_code=status,
-            endpoint_path=path,
-            request_kind=request_kind,
-            input_tokens=None,
-            output_tokens=None,
-        )
-    )
-    await admission.send_websocket_denial(response, scope, receive, send)
-    return True
-
-
 def _client_addr(request: Request) -> str | None:
     """Real client IP: X-Real-IP, then X-Forwarded-For (first hop), falling
     back to the direct peer.
@@ -1701,12 +1233,6 @@ def _client_addr(request: Request) -> str | None:
         return xff.split(",")[0].strip()[:64] or None
     client = request.client
     return client.host if client else None
-
-
-def _should_track(path: str) -> bool:
-    if path.startswith("/v1/"):
-        return True
-    return path in _TRACKED_API_PATHS
 
 
 async def _extract_request_payload(request: Request) -> dict | None:
@@ -1738,157 +1264,6 @@ def _extract_model_id(request: Request, body: dict | None) -> str | None:
         return str(model_id_from_state)
 
     return None
-
-
-async def _request_bound_for_peer(request: Request, mm: Any, model_id: str) -> bool:
-    """True when this request is headed for a federation peer rather than a
-    local worker.
-
-    Mirrors step 2 of ``ocabra.core.federation.resolve_federated``: the model
-    is not LOADED here but at least one online peer has it loaded, so the
-    handler will proxy it out. That matters for admission because the local
-    slot-derived cap in ``effective_inflight_cap`` describes a local worker's
-    KV cache — a worker this request will never touch. Left unchecked, a
-    generative model that only ever runs on a peer inherits the 1-slot
-    assumption and gets throttled to ``max_queued_per_slot`` (4) concurrent
-    requests, no matter how much headroom the peer actually has. The peer runs
-    its own admission control, so the flat ceiling is the right local guard.
-
-    Admission runs in this middleware, *before* the handler resolves
-    federation, so this is necessarily a prediction rather than an
-    observation. It is deliberately conservative: when the model is loaded
-    locally we never skip the cap, even though ``select_target`` could still
-    pick a peer. Best effort — any failure falls back to local accounting.
-    """
-    from ocabra.core.model_manager import ModelStatus
-
-    if not settings.federation_enabled:
-        return False
-    federation_manager = getattr(request.app.state, "federation_manager", None)
-    if federation_manager is None:
-        return False
-    try:
-        state = await mm.get_state(model_id)
-        if state is not None and state.status == ModelStatus.LOADED:
-            return False
-        return bool(federation_manager.get_remote_models().get(model_id))
-    except Exception:  # noqa: BLE001 -- federation stays best effort
-        return False
-
-
-async def _predict_router_worker(request: Request, registry: Any, profile: Any) -> str | None:
-    """Worker key the router will most likely serve this request with.
-
-    Admission runs before the endpoint asks ``RouterResolver.pick``, so this
-    is a prediction. It used to be the first local target of the list, and
-    the cap was checked against it even when the router would pick a
-    different one (BUG-38): a router whose first target was cold but whose
-    second was warm and saturated admitted everything, and one whose first
-    target was saturated rejected requests the router would have sent to an
-    idle warm one. ``pick`` sends a request to the first target that is
-    already LOADED, wherever it is in the list, and only cold-starts in list
-    order when nothing is warm; this mirrors that (without its session veto,
-    capability and context checks). The in-flight count is moved to the
-    worker actually chosen afterwards (``rebind_request`` in
-    ``api/openai/_deps.py``).
-    """
-    from ocabra.core.model_manager import ModelStatus
-
-    fm = getattr(request.app.state, "federation_manager", None)
-    mm = getattr(request.app.state, "model_manager", None)
-    first: str | None = None
-    for target_id in profile.routing_targets or []:
-        target = await registry.get(target_id)
-        if target is not None and target.enabled and target.base_model_id:
-            key = compute_worker_key(target.base_model_id, target.load_overrides)
-            if first is None:
-                first = key
-            if mm is None:
-                break
-            try:
-                state = await mm.get_state(key)
-                if state is None and key != target.base_model_id:
-                    state = await mm.get_state(target.base_model_id)
-            except Exception:  # noqa: BLE001 - fall back to list order
-                state = None
-            if state is not None and getattr(state, "status", None) == ModelStatus.LOADED:
-                return key
-            continue
-        if target is None and fm is not None and first is None:
-            # A target only a peer has (a pod first in
-            # ``recomendado-sota``): its own id, not the next
-            # local target's — that charged the pod's requests
-            # to ornith here (in-flight, admission, stats).
-            remote_id = fm.remote_model_for(str(target_id))
-            if remote_id is not None:
-                return remote_id
-    return first
-
-
-async def _resolve_inflight_model_id(request: Request, requested: str | None) -> str | None:
-    """Resolve a public profile/model id to the worker key used by ModelManager.
-
-    Statistics retain the public id from the request body. Only lifecycle and
-    admission tracking use this resolved key.
-    """
-    if not requested:
-        return None
-
-    registry = getattr(request.app.state, "profile_registry", None)
-    if registry is not None:
-        try:
-            profile = await registry.get(requested)
-            if profile is None:
-                # Hidden compatibility aliases (e.g. "gemma4:26b" -> the
-                # renamed "gemma4:26b-llamacpp" profile after a backend
-                # migration) aren't profile_ids themselves, so a plain
-                # registry.get() misses them. Without this, stats blamed
-                # the alias's OLD backend_model_id match in the fallback
-                # below — attributing every request to the wrong backend
-                # even though the real request correctly used the new one.
-                # See resolve_profile() in api/openai/_deps.py for the
-                # same alias-then-direct-lookup order this mirrors.
-                alias_resolver = getattr(registry, "resolve_alias", None)
-                alias_target = (
-                    await alias_resolver(requested) if alias_resolver is not None else None
-                )
-                profile = alias_target[0] if alias_target is not None else None
-            if profile is not None and profile.enabled:
-                if getattr(profile, "profile_kind", "execution") == "router":
-                    return await _predict_router_worker(request, registry, profile)
-                return compute_worker_key(profile.base_model_id, profile.load_overrides)
-
-            # Legacy canonical model ids resolve through their default profile.
-            if "/" in requested:
-                profiles = await registry.list_by_model(requested)
-                profile = next(
-                    (item for item in profiles if item.enabled and item.is_default),
-                    None,
-                )
-                if profile is None:
-                    profile = next((item for item in profiles if item.enabled), None)
-                if profile is not None:
-                    return compute_worker_key(
-                        profile.base_model_id,
-                        profile.load_overrides,
-                    )
-        except Exception as exc:  # noqa: BLE001 - tracking must not block inference
-            logger.warning(
-                "inflight_model_resolution_failed",
-                requested_model_id=requested,
-                error=str(exc),
-            )
-
-    model_manager = getattr(request.app.state, "model_manager", None)
-    if model_manager is not None:
-        try:
-            state = await model_manager.get_state(requested)
-            if state is not None:
-                return state.model_id
-        except Exception:  # noqa: BLE001 - fall back to the public id
-            pass
-
-    return requested
 
 
 def _extract_last_payload_from_stream(body: bytes, content_type: str) -> dict | None:
@@ -2380,6 +1755,29 @@ async def _record_stat(
         logger.warning("stats_write_failed", error=str(exc))
 
 
+def record_admission_rejection(conn: Any, rejected: admission.AdmissionRejection) -> None:
+    """Record a request admission turned away (503 maintenance, 429 cap).
+
+    ``AdmissionMiddleware``'s ``on_reject`` (wired in ``ocabra.main``): the
+    request never reaches this middleware, so the row is written from here,
+    the same one it always was — keyed by the worker, no token counts.
+    """
+    spawn(
+        _record_stat(
+            request=conn,
+            model_id=rejected.model_id,
+            started_at=rejected.started_at,
+            duration_ms=rejected.duration_ms,
+            error_message=rejected.error_code,
+            status_code=rejected.status_code,
+            endpoint_path=rejected.path,
+            request_kind=rejected.request_kind,
+            input_tokens=None,
+            output_tokens=None,
+        )
+    )
+
+
 async def record_realtime_request(
     websocket: object,
     *,
@@ -2525,24 +1923,3 @@ def _federation_fields(
     return name, inbound, route
 
 
-def _apply_peer_rules(request: Request, auth_meta: dict) -> None:
-    """If the caller is a federation peer served under rules, carry them along.
-
-    ``request.state.federation_rules`` (read by ``is_batch_origin_request`` for
-    «me first») and the ``current_peer_rules`` contextvar (read by the model
-    loader for «may it evict»). The identity is the authenticated service user
-    of the peer, never a header.
-    """
-    fm = getattr(getattr(request.app, "state", None), "federation_manager", None)
-    if fm is None or not auth_meta.get("user_id"):
-        return
-    try:
-        rules = fm.rules_for_user(auth_meta.get("user_id"))
-    except Exception:  # noqa: BLE001 — never block a request on this
-        return
-    from ocabra.core.federation_rules import ALL_ALLOWED, current_peer_rules
-
-    if rules is None or rules == ALL_ALLOWED:
-        return
-    request.state.federation_rules = rules
-    current_peer_rules.set(rules)
