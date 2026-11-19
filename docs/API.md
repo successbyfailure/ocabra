@@ -505,7 +505,7 @@ Un agente se usa como modelo `agent/<slug>` en `/v1/chat/completions`.
 
 ## Eventos en tiempo real
 
-WebSocket del panel: exige la cookie `ocabra_session` y mismo origen. Tipos de evento: `docs/CONTRACTS.md` §5.
+WebSocket del panel: exige la cookie `ocabra_session` y mismo origen. Tipos de evento: `docs/CONTRACTS.md` §5.7.
 
 | Método | Ruta | Qué hace | Acceso |
 |---|---|---|---|
