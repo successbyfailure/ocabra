@@ -253,6 +253,20 @@ services:
     build:
       context: ./hw-monitor
       dockerfile: Dockerfile
+    # Still privileged (SEG-21). Probed 2026-11-19 with this image in a
+    # throwaway container, not privileged, `--gpus all`: NVML reads (power
+    # limits and constraints) and /sys/class/hwmon (k10temp) work; RAPL
+    # (/sys/class/powercap/intel-rapl:0/energy_uj, root-only) does not:
+    # Docker masks /sys/devices/virtual/powercap (FileNotFoundError) and,
+    # with systempaths=unconfined, the docker-default AppArmor profile denies
+    # it (PermissionError). It reads with
+    #   security_opt: [systempaths=unconfined, apparmor=unconfined]
+    # which is most of what privileged gives up, and setting power limits
+    # (nvmlDeviceSetPowerManagementLimit) without privileged was not tested
+    # (it writes to the production GPUs). Candidate replacement and how to
+    # check it: docs/REVISION-2026-11-16.md, SEG-21. No /sys bind mounts:
+    # /sys/class/powercap doesn't exist on WSL2 and the container would not
+    # start (v0.106.6).
     privileged: true
     gpus: all
     environment:
