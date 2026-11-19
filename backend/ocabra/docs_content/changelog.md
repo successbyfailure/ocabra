@@ -34,6 +34,10 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   de sus cargas (el p95 solo a `p95_s`). La duración esperada de las
   peticiones en `/ocabra/models/activity` hereda el arreglo cuando el modelo
   aún no tiene ritmos medidos.
+- **`DELETE /v1/files/{id}` del fichero de entrada de un batch terminado
+  daba 500.** Ahora lo borra (`"deleted": true`) y el batch conserva su
+  `input_file_id`, como en OpenAI. Mientras el batch está en curso sigue
+  negándose con 409 `file_in_use`.
 
 ---
 

@@ -16,9 +16,7 @@ from ocabra.database import Base
 class OpenAIFile(Base):
     __tablename__ = "openai_files"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -51,9 +49,7 @@ class OpenAIFile(Base):
 class OpenAIBatch(Base):
     __tablename__ = "openai_batches"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -66,9 +62,11 @@ class OpenAIBatch(Base):
         nullable=True,
     )
     endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    # Sin clave foránea a propósito (0049): el batch conserva el id de su
+    # fichero de entrada aunque este se borre, como en OpenAI. Mientras el
+    # batch está en curso, DELETE /v1/files lo niega con 409.
     input_file_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("openai_files.id", ondelete="RESTRICT"),
         nullable=False,
     )
     completion_window: Mapped[str] = mapped_column(Text, nullable=False, default="24h")
