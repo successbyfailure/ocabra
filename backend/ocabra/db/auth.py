@@ -6,7 +6,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -28,12 +28,12 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    username: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
-    email: Mapped[str | None] = mapped_column(Text, unique=True, nullable=True, index=True)
+    # unique=True is a UNIQUE constraint (users_<col>_key) and the ix_ in
+    # __table_args__ a separate plain index: that is what the migrations built.
+    username: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    email: Mapped[str | None] = mapped_column(Text, unique=True, nullable=True)
     hashed_password: Mapped[str] = mapped_column(Text, nullable=False)
-    role: Mapped[str] = mapped_column(
-        String(32), nullable=False, default=UserRole.user.value, index=True
-    )
+    role: Mapped[str] = mapped_column(Text, nullable=False, default=UserRole.user.value, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -53,6 +53,11 @@ class User(Base):
         "UserGroup", back_populates="user", cascade="all, delete-orphan"
     )
 
+    __table_args__ = (
+        Index("ix_users_username", "username"),
+        Index("ix_users_email", "email"),
+    )
+
     @property
     def groups(self) -> list[Group]:
         return [m.group for m in self.group_memberships if m.group is not None]
@@ -69,7 +74,8 @@ class ApiKey(Base):
         index=True,
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    key_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
+    # UNIQUE constraint plus a plain index (__table_args__), as migrated.
+    key_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     key_prefix: Mapped[str] = mapped_column(Text, nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -88,12 +94,15 @@ class ApiKey(Base):
     user: Mapped[User] = relationship("User", back_populates="api_keys")
     group: Mapped[Group | None] = relationship("Group", foreign_keys=[group_id])
 
+    __table_args__ = (Index("ix_api_keys_key_hash", "key_hash"),)
+
 
 class Group(Base):
     __tablename__ = "groups"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
+    # UNIQUE constraint plus a plain index (__table_args__), as migrated.
+    name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     grants_all_models: Mapped[bool] = mapped_column(
@@ -109,6 +118,8 @@ class Group(Base):
     member_entries: Mapped[list[UserGroup]] = relationship(
         "UserGroup", back_populates="group", cascade="all, delete-orphan"
     )
+
+    __table_args__ = (Index("ix_groups_name", "name"),)
 
     @property
     def models(self) -> list[str]:

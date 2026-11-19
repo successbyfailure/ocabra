@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,7 +25,8 @@ class FederationPeer(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # "http" | "tunnel_in" (peer dials us) | "tunnel_out" (we dial the peer)
     connection_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="http")
-    tunnel_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    # A unique index (migration 0041), not a UNIQUE constraint: see __table_args__.
+    tunnel_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Service key we use to run the peer's requests on our API (tunnel modes).
     local_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     local_user_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -48,6 +49,10 @@ class FederationPeer(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+    __table_args__ = (
+        Index("ix_federation_peers_tunnel_token_hash", "tunnel_token_hash", unique=True),
+    )
+
 
 class FederationInvite(Base):
     """Pre-approved join code: joining with it skips manual acceptance."""
@@ -62,7 +67,10 @@ class FederationInvite(Base):
     uses: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Nullable in the migrated schema (server_default fills it); kept as is.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
 
 
 class FederationJoinRequest(Base):
@@ -72,7 +80,7 @@ class FederationJoinRequest(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # pending | accepted | denied | expired
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default="swarm")
     remote_node_id: Mapped[str] = mapped_column(String(255), nullable=False)
     remote_node_name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -90,6 +98,9 @@ class FederationJoinRequest(Base):
     )
     # Tunnel token for the requester, held until it first connects.
     token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Nullable in the migrated schema (server_default fills it); kept as is.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

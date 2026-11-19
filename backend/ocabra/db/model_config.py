@@ -7,11 +7,13 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -34,9 +36,12 @@ class LogicalModel(Base):
     display_name: Mapped[str | None] = mapped_column(String(512))
     default_backend: Mapped[str] = mapped_column(String(64), nullable=False)
     registry_metadata: Mapped[dict | None] = mapped_column(JSONB)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Nullable in the migrated schema (server_default fills it); kept as is.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
     )
 
 
@@ -46,11 +51,13 @@ class ModelConfig(Base):
     __tablename__ = "model_configs"
     __table_args__ = (
         UniqueConstraint("model_key", "backend_type", name="uq_model_configs_model_key_backend"),
+        Index("ix_model_configs_model_id", "model_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # Always ``<backend_type>/<model_key>``.
-    model_id: Mapped[str] = mapped_column(String(512), unique=True, nullable=False, index=True)
+    # UNIQUE constraint plus a plain index (__table_args__), as migrated.
+    model_id: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
     model_key: Mapped[str] = mapped_column(
         String(512),
         ForeignKey("models.model_key", ondelete="CASCADE", onupdate="CASCADE"),
@@ -77,9 +84,12 @@ class ModelConfig(Base):
     vocab_size: Mapped[int | None] = mapped_column(Integer)
     bos_id: Mapped[int | None] = mapped_column(Integer)
     eos_id: Mapped[int | None] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Nullable in the migrated schema (server_default fills it); kept as is.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
     )
 
     profiles: Mapped[list["ModelProfile"]] = relationship(
@@ -224,9 +234,12 @@ class OpenAITTSVoiceMap(Base):
         ForeignKey("model_profiles.profile_id", ondelete="CASCADE", onupdate="CASCADE"),
         nullable=False,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Nullable in the migrated schema (server_default fills it); kept as is.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
     )
 
 
@@ -247,6 +260,13 @@ class ProfileRuntimePreset(Base):
         CheckConstraint("priority >= 0", name="ck_profile_runtime_preset_priority"),
         CheckConstraint(
             "NOT is_default OR enabled", name="ck_profile_runtime_preset_default_enabled"
+        ),
+        # At most one default preset per profile (migration 0024).
+        Index(
+            "uq_profile_runtime_preset_default",
+            "profile_id",
+            unique=True,
+            postgresql_where=text("is_default"),
         ),
     )
 
@@ -274,9 +294,12 @@ class ProfileRuntimePreset(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Nullable in the migrated schema (server_default fills it); kept as is.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
     )
 
     profile: Mapped["ModelProfile"] = relationship(
@@ -295,7 +318,10 @@ class EvictionSchedule(Base):
     action: Mapped[str] = mapped_column(String(32), nullable=False)
     label: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Nullable in the migrated schema (server_default fills it); kept as is.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
 
 
 GLOBAL_SCHEDULE_START_ACTION = "evict_all"
@@ -612,7 +638,10 @@ class OpenAIImageModelMap(Base):
         ForeignKey("model_profiles.profile_id", ondelete="CASCADE", onupdate="CASCADE"),
         nullable=False,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Nullable in the migrated schema (server_default fills it); kept as is.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
     )

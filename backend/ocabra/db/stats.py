@@ -143,6 +143,17 @@ class RequestStat(Base):
     # client call — lets stats distinguish batch vs interactive load.
     is_batch: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 
+    __table_args__ = (
+        # Federation traffic only (migration 0043).
+        Index(
+            "ix_request_stats_federation",
+            "started_at",
+            postgresql_where=sa.text(
+                "remote_node_id IS NOT NULL OR federation_inbound_from IS NOT NULL"
+            ),
+        ),
+    )
+
 
 class GpuStat(Base):
     __tablename__ = "gpu_stats"
@@ -166,9 +177,8 @@ class ModelLoadStat(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     model_id: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
     backend_type: Mapped[str | None] = mapped_column(String(64), index=True)
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
-    )
+    # No index of its own: ix_model_load_stats_started_at_model leads with it.
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     gpu_count: Mapped[int | None] = mapped_column(Integer)
@@ -183,11 +193,10 @@ class ServiceGenerationStat(Base):
     __tablename__ = "service_generation_stats"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    service_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    service_type: Mapped[str | None] = mapped_column(String(64), index=True)
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
-    )
+    # Indexed under the ix_svc_gen_stats_* names (see __table_args__).
+    service_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    service_type: Mapped[str | None] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     gpu_index: Mapped[int | None] = mapped_column(Integer)
@@ -195,7 +204,12 @@ class ServiceGenerationStat(Base):
     # True when the generation was interrupted by a forced eviction (grace period expired)
     evicted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    __table_args__ = (Index("ix_svc_gen_stats_started_at_svc", "started_at", "service_id"),)
+    __table_args__ = (
+        Index("ix_svc_gen_stats_service_id", "service_id"),
+        Index("ix_svc_gen_stats_service_type", "service_type"),
+        Index("ix_svc_gen_stats_started_at", "started_at"),
+        Index("ix_svc_gen_stats_started_at_svc", "started_at", "service_id"),
+    )
 
 
 class ServerStat(Base):
@@ -246,7 +260,7 @@ class ToolCallStat(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     hop_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
 
     __table_args__ = (

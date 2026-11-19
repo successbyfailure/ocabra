@@ -16,6 +16,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -36,13 +37,15 @@ class Agent(Base):
     __tablename__ = "agents"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    slug: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    # UNIQUE constraint (agents_slug_key) plus a plain index, as the migration
+    # created them; ``unique=True, index=True`` would declare one unique index.
+    slug: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     display_name: Mapped[str] = mapped_column(String(256), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     base_model_id: Mapped[str | None] = mapped_column(
         String(512),
-        ForeignKey("model_configs.model_id", ondelete="CASCADE"),
+        ForeignKey("model_configs.model_id", ondelete="CASCADE", onupdate="CASCADE"),
         nullable=True,
     )
     profile_id: Mapped[str | None] = mapped_column(
@@ -95,6 +98,7 @@ class Agent(Base):
             "(base_model_id IS NOT NULL) <> (profile_id IS NOT NULL)",
             name="ck_agents_exactly_one_base",
         ),
+        Index("ix_agents_slug", "slug"),
     )
 
 
@@ -120,6 +124,9 @@ class AgentMCPServer(Base):
         primary_key=True,
     )
     allowed_tools: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+
+    # The primary key (agent_id, mcp_server_id) does not cover lookups by server.
+    __table_args__ = (Index("ix_agent_mcp_servers_mcp_server_id", "mcp_server_id"),)
 
     agent: Mapped[Agent] = relationship("Agent", back_populates="mcp_links")
     mcp_server: Mapped[MCPServer] = relationship("MCPServer", back_populates="agent_links")
