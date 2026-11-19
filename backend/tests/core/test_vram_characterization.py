@@ -650,3 +650,14 @@ async def test_without_nvml_the_waits_still_follow_the_poll():
         await env.mm.load("new")
         assert env.backend.unloads == ["od"]
         assert time.monotonic() - started < 5.0
+
+
+async def test_ensure_vram_free_never_evicts_the_service_asking(env):
+    """TRELLIS asking for room must not be offered as its own victim (it was:
+    the service candidates were not filtered by the requester)."""
+    await _three_on_the_3090(env)
+    services = _Services(env, candidates=["trellis"])
+    env.mm.set_service_manager(services)
+    with pytest.raises(InsufficientVRAMError):
+        await env.mm.ensure_vram_free("service:trellis", 30_000, GPU_3090)
+    assert services.evicted == []

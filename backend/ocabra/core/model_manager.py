@@ -3668,9 +3668,19 @@ class ModelManager:
             # First: try stopping external services (ACE-Step, ComfyUI, etc.) on the
             # preferred GPU — they often hold large amounts of VRAM and can be restarted.
             if self._service_manager:
-                service_candidates = self._service_manager.get_pressure_eviction_candidates(
-                    preferred_gpu
+                # Never the service asking (ensure_vram_free for itself):
+                # stopping it would free its own memory for nobody, after
+                # waiting out its own generation.
+                requesting_service = (
+                    model_id.removeprefix("service:") if model_id.startswith("service:") else None
                 )
+                service_candidates = [
+                    service_id
+                    for service_id in self._service_manager.get_pressure_eviction_candidates(
+                        preferred_gpu
+                    )
+                    if service_id != requesting_service
+                ]
                 if service_candidates:
                     logger.info(
                         "pressure_eviction_service_candidates",
