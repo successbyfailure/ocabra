@@ -18,7 +18,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
       args:
-        BITNET_COMMIT: ${BITNET_COMMIT:-main}
+        BITNET_COMMIT: ${BITNET_COMMIT:-0b341e582afbf9e1011f24744b554c96a3477eb5}
         BITNET_PRETUNED_MODEL: ${BITNET_PRETUNED_MODEL:-bitnet_b1_58-3B}
         BITNET_KERNEL_FLAVOR: ${BITNET_KERNEL_FLAVOR:-tl2}
         BITNET_BUILD_JOBS: ${BITNET_BUILD_JOBS:-8}

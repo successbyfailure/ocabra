@@ -112,7 +112,8 @@ print(json.dumps(meta, indent=2))
 PY
 
 # ── check + publish, in a Debian like the runtime images ─────────────────────
-FROM python:3.11-slim-bookworm AS publish
+# Pinned (INF-07) to the base of the running api image; bump on purpose.
+FROM python:3.11.18-slim-bookworm@sha256:a83ba18aef0f865b1a4a611c2cf460fe446f2795673bbb9fe43be570439e3b39 AS publish
 ARG BACKEND
 ARG CUDA=ON
 ARG CUDA_ARCHS="75;80;86;89;90;100;120"

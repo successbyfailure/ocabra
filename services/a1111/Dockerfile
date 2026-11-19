@@ -17,8 +17,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN useradd -m -u 1000 -s /bin/bash a1111
 
+# Pinned (INF-07) to upstream HEAD as of 2026-11-19 (no image of this service
+# runs on the hub to copy the commit from). Override with --build-arg.
+ARG A1111_REF=82a973c04367123ae98bd9abdf80d9eda9b910e2
+
 WORKDIR /opt
 RUN git clone https://github.com/AUTOMATIC1111/stable-diffusion-webui.git \
+    && git -C stable-diffusion-webui checkout --quiet ${A1111_REF} \
     && chown -R 1000:1000 /opt/stable-diffusion-webui
 
 WORKDIR /opt/stable-diffusion-webui

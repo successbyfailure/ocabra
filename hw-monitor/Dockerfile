@@ -1,4 +1,7 @@
-FROM python:3.12-slim
+# Pinned to the Python the running image has (INF-07). 3.12 while the api and
+# the gateway are on 3.11: it only needs pynvml, redis and SQLAlchemy, and
+# moving it is a rebuild with nothing to gain, so it stays where it runs.
+FROM python:3.12.16-slim
 
 WORKDIR /app
 

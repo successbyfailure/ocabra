@@ -16,7 +16,8 @@
 # or equivalent). The NVIDIA container toolkit provides the driver at
 # runtime via /dev/nvidia* + libcuda.so.1.
 
-FROM docker:28-cli AS docker-cli
+# Pinned (INF-07): the CLI the running api/docker-agent image carries.
+FROM docker:28.5.2-cli AS docker-cli
 
 # The compose plugin is shipped separately from the docker CLI in the
 # upstream docker/compose project. service_manager runs `docker compose
@@ -32,7 +33,8 @@ RUN curl -fsSL \
         "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64" \
         -o /tmp/docker-compose
 
-FROM python:3.11-slim-bookworm AS base
+# Pinned (INF-07) to the base of the running api image; bump on purpose.
+FROM python:3.11.18-slim-bookworm@sha256:a83ba18aef0f865b1a4a611c2cf460fe446f2795673bbb9fe43be570439e3b39 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

@@ -10,6 +10,14 @@ BITNET_BUILD_JOBS="${BITNET_BUILD_JOBS:-8}"
 BITNET_ENABLE_CUDA="${BITNET_ENABLE_CUDA:-false}"
 BITNET_BUILD_PRISMML="${BITNET_BUILD_PRISMML:-true}"
 PRISMML_WORKDIR="${PRISMML_WORKDIR:-/build/prismml-llama}"
+PRISMML_REF="${PRISMML_REF:-master}"
+
+# Shallow checkout of a branch, tag or commit (`clone --branch` takes no SHA).
+fetch_ref() {  # repo ref dir
+  git init --quiet "$3"
+  git -C "$3" fetch --quiet --depth 1 "$1" "$2"
+  git -C "$3" checkout --quiet FETCH_HEAD
+}
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -22,7 +30,8 @@ rm -rf /var/lib/apt/lists/*
 
 python3 -m pip install --no-cache-dir huggingface-hub numpy
 
-git clone --recursive --depth 1 --branch "${BITNET_COMMIT}" https://github.com/microsoft/BitNet.git "${WORKDIR}"
+fetch_ref https://github.com/microsoft/BitNet.git "${BITNET_COMMIT}" "${WORKDIR}"
+git -C "${WORKDIR}" submodule update --init --recursive
 cd "${WORKDIR}"
 
 KERNEL_HEADER="preset_kernels/${BITNET_PRETUNED_MODEL}/bitnet-lut-kernels-${BITNET_KERNEL_FLAVOR}.h"
@@ -83,7 +92,7 @@ fi
 # BITNET_BUILD_PRISMML=false.
 # ---------------------------------------------------------------------------
 if [[ "${BITNET_BUILD_PRISMML}" == "true" ]]; then
-  git clone --depth 1 https://github.com/PrismML-Eng/llama.cpp.git "${PRISMML_WORKDIR}"
+  fetch_ref https://github.com/PrismML-Eng/llama.cpp.git "${PRISMML_REF}" "${PRISMML_WORKDIR}"
   cd "${PRISMML_WORKDIR}"
   cmake -B build \
     -DGGML_CUDA="${GGML_CUDA_FLAG}" \

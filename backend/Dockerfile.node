@@ -51,7 +51,8 @@ RUN cp -a /src/build/bin/*.so* /out/bin/ \
     && ls -la /out/bin
 
 # ── 2. Runtime ───────────────────────────────────────────────────────────────
-FROM python:3.11-slim-bookworm AS node
+# Pinned (INF-07) to the base of the running api image; bump on purpose.
+FROM python:3.11.18-slim-bookworm@sha256:a83ba18aef0f865b1a4a611c2cf460fe446f2795673bbb9fe43be570439e3b39 AS node
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

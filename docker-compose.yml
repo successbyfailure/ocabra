@@ -176,7 +176,9 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:16-alpine
+    # Pinned to the image running on the hub (INF-07): PostgreSQL 16.13. A new
+    # tag means a recreate of the database; bump it on purpose.
+    image: postgres:16.13-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
     # Only its own three variables: `env_file: .env` handed it every secret
     # of the stack (SEG-09).
     environment:
@@ -193,7 +195,10 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    # Pinned to the image running on the hub (INF-07): Redis 7.4.8. No volume
+    # and no maxmemory on purpose: its contents are rebuilt at startup, and an
+    # eviction policy could drop sessions or locks instead of cache entries.
+    image: redis:7.4.8-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065
     # With REDIS_PASSWORD set (setup.sh generates it), every client has to
     # authenticate (SEG-21): before, anything on the compose network could read
     # and write oCabra's state and publish on its channels, such as the GPU
@@ -250,6 +255,9 @@ services:
     # JPEG, WAV y MP3 (probado con gemma4:12b), y una imagen local impedía
     # `docker compose pull` en los nodos. El actualizador del panel hace
     # `pull` + recrear (y `build --pull` si algún nodo vuelve a usar build:).
+    # Sin fijar a propósito (INF-07): el panel actualiza Ollama con
+    # `compose pull` + recrear (Ajustes > Ollama) y compara con la última
+    # release; con una etiqueta fija ese botón no haría nada. Corre la 0.40.16.
     image: ollama/ollama:latest
     gpus: all
     environment:
@@ -454,6 +462,8 @@ services:
 
   unsloth-studio:
     profiles: ["services"]
+    # Sin fijar: servicio opcional que no corre en el hub (no hay versión que
+    # copiar); UNSLOTH_IMAGE en .env lo fija a una etiqueta concreta.
     image: ${UNSLOTH_IMAGE:-unsloth/unsloth:latest}
     container_name: ocabra-unsloth-studio-1
     gpus: all
@@ -507,7 +517,8 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2-alpine
+    # Pinned to the image running on the hub (INF-07): Caddy 2.11.2.
+    image: caddy:2.11.2-alpine@sha256:fce4f15aad23222c0ac78a1220adf63bae7b94355d5ea28eee53910624acedfa
     ports:
       - "8484:80"
       - "${SERVICES_PORTAL_PORT:-8485}:80"

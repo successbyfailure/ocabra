@@ -1,11 +1,16 @@
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS bitnet-builder
 
-ARG BITNET_COMMIT=main
+# Pinned (INF-07): microsoft/BitNet main and PrismML-Eng/llama.cpp master as
+# of 2026-11-19 (this legacy image isn't running anywhere to copy them from).
+# A branch name still works. BITNET_COMMIT in .env overrides it.
+ARG BITNET_COMMIT=0b341e582afbf9e1011f24744b554c96a3477eb5
+ARG PRISMML_REF=3f035ba664f8f08c3d9432b6421f8f1a0da1f37a
 ARG BITNET_PRETUNED_MODEL=bitnet_b1_58-3B
 ARG BITNET_KERNEL_FLAVOR=tl2
 ARG BITNET_BUILD_JOBS=8
 ARG BITNET_ENABLE_CUDA=false
 ENV BITNET_COMMIT=${BITNET_COMMIT}
+ENV PRISMML_REF=${PRISMML_REF}
 ENV BITNET_PRETUNED_MODEL=${BITNET_PRETUNED_MODEL}
 ENV BITNET_KERNEL_FLAVOR=${BITNET_KERNEL_FLAVOR}
 ENV BITNET_BUILD_JOBS=${BITNET_BUILD_JOBS}
@@ -18,7 +23,9 @@ RUN chmod +x /tmp/build_bitnet.sh && /tmp/build_bitnet.sh
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS llama-builder
 
 ARG LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp
-ARG LLAMA_CPP_REF=master
+# Pinned (INF-07) to the llama.cpp commit the native backends publish
+# (scripts/publish-native-backends.sh); a branch or tag also works.
+ARG LLAMA_CPP_REF=d3c3e242c16b8cbf51400fad410cd69b22d64f35
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -27,7 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-RUN git clone --depth 1 --branch ${LLAMA_CPP_REF} ${LLAMA_CPP_REPO} /build/llama.cpp
+RUN git init --quiet /build/llama.cpp \
+    && git -C /build/llama.cpp fetch --quiet --depth 1 ${LLAMA_CPP_REPO} ${LLAMA_CPP_REF} \
+    && git -C /build/llama.cpp checkout --quiet FETCH_HEAD
 ARG LLAMA_CUDA_ARCHITECTURES="75;80;86;89;90"
 # Recent llama.cpp pulls in driver API symbols (cuMemCreate, cuGetErrorString,
 # ...) and its libggml-cuda.so records a DT_NEEDED on libcuda.so.1 — which
@@ -50,7 +59,7 @@ RUN cmake -S /build/llama.cpp -B /build/llama.cpp/build \
     -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs"
 RUN cmake --build /build/llama.cpp/build --target llama-server -j4
 
-FROM docker:28-cli AS docker-cli
+FROM docker:28.5.2-cli AS docker-cli
 
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS base
 
