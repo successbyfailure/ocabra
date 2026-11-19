@@ -22,6 +22,7 @@ import httpx
 import structlog
 
 from ocabra.backends._fs import total_file_size
+from ocabra.backends._health_http import health_client
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -700,9 +701,9 @@ class VLLMBackend(BackendInterface):
         if proc.returncode is not None:
             return False
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"http://127.0.0.1:{port}/health")
-                return resp.status_code == 200
+            client = health_client()
+            resp = await client.get(f"http://127.0.0.1:{port}/health", timeout=5.0)
+            return resp.status_code == 200
         except Exception:
             return False
 

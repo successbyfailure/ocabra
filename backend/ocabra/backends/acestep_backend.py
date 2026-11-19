@@ -28,6 +28,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._health_http import health_client
 from ocabra.backends._startup import worker_exit_error
 from ocabra.backends.base import (
     BackendCapabilities,
@@ -307,8 +308,8 @@ class AceStepBackend(BackendInterface):
         if not base_url:
             return False
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                resp = await client.get(f"{base_url}/health")
+            client = health_client()
+            resp = await client.get(f"{base_url}/health", timeout=2.0)
             return resp.status_code == 200
         except httpx.HTTPError:
             return False

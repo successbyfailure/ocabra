@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._health_http import health_client
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -249,8 +250,8 @@ class ChatterboxBackend(BackendInterface):
         if not worker or worker.process.returncode is not None:
             return False
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                r = await client.get(f"http://127.0.0.1:{worker.info.port}/health")
+            client = health_client()
+            r = await client.get(f"http://127.0.0.1:{worker.info.port}/health", timeout=3.0)
             return r.status_code == 200
         except httpx.HTTPError:
             return False

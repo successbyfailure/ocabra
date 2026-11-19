@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._health_http import health_client
 from ocabra.backends._startup import worker_exit_error
 from ocabra.backends.base import (
     BackendCapabilities,
@@ -250,8 +251,8 @@ class TTSBackend(BackendInterface):
             return False
 
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                response = await client.get(f"http://127.0.0.1:{worker.info.port}/health")
+            client = health_client()
+            response = await client.get(f"http://127.0.0.1:{worker.info.port}/health", timeout=2.0)
             return response.status_code == 200
         except httpx.HTTPError:
             return False

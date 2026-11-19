@@ -23,6 +23,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._health_http import health_client
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -237,11 +238,11 @@ class FlashVSRBackend(BackendInterface):
 
     async def _health_check_port(self, port: int) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                response = await client.get(f"http://127.0.0.1:{port}/health")
-                if response.status_code != 200:
-                    return False
-                return bool(response.json().get("ok", False))
+            client = health_client()
+            response = await client.get(f"http://127.0.0.1:{port}/health", timeout=2.0)
+            if response.status_code != 200:
+                return False
+            return bool(response.json().get("ok", False))
         except Exception:
             return False
 

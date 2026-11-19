@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._health_http import health_client
 from ocabra.backends._process_group import terminate_process_group
 from ocabra.backends.base import (
     BackendCapabilities,
@@ -262,8 +263,8 @@ class VibeAsrBackend(BackendInterface):
         if not worker or worker.process.returncode is not None:
             return False
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                response = await client.get(f"http://127.0.0.1:{worker.info.port}/health")
+            client = health_client()
+            response = await client.get(f"http://127.0.0.1:{worker.info.port}/health", timeout=2.0)
             return response.status_code == 200
         except httpx.HTTPError:
             return False

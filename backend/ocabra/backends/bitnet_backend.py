@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._health_http import health_client
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -349,8 +350,8 @@ class BitnetBackend(BackendInterface):
         if proc.returncode is not None:
             return False
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                response = await client.get(f"http://127.0.0.1:{port}/health")
+            client = health_client()
+            response = await client.get(f"http://127.0.0.1:{port}/health", timeout=3.0)
             return response.status_code == 200
         except Exception:
             return False
