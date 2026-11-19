@@ -261,6 +261,20 @@ class TestRetiredLiteLLM:
             assert not hasattr(fresh, key)
 
 
+def test_langfuse_settings_retired_and_stored_overrides_skipped():
+    """Langfuse support was removed: no ``langfuse_*`` settings remain, and a
+    value left in server_config (or LANGFUSE_* in .env) doesn't break startup."""
+    from ocabra.config import Settings
+    from ocabra.db.server_config import apply_overrides_to_settings
+
+    fresh = Settings()
+    apply_overrides_to_settings(
+        fresh, {"langfuse_enabled": "true", "langfuse_host": '"https://x"'}
+    )
+    assert not [name for name in Settings.model_fields if name.startswith("langfuse_")]
+    assert not hasattr(fresh, "langfuse_enabled")
+
+
 def patch_db_and_schedules():
     """Context manager to mock database persistence and schedule loading."""
     import contextlib

@@ -2355,7 +2355,7 @@ class RealtimeSession:
 
         Routes through :meth:`WorkerPool.forward_stream` so the same code path
         as ``/v1/chat/completions`` is reused (Ollama URL resolution, reasoning
-        field normalisation, Langfuse tracing). Native-audio LLMs receive the
+        field normalisation). Native-audio LLMs receive the
         message verbatim — including ``input_audio`` content parts.
 
         ``to_backend_body`` — the SAME translation chat.py/completions.py use

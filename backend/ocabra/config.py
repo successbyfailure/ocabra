@@ -698,15 +698,6 @@ class Settings(BaseSettings):
     # Written by the agent at startup (a fresh token each time), read by the api.
     docker_agent_token_file: str = "/run/ocabra-agent/token"
 
-    # Langfuse observability (desactivado por defecto)
-    langfuse_enabled: bool = False
-    langfuse_public_key: str | None = ""
-    langfuse_secret_key: str | None = ""
-    langfuse_host: str = "https://cloud.langfuse.com"
-    langfuse_capture_content: bool = False
-    langfuse_sample_rate: float = 1.0
-    langfuse_flush_interval_s: float = 2.0
-
     # Energy
     energy_cost_eur_kwh: float = 0.15
 
@@ -1019,8 +1010,6 @@ class Settings(BaseSettings):
     )
 
     @field_validator(
-        "langfuse_public_key",
-        "langfuse_secret_key",
         "vllm_attention_backend",
         "vllm_tensor_parallel_size",
         "vllm_max_model_len",

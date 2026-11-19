@@ -50,7 +50,9 @@ Implementado: tabla `server_config`, overrides cargados al arranque, `PATCH /oca
 
 ## ✅ Bloque 4 — Integración Langfuse (COMPLETADO)
 
-**Opcional, desactivado por defecto.** Plan en `docs/tasks/langfuse-integration-plan.md`.
+**Retirado en 2026-11** (nunca se activó en producción): se eliminaron el tracer, los
+settings `langfuse_*`, las variables del compose y `.env.example` y la dependencia. Lo que
+sigue es el registro histórico de lo que se implementó.
 
 Implementado:
 - `backend/ocabra/integrations/langfuse_tracer.py` — singleton, `trace_generation()`, `wrap_stream()`, `parse_sse_chunk()`

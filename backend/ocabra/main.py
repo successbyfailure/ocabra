@@ -532,11 +532,6 @@ async def _startup(app: FastAPI, teardown: _Teardown) -> None:
     # Runs after everything else that may still use a DB session.
     teardown.push("db_engine", lambda: database.engine.dispose())
 
-    if settings.langfuse_enabled:
-        from ocabra.integrations.langfuse_tracer import shutdown as langfuse_shutdown
-
-        teardown.push("langfuse", langfuse_shutdown)
-
     async with _ASL() as _session:
         _overrides = await load_overrides(_session)
     if _overrides:

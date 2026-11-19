@@ -71,13 +71,6 @@ def test_images_by_url_in_functional():
     assert _default_response_format("dall-e-3", None) == "url"
 
 
-def test_no_tracing_in_zero_data(zero_data, monkeypatch):
-    from ocabra.integrations import langfuse_tracer
-
-    monkeypatch.setattr(settings, "langfuse_enabled", True)
-    assert langfuse_tracer._get_client() is None
-
-
 # ── stats ────────────────────────────────────────────────────────
 
 

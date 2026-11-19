@@ -10,7 +10,6 @@ import structlog
 
 from ocabra.backends.base import BackendInterface, ModalityType, WorkerInfo
 from ocabra.config import settings
-from ocabra.core.background_tasks import spawn
 from ocabra.core.fair_slot_gate import WorkerPoolFairGates
 from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.core.request_telemetry import RequestRuntimeTelemetry, current_inflight_request_id
@@ -874,7 +873,6 @@ class WorkerPool:
             ollama_adapter = None
             requested_model = worker.model_id
             url = f"http://127.0.0.1:{worker.port}{path}"
-        start = time.monotonic()
         timeout_s = max(30, int(settings.inference_request_timeout_seconds))
         try:
             async with httpx.AsyncClient(
@@ -923,19 +921,6 @@ class WorkerPool:
                     msg["reasoning_content"] = msg.pop("reasoning")
                 if msg and "content" in msg:
                     msg["content"] = _strip_empty_think_prefix(msg["content"])
-        if settings.langfuse_enabled:
-            from ocabra.integrations.langfuse_tracer import trace_generation
-
-            spawn(
-                trace_generation(
-                    model_id=model_id,
-                    path=path,
-                    request_body=body,
-                    response_body=result,
-                    duration_ms=(time.monotonic() - start) * 1000,
-                    user_id=body.get("user"),
-                )
-            )
         return result
 
     async def forward_stream(
@@ -1106,20 +1091,8 @@ class WorkerPool:
         elif is_chat:
             source = self._normalize_reasoning_stream(source)
 
-        if settings.langfuse_enabled:
-            from ocabra.integrations.langfuse_tracer import wrap_stream
-
-            async for chunk in wrap_stream(
-                source,
-                model_id=model_id,
-                path=path,
-                request_body=body,
-                user_id=body.get("user"),
-            ):
-                yield chunk
-        else:
-            async for chunk in source:
-                yield chunk
+        async for chunk in source:
+            yield chunk
 
     # ------------------------------------------------------------------
     # SSE normalisation

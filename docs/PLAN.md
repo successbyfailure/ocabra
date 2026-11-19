@@ -55,7 +55,7 @@ El trabajo restante está en `docs/ROADMAP.md`.
 - **Settings persistidos en BD** (`server_config`): `PATCH /ocabra/config` persiste en PostgreSQL; `.env` solo establece valores iniciales.
 - **Gateway de servicios** (`gateway/`): proxy para HunyuanVideo, ComfyUI, A1111, AceStep con directorio autenticado.
 - **Stats ampliadas**: endpoints `recent`, `by-user`, `by-group`, `my`, `my-group`; admin puede crear keys para otros usuarios.
-- **Langfuse**: Integración de observabilidad LLM opcional (desactivada por defecto). Trazas para streaming y non-streaming.
+- ~~**Langfuse**: Integración de observabilidad LLM opcional (desactivada por defecto).~~ Retirada en 2026-11.
 - **Voice Pipeline completo**:
   - TTS con encoding real (MP3/WAV/PCM/FLAC) y streaming por frases
   - Voxtral TTS backend (vllm-omni)
