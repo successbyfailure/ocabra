@@ -10,6 +10,8 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._fs import total_file_size
+from ocabra.backends._startup import worker_exit_error
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -239,12 +241,16 @@ class WhisperBackend(BackendInterface):
         log_path = _worker_log_path(model_id)
         log_file = open(log_path, "ab")  # noqa: PTH123, ASYNC230
 
-        process = await asyncio.create_subprocess_exec(
-            *args,
-            env=env,
-            stdout=log_file,
-            stderr=log_file,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                env=env,
+                stdout=log_file,
+                stderr=log_file,
+            )
+        except BaseException:
+            log_file.close()
+            raise
 
         info = WorkerInfo(
             backend_type="whisper",
@@ -259,7 +265,13 @@ class WhisperBackend(BackendInterface):
 
         startup_timeout_s = max(1, int(settings.whisper_startup_timeout_s))
         if not await self._wait_until_healthy(model_id, timeout_s=startup_timeout_s):
+            # Read before unload(): unload terminates a live worker too.
+            exit_code = process.returncode
             await self.unload(model_id)
+            if exit_code is not None:
+                raise await asyncio.to_thread(
+                    worker_exit_error, "Whisper", model_id, exit_code, log_path
+                )
             raise RuntimeError(
                 f"Whisper worker failed to start for model '{model_id}' within {startup_timeout_s}s"
             )
@@ -325,17 +337,13 @@ class WhisperBackend(BackendInterface):
             Path(settings.models_dir) / model_id,
             Path(settings.models_dir) / base_model_id,
         ):
-            if model_path.exists() and model_path.is_dir():
-                total_bytes = sum(
-                    file_path.stat().st_size
-                    for file_path in model_path.rglob("*")
-                    if file_path.is_file()
-                )
-                if total_bytes > 0:
-                    base = max(512, int(total_bytes / (1024 * 1024) * 1.4))
-                    if _should_enable_diarization(model_id, {}):
-                        base += DIARIZATION_OVERHEAD_MB
-                    return base
+            # Walked off the event loop (ASY-04); 0 when it is not a directory.
+            total_bytes = await total_file_size(model_path, "*")
+            if total_bytes > 0:
+                base = max(512, int(total_bytes / (1024 * 1024) * 1.4))
+                if _should_enable_diarization(model_id, {}):
+                    base += DIARIZATION_OVERHEAD_MB
+                return base
 
         base = 2048
         if _should_enable_diarization(model_id, {}):
@@ -381,8 +389,12 @@ class WhisperBackend(BackendInterface):
             yield payload
 
     async def _wait_until_healthy(self, model_id: str, timeout_s: int = 90) -> bool:
+        """Poll /health; return False early if the worker process has exited."""
         attempts = max(1, int(timeout_s * 2))
         for _ in range(attempts):
+            worker = self._workers.get(model_id)
+            if worker is None or worker.process.returncode is not None:
+                return False
             if await self.health_check(model_id):
                 return True
             await asyncio.sleep(0.5)

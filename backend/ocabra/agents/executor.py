@@ -70,6 +70,9 @@ SUBAGENT_MAX_DEPTH = 8
 # may include a long-running subagent) is in flight. Must be smaller than the
 # typical proxy / browser idle timeout (~30 s for many CDN defaults).
 _KEEPALIVE_INTERVAL_S = 10.0
+# How long a cancelled tool batch gets to run its cleanup (closing MCP
+# sessions, terminating stdio servers) before we stop waiting for it.
+_TOOL_CANCEL_GRACE_S = 5.0
 
 
 # ── Result payloads ────────────────────────────────────────────
@@ -154,6 +157,34 @@ class WorkerInvoker:
 
 
 # ── Internal helpers ───────────────────────────────────────────
+
+
+async def _cancel_and_drain(task: asyncio.Future[Any]) -> None:
+    """Cancel *task* and wait up to ``_TOOL_CANCEL_GRACE_S`` for it to unwind.
+
+    Used when the caller of a streaming run goes away while tools are still
+    executing. ``asyncio.wait`` never raises, so this is safe to call from a
+    ``finally`` that is already propagating ``CancelledError``/``GeneratorExit``.
+    """
+    task.cancel()
+    await asyncio.wait({task}, timeout=_TOOL_CANCEL_GRACE_S)
+    if task.done() and not task.cancelled():
+        # Retrieve the exception so asyncio does not log "never retrieved".
+        task.exception()
+
+
+def _trim_subagent_output(text: str, max_bytes: int) -> str:
+    """Bound a subagent answer to *max_bytes* UTF-8 bytes, with a visible marker.
+
+    The child's answer becomes a tool message in the parent's context; an
+    unbounded answer can blow the parent's context window on the next hop.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    marker = f"\n\n[subagent output truncated: original was {len(encoded)} bytes]"
+    budget = max(0, max_bytes - len(marker.encode("utf-8")))
+    return encoded[:budget].decode("utf-8", errors="ignore") + marker
 
 
 def _intersect(*allowlists: list[str] | None) -> list[str] | None:
@@ -462,6 +493,8 @@ class AgentExecutor:
         max_concurrent_tool_calls: int | None = None,
         result_max_bytes: int | None = None,
         redact_fields: list[str] | tuple[str, ...] = DEFAULT_REDACT_FIELDS,
+        subagent_timeout_seconds: float | None = None,
+        subagent_result_max_bytes: int | None = None,
     ) -> None:
         self._registry = registry
         self._subagent_runner = subagent_runner
@@ -475,6 +508,16 @@ class AgentExecutor:
             result_max_bytes if result_max_bytes is not None else settings.mcp_result_max_bytes
         )
         self._redact_fields = tuple(redact_fields)
+        self._subagent_timeout_s = float(
+            subagent_timeout_seconds
+            if subagent_timeout_seconds is not None
+            else settings.agent_subagent_timeout_seconds
+        )
+        self._subagent_result_max_bytes = (
+            subagent_result_max_bytes
+            if subagent_result_max_bytes is not None
+            else settings.agent_subagent_result_max_bytes
+        )
 
     # ── Tool inventory + allowlist ───────────────────────────
 
@@ -791,20 +834,46 @@ class AgentExecutor:
                     raise RuntimeError("subagent runner not configured")
                 if len(agent_chain) >= SUBAGENT_MAX_DEPTH:
                     raise RuntimeError("subagent_depth_limit")
-                result = await self._subagent_runner(
-                    target.subagent_slug,
-                    args,
-                    user_ctx,
-                    agent_chain,
-                    per_request_headers,
-                    per_request_allowed_tools,
-                )
+                try:
+                    result = await asyncio.wait_for(
+                        self._subagent_runner(
+                            target.subagent_slug,
+                            args,
+                            user_ctx,
+                            agent_chain,
+                            per_request_headers,
+                            per_request_allowed_tools,
+                        ),
+                        timeout=self._subagent_timeout_s,
+                    )
+                except TimeoutError:
+                    duration_ms = int((time.monotonic() - t_start) * 1000)
+                    err = MCPToolResult(
+                        content=[{"type": "text", "text": "subagent_timeout"}], is_error=True
+                    )
+                    msg = mcp_result_to_openai_message(
+                        tool_call_id, err, vision_capable=vision_capable
+                    )
+                    rec = ToolCallRecord(
+                        alias="agent",
+                        tool_name=target.subagent_slug,
+                        args_redacted=redacted,
+                        duration_ms=duration_ms,
+                        status="timeout",
+                        error="subagent_timeout",
+                        hop_index=hop_index,
+                        result_summary="subagent_timeout",
+                    )
+                    return msg, rec
                 child_message = _extract_message(result.openai_response) or {}
                 child_content = child_message.get("content") or ""
                 if isinstance(child_content, list):
                     child_content = json.dumps(child_content, ensure_ascii=False)
+                child_content = _trim_subagent_output(
+                    str(child_content), self._subagent_result_max_bytes
+                )
                 child_result = MCPToolResult(
-                    content=[{"type": "text", "text": str(child_content)}],
+                    content=[{"type": "text", "text": child_content}],
                     is_error=False,
                 )
                 duration_ms = int((time.monotonic() - t_start) * 1000)
@@ -1240,14 +1309,23 @@ class AgentExecutor:
                 gather_task = asyncio.ensure_future(
                     asyncio.gather(*tasks, return_exceptions=False)
                 )
-                while not gather_task.done():
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(gather_task),
-                            timeout=_KEEPALIVE_INTERVAL_S,
-                        )
-                    except TimeoutError:
-                        yield b": keepalive\n\n"
+                try:
+                    while not gather_task.done():
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(gather_task),
+                                timeout=_KEEPALIVE_INTERVAL_S,
+                            )
+                        except TimeoutError:
+                            yield b": keepalive\n\n"
+                finally:
+                    # The shield above keeps the tools alive across keepalive
+                    # ticks, but it also kept them alive after the client went
+                    # away (task cancelled / generator closed) — BUG-39. Cancel
+                    # them and give their ``async with`` blocks (MCP sessions,
+                    # stdio subprocesses, subagents) a moment to unwind.
+                    if not gather_task.done():
+                        await _cancel_and_drain(gather_task)
                 results = gather_task.result()
                 for tool_msg, record in results:
                     loop_messages.append(tool_msg)

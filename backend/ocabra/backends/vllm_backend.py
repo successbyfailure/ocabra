@@ -12,7 +12,6 @@ import json
 import os
 import re
 import signal
-import socket
 import sys
 from collections import deque
 from collections.abc import AsyncIterator
@@ -22,6 +21,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._fs import total_file_size
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -291,7 +291,23 @@ class VLLMBackend(BackendInterface):
         gpu_index: int,
         extra_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        port = self._reserve_free_port()
+        # A port from the managed worker range (BUG-44), returned afterwards.
+        port = await self._acquire_aux_port()
+        try:
+            return await self._run_memory_profile_probe(
+                model_id, port=port, gpu_index=gpu_index, extra_config=extra_config
+            )
+        finally:
+            self._release_aux_port(port)
+
+    async def _run_memory_profile_probe(
+        self,
+        model_id: str,
+        *,
+        port: int,
+        gpu_index: int,
+        extra_config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         cmd, env, _cuda_devices = self._build_launch_spec(
             model_id=model_id,
             gpu_indices=[gpu_index],
@@ -876,14 +892,8 @@ class VLLMBackend(BackendInterface):
         model_path = self._resolve_local_model_dir(model_id)
         total_bytes = 0
         if model_path is not None:
-            total_bytes = sum(
-                p.stat().st_size for p in model_path.rglob("*.safetensors") if p.is_file()
-            )
-            if total_bytes == 0:
-                # Try .bin (older format)
-                total_bytes = sum(
-                    p.stat().st_size for p in model_path.rglob("*.bin") if p.is_file()
-                )
+            # .bin is the older format; walked off the event loop (ASY-04).
+            total_bytes = await total_file_size(model_path, "*.safetensors", "*.bin")
         if total_bytes == 0:
             total_bytes = await self._estimate_remote_hf_size_bytes(model_id)
         estimated = int(total_bytes / 1024 / 1024 * 1.2)
@@ -1097,13 +1107,6 @@ class VLLMBackend(BackendInterface):
             "requested_context_length": requested_context,
             "maximum_concurrency": maximum_concurrency,
         }
-
-    @staticmethod
-    def _reserve_free_port() -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
-            sock.listen(1)
-            return int(sock.getsockname()[1])
 
     async def _kill_process(self, model_id: str, graceful: bool = False) -> None:
         entry = self._processes.pop(model_id, None)

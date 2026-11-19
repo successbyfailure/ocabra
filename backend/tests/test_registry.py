@@ -1557,3 +1557,47 @@ async def test_ollama_list_loaded_details(monkeypatch: pytest.MonkeyPatch) -> No
     assert details[0]["size_vram"] == 6442450944
     assert details[1]["name"] == "mistral:7b"
     assert details[1]["size_vram"] == 3221225472
+
+
+@pytest.mark.asyncio
+async def test_vllm_probe_never_spawns_a_server_for_local_models(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """BUG-41: the HF detail probe used to launch ``python -m vllm…`` with the
+    system python (no vLLM there) whenever the repo existed locally; it always
+    failed and cached the failure. Only the lightweight probe remains."""
+    from ocabra.config import settings
+    from ocabra.schemas.registry import HFVLLMSupport
+
+    repo_id = "acme/Local-Model"
+    (tmp_path / repo_id).mkdir(parents=True)
+    monkeypatch.setattr(settings, "models_dir", str(tmp_path))
+
+    spawned: list[tuple] = []
+
+    async def fake_exec(*args, **kwargs):
+        spawned.append(args)
+        raise OSError("no spawning in tests")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    calls: list[str] = []
+
+    async def fake_light(self, repo_id, config, tokenizer_config, support):
+        calls.append(repo_id)
+        return self._cache_runtime_probe(
+            repo_id, HFVLLMRuntimeProbe(status="supported_native")
+        )
+
+    monkeypatch.setattr(HuggingFaceRegistry, "_probe_vllm_lightweight_support", fake_light)
+
+    registry = HuggingFaceRegistry()
+    support = HFVLLMSupport(classification="native_vllm")
+    probe = await registry._probe_vllm_runtime_support(repo_id, {}, {}, support)
+    again = await registry._probe_vllm_runtime_support(repo_id, {}, {}, support)
+
+    assert spawned == []
+    assert probe.status == "supported_native"
+    assert probe.observed_at is not None
+    assert again is probe
+    assert calls == [repo_id]

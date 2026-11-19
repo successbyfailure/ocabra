@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._startup import worker_exit_error
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -172,27 +173,31 @@ class TTSBackend(BackendInterface):
         # create_subprocess_exec; se cierra en unload().
         log_file = open(log_path, "ab")  # noqa: SIM115, ASYNC230
 
-        process = await asyncio.create_subprocess_exec(
-            self._resolve_python_bin(),
-            str(WORKER_PATH),
-            "--model-id",
-            model_id,
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--gpu-indices",
-            ",".join(str(i) for i in gpu_indices),
-            env=env,
-            # stdout/stderr a un fichero real, no a PIPE: nadie leia esas
-            # tuberias durante el servicio normal, asi que un worker
-            # suficientemente hablador llena el buffer del kernel, se bloquea
-            # en su propio write() y se queda colgado mientras /health sigue
-            # respondiendo (mismo fallo ya corregido en llama_cpp y sglang el
-            # 2026-10-30; este backend se quedo sin arreglar).
-            stdout=log_file,
-            stderr=log_file,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                self._resolve_python_bin(),
+                str(WORKER_PATH),
+                "--model-id",
+                model_id,
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--gpu-indices",
+                ",".join(str(i) for i in gpu_indices),
+                env=env,
+                # stdout/stderr a un fichero real, no a PIPE: nadie leia esas
+                # tuberias durante el servicio normal, asi que un worker
+                # suficientemente hablador llena el buffer del kernel, se bloquea
+                # en su propio write() y se queda colgado mientras /health sigue
+                # respondiendo (mismo fallo ya corregido en llama_cpp y sglang el
+                # 2026-10-30; este backend se quedo sin arreglar).
+                stdout=log_file,
+                stderr=log_file,
+            )
+        except BaseException:
+            log_file.close()
+            raise
 
         info = WorkerInfo(
             backend_type="tts",
@@ -206,7 +211,13 @@ class TTSBackend(BackendInterface):
         self._workers[model_id] = _TTSWorker(process=process, info=info, log_file=log_file)
 
         if not await self._wait_until_healthy(model_id):
+            # Read before unload(): unload terminates a live worker too.
+            exit_code = process.returncode
             await self.unload(model_id)
+            if exit_code is not None:
+                raise await asyncio.to_thread(
+                    worker_exit_error, "TTS", model_id, exit_code, log_path
+                )
             raise RuntimeError(f"TTS worker failed to start for model '{model_id}'")
 
         logger.info("tts_worker_started", model_id=model_id, port=port, pid=process.pid)
@@ -218,18 +229,20 @@ class TTSBackend(BackendInterface):
             return
 
         process = worker.process
-        if process.returncode is not None:
-            return
-
-        process.terminate()
         try:
-            await asyncio.wait_for(process.wait(), timeout=8)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-        if worker.log_file:
-            with suppress(Exception):
-                worker.log_file.close()
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=8)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+        finally:
+            # Close the log even when the worker had already died (BUG-46: the
+            # early return for an exited process leaked the descriptor).
+            if worker.log_file:
+                with suppress(Exception):
+                    worker.log_file.close()
 
     async def health_check(self, model_id: str) -> bool:
         worker = self._workers.get(model_id)
@@ -317,7 +330,11 @@ class TTSBackend(BackendInterface):
                         yield chunk
 
     async def _wait_until_healthy(self, model_id: str, retries: int = 60) -> bool:
+        """Poll /health; return False early if the worker process has exited."""
         for _ in range(retries):
+            worker = self._workers.get(model_id)
+            if worker is None or worker.process.returncode is not None:
+                return False
             if await self.health_check(model_id):
                 return True
             await asyncio.sleep(0.5)

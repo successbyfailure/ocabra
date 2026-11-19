@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._fs import total_file_size
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -199,8 +200,7 @@ class MageFlowBackend(BackendInterface):
         # resident on-GPU (no CPU offload in the custom pipeline), so — unlike
         # the diffusers estimate — we sum every weight file. Measured resident
         # ~17.6 GB / peak ~18.3 GB for the 4B Turbo checkpoint.
-        candidates = [p for p in model_path.rglob("*.safetensors") if p.is_file()]
-        total_bytes = sum(p.stat().st_size for p in candidates)
+        total_bytes = await total_file_size(model_path, "*.safetensors")  # off the loop (ASY-04)
         total_mb = total_bytes / (1024 * 1024)
         return int(math.ceil(total_mb * 1.1))
 

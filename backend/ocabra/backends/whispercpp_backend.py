@@ -19,10 +19,10 @@ for the life of this model's worker — see ``_ensure_diarization_worker``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
-import socket
 import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -58,13 +58,6 @@ def _worker_log_path(model_id: str) -> str:
 def _diarization_log_path(model_id: str) -> str:
     safe = model_id.replace("/", "__").replace(":", "_").replace(" ", "_")
     return f"/tmp/whispercpp-diarize-{safe}.log"
-
-
-def _reserve_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        sock.listen(1)
-        return int(sock.getsockname()[1])
 
 
 def _parse_optional_bool(raw: Any) -> bool | None:
@@ -341,6 +334,12 @@ class WhisperCppBackend(BackendInterface):
             existing = self._diarization_workers.get(model_id)
             if existing and existing.process.returncode is None:
                 return existing
+            if existing is not None:
+                # The previous sidecar died: hand back its port and log.
+                self._diarization_workers.pop(model_id, None)
+                self._release_aux_port(existing.port)
+                with contextlib.suppress(Exception):
+                    existing.log_file.close()
 
             cfg = extra_config.get("whisper_cpp") if isinstance(extra_config, dict) else None
             cfg = cfg if isinstance(cfg, dict) else {}
@@ -348,7 +347,8 @@ class WhisperCppBackend(BackendInterface):
                 cfg.get("diarization_model_id") or _DEFAULT_DIARIZATION_MODEL_ID
             )
             python_bin = self._resolve_diarization_python_bin()
-            port = _reserve_free_port()
+            # From the managed worker range (BUG-44); released when it stops.
+            port = await self._acquire_aux_port()
 
             env = os.environ.copy()
             if settings.hf_token and not env.get("HF_TOKEN"):
@@ -369,17 +369,26 @@ class WhisperCppBackend(BackendInterface):
             ]
 
             log_path = _diarization_log_path(model_id)
-            log_file = open(log_path, "ab")  # noqa: ASYNC230, SIM115 — sidecar-lifetime handle
+            try:
+                log_file = open(log_path, "ab")  # noqa: ASYNC230, SIM115 — sidecar-lifetime handle
+            except BaseException:
+                self._release_aux_port(port)
+                raise
 
             logger.info("whispercpp_diarization_starting", model_id=model_id, port=port)
-            process = await asyncio.create_subprocess_exec(
-                *args,
-                env=env,
-                stdout=log_file,
-                stderr=log_file,
-                # Own process group, stopped as a whole (see _process_group).
-                start_new_session=True,
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *args,
+                    env=env,
+                    stdout=log_file,
+                    stderr=log_file,
+                    # Own process group, stopped as a whole (see _process_group).
+                    start_new_session=True,
+                )
+            except BaseException:
+                log_file.close()
+                self._release_aux_port(port)
+                raise
             sidecar = _DiarizationSidecar(process=process, port=port, log_file=log_file)
             self._diarization_workers[model_id] = sidecar
 
@@ -407,6 +416,7 @@ class WhisperCppBackend(BackendInterface):
                     await terminate_process_group(process, grace_s=0, graceful=False)
                 finally:
                     log_file.close()
+                    self._release_aux_port(port)
                 raise RuntimeError(
                     f"whisper.cpp diarization sidecar for '{model_id}' did not become "
                     f"healthy within {timeout_s}s. log_tail={log_tail}"
@@ -423,6 +433,7 @@ class WhisperCppBackend(BackendInterface):
             await terminate_process_group(sidecar.process, grace_s=10.0)
         finally:
             sidecar.log_file.close()
+            self._release_aux_port(sidecar.port)
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs: Any) -> WorkerInfo:
         existing = self._processes.get(model_id)

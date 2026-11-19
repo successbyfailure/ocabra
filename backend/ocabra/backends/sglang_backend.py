@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._fs import total_file_size
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -343,9 +344,8 @@ class SGLangBackend(BackendInterface):
         model_path = self._resolve_local_model_dir(model_id)
         if model_path is None:
             return _MIN_SGLANG_VRAM_MB
-        total_bytes = sum(path.stat().st_size for path in model_path.rglob("*.safetensors") if path.is_file())
-        if total_bytes == 0:
-            total_bytes = sum(path.stat().st_size for path in model_path.rglob("*.bin") if path.is_file())
+        # Walked off the event loop (ASY-04).
+        total_bytes = await total_file_size(model_path, "*.safetensors", "*.bin")
         estimated = int(total_bytes / 1024 / 1024 * 1.2)
         return max(_MIN_SGLANG_VRAM_MB, estimated)
 

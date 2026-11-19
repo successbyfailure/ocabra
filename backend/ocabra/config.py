@@ -996,6 +996,22 @@ class Settings(BaseSettings):
         ge=1024,
         description="Maximum size (bytes) of a tool_call result payload before truncation.",
     )
+    agent_subagent_timeout_seconds: int = Field(
+        default=600,
+        ge=1,
+        description=(
+            "Wall-clock limit for one subagent delegation (the child's whole tool "
+            "loop). On expiry the parent receives a 'subagent_timeout' tool error."
+        ),
+    )
+    agent_subagent_result_max_bytes: int = Field(
+        default=32768,
+        ge=1024,
+        description=(
+            "Maximum size (UTF-8 bytes) of a subagent's answer injected into the "
+            "parent's context; longer answers are cut with a visible marker."
+        ),
+    )
     mcp_stdio_allowed: bool = Field(
         default=True,
         description=(

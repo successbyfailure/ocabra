@@ -4,6 +4,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,6 @@ from ocabra.backends.vllm_recipes import get_vllm_recipe
 from ocabra.config import settings
 from ocabra.core.compatibility import backends_for_files, is_ternary_gguf
 from ocabra.core.model_ref import is_llama_cpp_family
-from ocabra.registry.vllm_runtime_probe import VLLMRuntimeProbeService
 from ocabra.schemas.registry import (
     HFModelCard,
     HFModelDetail,
@@ -123,7 +123,16 @@ class _CompatibilityAssessment:
 
 class HuggingFaceRegistry:
     def __init__(self) -> None:
-        self._runtime_probe = VLLMRuntimeProbeService()
+        # repo_id → result of the lightweight (config + tokenizer) probe. The
+        # old "real" probe that spawned a vLLM server with the system python
+        # always failed (no vLLM there) and has been removed (BUG-41).
+        self._runtime_probe_cache: dict[str, HFVLLMRuntimeProbe] = {}
+
+    def _cache_runtime_probe(self, repo_id: str, probe: HFVLLMRuntimeProbe) -> HFVLLMRuntimeProbe:
+        if probe.observed_at is None:
+            probe.observed_at = datetime.now(UTC)
+        self._runtime_probe_cache[repo_id] = probe
+        return probe
 
     async def infer_backend_for_repo(self, repo_id: str, artifact: str | None = None) -> str:
         # GGUF artifacts go to llama.cpp directly without inspecting the repo
@@ -1164,13 +1173,13 @@ class HuggingFaceRegistry:
         tokenizer_config: dict[str, Any] | None,
         support: HFVLLMSupport | None,
     ) -> HFVLLMRuntimeProbe:
-        cached = self._runtime_probe.get_cached(repo_id)
+        cached = self._runtime_probe_cache.get(repo_id)
         if cached is not None:
             return cached
 
         if support is None:
             probe = HFVLLMRuntimeProbe(status="unknown")
-            return self._runtime_probe.set_cached(repo_id, probe)
+            return self._cache_runtime_probe(repo_id, probe)
 
         tokenizer_class = str((tokenizer_config or {}).get("tokenizer_class") or "").strip().lower()
         if tokenizer_class in _UNSUPPORTED_TOKENIZER_CLASSES:
@@ -1182,11 +1191,7 @@ class HuggingFaceRegistry:
                 tokenizer_load=False,
                 config_load=True,
             )
-            return self._runtime_probe.set_cached(repo_id, probe)
-
-        runtime_probe = await self._runtime_probe.probe_runtime(repo_id, support)
-        if runtime_probe.status != "unavailable":
-            return runtime_probe
+            return self._cache_runtime_probe(repo_id, probe)
 
         return await self._probe_vllm_lightweight_support(
             repo_id=repo_id,
@@ -1211,7 +1216,7 @@ class HuggingFaceRegistry:
                 recommended_model_impl=support.model_impl,  # type: ignore[arg-type]
                 recommended_runner=support.runner,  # type: ignore[arg-type]
             )
-            return self._runtime_probe.set_cached(repo_id, probe)
+            return self._cache_runtime_probe(repo_id, probe)
 
         target = repo_id
         config_ok = False
@@ -1235,7 +1240,7 @@ class HuggingFaceRegistry:
                     recommended_runner=support.runner,  # type: ignore[arg-type]
                     config_load=False,
                 )
-                return self._runtime_probe.set_cached(repo_id, probe)
+                return self._cache_runtime_probe(repo_id, probe)
             if support.classification == "unknown":
                 probe = HFVLLMRuntimeProbe(
                     status="unsupported_architecture",
@@ -1244,7 +1249,7 @@ class HuggingFaceRegistry:
                     recommended_runner=support.runner,  # type: ignore[arg-type]
                     config_load=False,
                 )
-                return self._runtime_probe.set_cached(repo_id, probe)
+                return self._cache_runtime_probe(repo_id, probe)
 
         try:
             await asyncio.to_thread(
@@ -1266,7 +1271,7 @@ class HuggingFaceRegistry:
                     tokenizer_load=False,
                     config_load=config_ok,
                 )
-                return self._runtime_probe.set_cached(repo_id, probe)
+                return self._cache_runtime_probe(repo_id, probe)
 
         status = {
             "native_vllm": "supported_native",
@@ -1281,7 +1286,7 @@ class HuggingFaceRegistry:
             tokenizer_load=tokenizer_ok if tokenizer_ok or tokenizer_config is not None else None,
             config_load=config_ok if config_ok or config is not None else None,
         )
-        return self._runtime_probe.set_cached(repo_id, probe)
+        return self._cache_runtime_probe(repo_id, probe)
 
     async def _load_repo_json(
         self,

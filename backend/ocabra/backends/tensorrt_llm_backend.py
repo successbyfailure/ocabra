@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._fs import total_file_size
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -316,7 +317,7 @@ class TensorRTLLMBackend(BackendInterface):
             return _MIN_TRT_VRAM_MB
         # Only count the engine/ subdir (excludes tllm_ckpt which is not loaded at serve time)
         scan_dir = engine_dir / "engine" if (engine_dir / "engine").is_dir() else engine_dir
-        total_bytes = sum(path.stat().st_size for path in scan_dir.rglob("*") if path.is_file())
+        total_bytes = await total_file_size(scan_dir, "*")  # off the event loop (ASY-04)
         tp_size = self._read_engine_tp_size(scan_dir)
         # Return per-GPU estimate so scheduler can compare against single-GPU free VRAM
         # (scheduler sums across GPUs when assigning TP models)

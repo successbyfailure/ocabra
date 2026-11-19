@@ -28,6 +28,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ocabra.backends._startup import worker_exit_error
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -239,13 +240,17 @@ class AceStepBackend(BackendInterface):
         log_path = _worker_log_path(model_id)
         log_file = open(log_path, "ab")  # noqa: PTH123, ASYNC230
 
-        process = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=str(project_dir),
-            env=env,
-            stdout=log_file,
-            stderr=log_file,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=str(project_dir),
+                env=env,
+                stdout=log_file,
+                stderr=log_file,
+            )
+        except BaseException:
+            log_file.close()
+            raise
 
         info = WorkerInfo(
             backend_type="acestep",
@@ -259,7 +264,13 @@ class AceStepBackend(BackendInterface):
 
         timeout_s = max(1, int(settings.acestep_startup_timeout_s))
         if not await self._wait_until_healthy(model_id, timeout_s=timeout_s):
+            # Read before unload(): unload terminates a live worker too.
+            exit_code = process.returncode
             await self.unload(model_id)
+            if exit_code is not None:
+                raise await asyncio.to_thread(
+                    worker_exit_error, "ACE-Step", model_id, exit_code, log_path
+                )
             raise RuntimeError(
                 f"ACE-Step worker failed to start for model '{model_id}' within {timeout_s}s. "
                 f"Check log: {log_path}"
@@ -454,8 +465,12 @@ class AceStepBackend(BackendInterface):
     # ── helpers ────────────────────────────────────────────────────────────
 
     async def _wait_until_healthy(self, model_id: str, timeout_s: int = 120) -> bool:
+        """Poll /health; return False early if a managed worker has exited."""
         attempts = max(1, timeout_s * 2)
         for _ in range(attempts):
+            worker = self._workers.get(model_id)
+            if isinstance(worker, _AceStepWorker) and worker.process.returncode is not None:
+                return False
             if await self.health_check(model_id):
                 return True
             await asyncio.sleep(0.5)

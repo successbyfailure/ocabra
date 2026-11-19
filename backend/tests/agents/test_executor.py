@@ -7,6 +7,7 @@ PostgreSQL backing store.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any
@@ -521,3 +522,144 @@ async def test_system_prompt_prepended_to_existing_system_message():
     sys_msg = worker.calls[0]["messages"][0]["content"]
     assert "Be terse." in sys_msg
     assert "Speak like a pirate." in sys_msg
+
+
+# ── BUG-39 / BUG-40 ──────────────────────────────────────────
+
+
+class _SlowRegistry(FakeRegistry):
+    """call_tool blocks until cancelled; records start/cancel/cleanup."""
+
+    def __init__(self, tools_by_alias):
+        super().__init__(tools_by_alias=tools_by_alias)
+        self.started = asyncio.Event()
+        self.cancelled = False
+        self.cleaned_up = False
+
+    async def call_tool(self, alias, tool_name, args, *, timeout_seconds, extra_headers=None):
+        self.started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        finally:
+            # Stands in for the MCP client's ``async with`` session teardown.
+            await asyncio.sleep(0)
+            self.cleaned_up = True
+        return MCPToolResult(content=[{"type": "text", "text": "late"}])
+
+
+def _slow_tool_setup():
+    binding = AgentMCPBindingSpec(
+        server_id=uuid.uuid4(),
+        server_alias="fs",
+        server_group_id=None,
+        allowed_tools=None,
+        server_allowed_tools=None,
+    )
+    agent = _agent(bindings=[binding])
+    tool = MCPTool(name="slow", description="", input_schema={"type": "object"})
+    registry = _SlowRegistry({"fs": [tool]})
+    tc = {"id": "s1", "type": "function", "function": {"name": "fs_slow", "arguments": "{}"}}
+    worker = FakeWorker([_assistant_response(tool_calls=[tc], finish="tool_calls")])
+    return agent, registry, worker
+
+
+@pytest.mark.asyncio
+async def test_stream_cancel_cancels_running_tool():
+    """Client disconnect (consumer task cancelled) must cancel in-flight tools."""
+    agent, registry, worker = _slow_tool_setup()
+    executor = AgentExecutor(registry)
+
+    async def consume():
+        async for _ in executor.run_stream(
+            agent, [{"role": "user", "content": "x"}], {}, _user(), worker
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(registry.started.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert registry.cancelled is True
+    assert registry.cleaned_up is True
+
+
+@pytest.mark.asyncio
+async def test_stream_aclose_cancels_running_tool(monkeypatch):
+    """Closing the generator at a keepalive (Starlette on disconnect) cancels tools."""
+    monkeypatch.setattr("ocabra.agents.executor._KEEPALIVE_INTERVAL_S", 0.01)
+    agent, registry, worker = _slow_tool_setup()
+    executor = AgentExecutor(registry)
+    gen = executor.run_stream(agent, [{"role": "user", "content": "x"}], {}, _user(), worker)
+    async for chunk in gen:
+        if chunk == b": keepalive\n\n":
+            break
+    await gen.aclose()
+    assert registry.cancelled is True
+    assert registry.cleaned_up is True
+
+
+def _delegating_worker():
+    return FakeWorker(
+        [
+            _assistant_response(
+                tool_calls=[
+                    {
+                        "id": "sub1",
+                        "type": "function",
+                        "function": {
+                            "name": "delegate_child-bot",
+                            "arguments": '{"task":"t","context":"c"}',
+                        },
+                    }
+                ],
+                finish="tool_calls",
+            ),
+            _assistant_response(content="done"),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_timeout_returns_tool_error():
+    agent = _agent(subagent_slugs=["child-bot"])
+    worker = _delegating_worker()
+
+    async def hanging_runner(*_args):
+        await asyncio.sleep(3600)
+
+    executor = AgentExecutor(
+        FakeRegistry(), subagent_runner=hanging_runner, subagent_timeout_seconds=0.05
+    )
+    result = await asyncio.wait_for(
+        executor.run(agent, [{"role": "user", "content": "x"}], {}, _user(), worker),
+        timeout=5,
+    )
+    rec = result.tool_calls[0]
+    assert rec.status == "timeout"
+    assert rec.error == "subagent_timeout"
+    assert worker.calls[1]["messages"][-1]["role"] == "tool"
+
+
+@pytest.mark.asyncio
+async def test_subagent_output_trimmed_with_marker():
+    agent = _agent(subagent_slugs=["child-bot"])
+    worker = _delegating_worker()
+    huge = "x" * 50_000
+    runner = AsyncMock(
+        return_value=AgentExecutorResult(
+            openai_response=_assistant_response(content=huge), hops_used=0
+        )
+    )
+    executor = AgentExecutor(
+        FakeRegistry(), subagent_runner=runner, subagent_result_max_bytes=2048
+    )
+    await executor.run(agent, [{"role": "user", "content": "x"}], {}, _user(), worker)
+    tool_msg = worker.calls[1]["messages"][-1]
+    content = tool_msg["content"]
+    text = content if isinstance(content, str) else json.dumps(content)
+    assert len(text.encode("utf-8")) <= 2048 + 64  # json wrapping slack
+    assert "subagent output truncated" in text

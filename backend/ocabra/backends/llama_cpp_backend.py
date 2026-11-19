@@ -1300,11 +1300,21 @@ class LlamaCppBackend(BackendInterface):
         return default
 
     def _resolve_model_file(self, model_id: str, extra_config: dict[str, Any]) -> Path:
+        """Exact GGUF of ``model_id``; never a guess (BUG-43).
+
+        An explicit ``model_path`` (what the artifact materialises) is final:
+        if that file is gone the load fails instead of falling back to a
+        search that could pick another model's weights. The last-resort
+        search by file stem only answers when there is exactly one match.
+        """
         explicit = self._get_option(extra_config, "model_path", None)
         if explicit:
             path = Path(str(explicit))
             if path.is_file():
                 return path
+            raise FileNotFoundError(
+                f"llama.cpp model_path for '{model_id}' does not exist: {path}"
+            )
 
         direct = Path(model_id)
         if direct.is_file():
@@ -1320,10 +1330,19 @@ class LlamaCppBackend(BackendInterface):
             if candidate.is_file():
                 return candidate
 
-        stem = Path(model_id).stem
-        matches = [path for path in root.rglob("*.gguf") if path.stem == stem]
-        if matches:
-            return max(matches, key=lambda path: path.stat().st_mtime)
+        # Path(...).stem would cut "qwen3.8:27b" down to "qwen3"; compare
+        # against the full last component (without a trailing .gguf) instead.
+        name = Path(model_id).name
+        stem = name[: -len(".gguf")] if name.lower().endswith(".gguf") else name
+        matches = sorted(path for path in root.rglob("*.gguf") if path.stem == stem)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            listed = ", ".join(str(path) for path in matches[:5])
+            raise FileNotFoundError(
+                f"llama.cpp GGUF for '{model_id}' is ambiguous: {len(matches)} files named "
+                f"'{stem}.gguf' under {root} ({listed}). Set llama_cpp.model_path explicitly."
+            )
 
         raise FileNotFoundError(f"llama.cpp GGUF model not found for '{model_id}' under {root}")
 

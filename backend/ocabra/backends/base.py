@@ -1,5 +1,6 @@
+import socket
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from typing import Any
@@ -167,6 +168,13 @@ class WorkerInfo:
     endpoint_url: str | None = None
 
 
+def _ephemeral_port() -> int:
+    """Port picked by the kernel from the ephemeral range (fallback only)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 class BackendInterface(ABC):
     @property
     def install_spec(self) -> BackendInstallSpec | None:
@@ -230,6 +238,39 @@ class BackendInterface(ABC):
         its credential through the public request body.
         """
         return {}
+
+    # ------------------------------------------------------------------
+    # Auxiliary ports (BUG-44)
+    # ------------------------------------------------------------------
+
+    # Set by the owner of the worker port range (WorkerPool) so that ports a
+    # backend opens on its own — probe servers, sidecars — come from the same
+    # managed range (settings.worker_port_range_*) and never collide with a
+    # worker port. Without it, the old behaviour stays: an ephemeral port.
+    _port_assign: Callable[[], Awaitable[int]] | None = None
+    _port_release: Callable[[int], None] | None = None
+
+    def attach_port_allocator(
+        self,
+        assign: Callable[[], Awaitable[int]],
+        release: Callable[[int], None],
+    ) -> None:
+        """Route :meth:`_acquire_aux_port` through the managed port range."""
+        self._port_assign = assign
+        self._port_release = release
+
+    async def _acquire_aux_port(self) -> int:
+        """A free localhost port for a process the backend starts itself.
+
+        Callers must hand it back with :meth:`_release_aux_port`.
+        """
+        if self._port_assign is not None:
+            return await self._port_assign()
+        return _ephemeral_port()
+
+    def _release_aux_port(self, port: int) -> None:
+        if self._port_release is not None and port:
+            self._port_release(port)
 
     # ------------------------------------------------------------------
     # Multi-modal interface (optional — subclasses override as needed)
