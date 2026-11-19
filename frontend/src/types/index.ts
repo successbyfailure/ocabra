@@ -2164,7 +2164,7 @@ export type WSEvent =
         service: ServiceState;
       };
     }
-  | { type: "system_alert"; data: { level: "warn" | "error"; message: string } }
+  | { type: "system_alert"; data: { level: "info" | "warning" | "error"; message: string } }
   | { type: "peer_online"; data: { peer_id: string; name: string } }
   | { type: "peer_offline"; data: { peer_id: string; name: string } }
   | { type: "remote_model_loaded"; data: { peer_id: string; model_id: string } }

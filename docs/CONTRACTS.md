@@ -464,7 +464,7 @@ con `data` igual al payload publicado:
 | `model:events` | `model_event` | `{event, model_id, canonical_model_id, new_status}` |
 | `service:events` | `service_event` | `{event, service_id, status, service}` |
 | `download:progress` | `download_progress` | `DownloadJob` |
-| `system:alerts` | `system_alert` | `{level, message}` (`level` = `info`/`warning`) |
+| `system:alerts` | `system_alert` | `{level, message}` (`level` = `info`/`warning`/`error`) |
 
 Además, el servidor envía `{"type": "ping"}` tras 30 s sin mensajes del
 cliente, y un cliente que manda `{"subscribe": "models_activity"}` recibe

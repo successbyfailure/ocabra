@@ -1,7 +1,7 @@
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 import redis.asyncio as aioredis
 from redis.asyncio.connection import BlockingConnectionPool
@@ -50,13 +50,17 @@ async def publish(channel: str, data: Any) -> None:
     await get_redis().publish(channel, json.dumps(data))
 
 
-async def publish_system_alert(level: str, message: str) -> None:
+SystemAlertLevel = Literal["info", "warning", "error"]
+
+
+async def publish_system_alert(level: SystemAlertLevel, message: str) -> None:
     """Broadcast a system_alert event via the ``system:alerts`` Redis channel.
 
     Parameters
     ----------
     level:
-        Severity – ``"warn"`` or ``"error"``.
+        Severity – ``"info"``, ``"warning"`` or ``"error"`` (the frontend
+        type ``WSEvent`` mirrors this set).
     message:
         Human-readable description of the alert.
     """
