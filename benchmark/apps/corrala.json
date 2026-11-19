@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "app": "corrala",
+  "description": "Casos reales anonimizados de los bots de Corrala: triage de correo Zammad, routing de GLaDOS y subagentes (wiki, domótica, inventario, Manavote, Escriba).",
+  "repository": "https://github.com/successbyfailure/Corrala.git",
+  "default_revision": "main",
+  "dataset_root": "backend/scripts/llm_benchmark",
+  "suites": {
+    "llm": {
+      "description": "Calidad y velocidad por stack real con tools en replay: triage Zammad, routing GLaDOS y subagentes.",
+      "script": "ocabra_suite.py",
+      "result_glob": "results_*/results.json",
+      "models_flag": "--models"
+    }
+  }
+}
