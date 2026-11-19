@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.dialects import postgresql
 
 from ocabra.agents.mcp_registry import MCPRegistry, set_registry
 from ocabra.api.internal.agents import router as agents_router
@@ -209,14 +210,45 @@ def test_delete_ok_for_model_manager():
     factory = FakeSessionFactory()
 
     def wire(session):
-        session.execute.side_effect = [scalar_result(agent)]
+        session.execute.side_effect = [scalar_result(agent), scalars_all([])]
 
     factory.configure(wire)
     with patch("ocabra.api.internal.agents.AsyncSessionLocal", new=factory):
         client = TestClient(app)
         resp = client.delete(f"/ocabra/agents/{agent.slug}")
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "slug": agent.slug}
+    assert resp.json() == {"ok": True, "slug": agent.slug, "detached_from": []}
+
+
+def test_delete_detaches_it_from_parent_agents():
+    """Deleting an agent used to leave its slug in other agents'
+    ``subagent_slugs``; a later agent with the same slug got attached silently."""
+    app = _make_app(make_user_context(role="model_manager"))
+    child = _make_agent(slug="child")
+    parent_a = _make_agent(slug="parent-a", subagent_slugs=["other", "child"])
+    parent_b = _make_agent(slug="parent-b", subagent_slugs=["child"])
+    factory = FakeSessionFactory()
+    sessions = []
+
+    def wire(session):
+        sessions.append(session)
+        session.execute.side_effect = [scalar_result(child), scalars_all([parent_b, parent_a])]
+
+    factory.configure(wire)
+    with patch("ocabra.api.internal.agents.AsyncSessionLocal", new=factory):
+        client = TestClient(app)
+        resp = client.delete("/ocabra/agents/child")
+
+    assert resp.status_code == 200
+    assert resp.json()["detached_from"] == ["parent-a", "parent-b"]
+    assert parent_a.subagent_slugs == ["other"]
+    assert parent_b.subagent_slugs == []
+    # Same transaction: one session, one commit, after the cleanup.
+    (session,) = sessions
+    session.delete.assert_awaited_once_with(child)
+    session.commit.assert_awaited_once()
+    stmt = str(session.execute.await_args_list[1].args[0].compile(dialect=postgresql.dialect()))
+    assert "@>" in stmt and "FOR UPDATE" in stmt
 
 
 # ── Group filtering ─────────────────────────────────────────

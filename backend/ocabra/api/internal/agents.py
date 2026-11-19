@@ -153,7 +153,9 @@ async def _validate_subagent_slugs(
         if not slug or slug in seen:
             continue
         if current_slug is not None and slug == current_slug:
-            raise HTTPException(status_code=400, detail="An agent cannot include itself as subagent")
+            raise HTTPException(
+                status_code=400, detail="An agent cannot include itself as subagent"
+            )
         seen.add(slug)
         cleaned.append(slug)
 
@@ -414,24 +416,51 @@ async def delete_agent(
     slug: str,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict[str, Any]:
-    """Delete an agent and its MCP server links.
+    """Delete an agent, its MCP server links and every reference to it as subagent.
 
-    Requires the ``model_manager`` role.
+    Requires the ``model_manager`` role. Other agents that listed it in
+    ``subagent_slugs`` lose that entry in the same transaction: left behind,
+    the stale slug would silently attach whatever agent is created later under
+    the same name.
 
     Args:
         slug: Agent slug.
 
     Returns:
-        ``{"ok": True, "slug": str}``.
+        ``{"ok": True, "slug": str, "detached_from": [slug, ...]}`` —
+        ``detached_from`` lists the agents that had it as subagent.
 
     Raises:
         HTTPException 404: unknown agent.
     """
     async with AsyncSessionLocal() as session:
         row = await _load_agent_or_404(session, slug)
+        detached_from = await _drop_subagent_references(session, slug)
         await session.delete(row)
         await session.commit()
-    return {"ok": True, "slug": slug}
+    return {"ok": True, "slug": slug, "detached_from": detached_from}
+
+
+async def _drop_subagent_references(session, slug: str) -> list[str]:
+    """Remove ``slug`` from every other agent's ``subagent_slugs``.
+
+    Rows are locked (``FOR UPDATE``) so a concurrent PATCH of a parent cannot
+    write the stale list back. Returns the parents' slugs, sorted.
+    """
+    parents = (
+        (
+            await session.execute(
+                sa.select(Agent)
+                .where(Agent.slug != slug, Agent.subagent_slugs.contains([slug]))
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for parent in parents:
+        parent.subagent_slugs = [child for child in (parent.subagent_slugs or []) if child != slug]
+    return sorted(parent.slug for parent in parents)
 
 
 @router.post(
