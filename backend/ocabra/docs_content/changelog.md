@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.118.2 — 2026-11-19
+
+### Arreglos
+
+- **Una transcripción larga ya no sale como parada mientras se prepara.**
+  Antes de transcribir, el worker de whisper decodifica el audio entero y
+  busca los tramos con voz, y en ese rato no hay avance que contar: con 1 h
+  35 min de MP3 fueron 4 minutos en los que `/ocabra/models/activity` la
+  marcaba como «sin actividad del worker» (`stalled: true`). Ahora
+  `audio.phase` vale `preparing` durante esa fase (valor nuevo, antes de
+  `transcribing` y `diarizing`) y no cuenta como parada. Y `audio.realtimeFactor`
+  se mide desde que empieza a transcribir: incluía la preparación y salía
+  más bajo de lo real.
+
+---
+
 ## 0.118.1 — 2026-11-19
 
 ### Arreglos

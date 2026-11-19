@@ -1151,3 +1151,26 @@ def test_transcription_stall_is_watched_but_diarizing_is_not():
     la.mark_stalls([transcribing, diarizing])
     assert transcribing["stalled"] is True
     assert diarizing["stalled"] is False
+
+
+def test_preparing_audio_is_not_a_stall_and_speed_counts_from_transcribing():
+    """1 h 35 min de MP3 (19/11): 4 min decodificando y con el VAD sin avance.
+    No es una parada, y la velocidad no debe contar esa preparación."""
+    preparing = {"stage": "processing", "lastActivitySecondsAgo": 200.0, "audio": {"phase": "preparing"}}
+    la.mark_stalls([preparing])
+    assert preparing["stalled"] is False
+
+    d = {"requestId": "w", "stage": "processing"}
+    jobs = {
+        "w": {
+            "phase": "transcribing",
+            "audioSeconds": 5711.0,
+            "processedSeconds": 1650.0,
+            "segments": 385,
+            "elapsedMs": 255_000,
+            "transcribingMs": 30_000,
+            "lastUpdateMsAgo": 300,
+        },
+    }
+    la.apply_audio_progress([d], jobs)
+    assert d["audio"]["realtimeFactor"] == 55.0

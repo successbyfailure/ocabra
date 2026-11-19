@@ -1286,7 +1286,10 @@ def apply_audio_progress(details: list[dict[str, Any]], jobs: dict[str, dict[str
             continue
         total = job.get("audioSeconds")
         processed = float(job.get("processedSeconds") or 0.0)
-        elapsed_s = (job.get("elapsedMs") or 0) / 1000
+        # Desde que empezó a transcribir: la preparación (decodificar y VAD)
+        # no es velocidad de transcripción. Workers antiguos no lo dan.
+        transcribing_ms = job.get("transcribingMs")
+        elapsed_s = (transcribing_ms if transcribing_ms is not None else job.get("elapsedMs") or 0) / 1000
         rate = round(processed / elapsed_s, 1) if elapsed_s >= 1 and processed > 0 else None
         detail["audio"] = {
             "phase": job.get("phase"),

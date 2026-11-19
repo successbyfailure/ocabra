@@ -763,7 +763,7 @@ export interface ActiveRequestProgress {
   /** Transcripción (faster-whisper): avance real del audio y velocidad
    *  respecto al tiempo real (×N = N veces más rápido que el audio). */
   audio?: {
-    phase: "transcribing" | "diarizing" | null;
+    phase: "preparing" | "transcribing" | "diarizing" | null;
     totalSeconds: number | null;
     processedSeconds: number;
     pct: number | null;

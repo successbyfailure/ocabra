@@ -240,7 +240,7 @@ def test_run_transcription_reports_progress_as_segments_decode():
     """faster-whisper entrega los segmentos al decodificarlos: el fin de cada
     uno es el avance real. Al terminar de transcribir, todo el audio."""
     seen: list[float] = []
-    progress: dict = {"phase": "transcribing", "startedMonotonic": 0.0, "updatedMonotonic": 0.0}
+    progress: dict = {"phase": "preparing", "startedMonotonic": 0.0, "updatedMonotonic": 0.0}
 
     def segments():
         for i, end in enumerate((30.0, 60.0, 95.5)):
@@ -256,6 +256,10 @@ def test_run_transcription_reports_progress_as_segments_decode():
         "/tmp/x.wav", FakeModel(), "es", None, 0.0, False, None, ["segment"], progress=progress
     )
     assert seen == [0.0, 30.0, 60.0]
+    # Decodificar y el VAD terminan al devolver el generador: de ahí en
+    # adelante transcribe, y su velocidad se mide desde ese momento.
+    assert progress["phase"] == "transcribing"
+    assert progress["transcribeStartedMonotonic"] > 0
     assert progress["audioSeconds"] == 120.0
     assert progress["segments"] == 3
     # Tras el último segmento (VAD se salta el silencio final): todo el audio.
@@ -286,4 +290,5 @@ def test_progress_endpoint_lists_jobs():
     assert jobs["req-1"]["processedSeconds"] == 30.0
     assert jobs["req-1"]["audioSeconds"] == 120.0
     assert 1500 <= jobs["req-1"]["elapsedMs"] <= 3500
+    assert jobs["req-1"]["transcribingMs"] is None
     whisper_worker.runtime.progress.clear()

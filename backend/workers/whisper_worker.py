@@ -147,9 +147,11 @@ def create_app(
     async def progress() -> JSONResponse:
         """Avance de las transcripciones en curso, por id de petición.
 
-        Por cada una: ``phase`` (``transcribing`` o ``diarizing``), duración del
-        audio, segundos de audio ya transcritos, segmentos y tiempo desde que
-        empezó a transcribir. Solo lectura; vacío si no hay ninguna.
+        Por cada una: ``phase`` (``preparing`` mientras decodifica el audio y
+        busca la voz, luego ``transcribing`` y ``diarizing``), duración del
+        audio, segundos de audio ya transcritos, segmentos, tiempo desde que
+        llegó y desde que empezó a transcribir (``transcribingMs``, null antes).
+        Solo lectura; vacío si no hay ninguna.
         """
         now = time.monotonic()
         jobs = {
@@ -161,6 +163,11 @@ def create_app(
                 "elapsedMs": int((now - job["startedMonotonic"]) * 1000),
                 "lastUpdateMsAgo": int(
                     (now - job.get("updatedMonotonic", job["startedMonotonic"])) * 1000
+                ),
+                "transcribingMs": (
+                    int((now - job["transcribeStartedMonotonic"]) * 1000)
+                    if job.get("transcribeStartedMonotonic") is not None
+                    else None
                 ),
             }
             for rid, job in list(runtime.progress.items())
@@ -239,7 +246,11 @@ def create_app(
         job: dict[str, Any] | None = None
         if x_ocabra_request_id:
             started = time.monotonic()
-            job = {"phase": "transcribing", "startedMonotonic": started, "updatedMonotonic": started}
+            # "preparing" hasta que faster-whisper devuelve el generador: antes
+            # decodifica el audio entero y pasa el VAD por la CPU, y con 1 h 35
+            # min de MP3 eso fueron 4 minutos sin avance que el panel daba por
+            # parados (19/11).
+            job = {"phase": "preparing", "startedMonotonic": started, "updatedMonotonic": started}
             runtime.progress[x_ocabra_request_id] = job
 
         suffix = Path(file.filename or "audio.wav").suffix or ".wav"
@@ -678,6 +689,10 @@ def _run_transcription(
         # Duración total del audio: se conoce antes de decodificar nada.
         duration = getattr(info, "duration", None)
         progress["audioSeconds"] = float(duration) if duration else None
+        now = time.monotonic()
+        progress["phase"] = "transcribing"
+        progress["transcribeStartedMonotonic"] = now
+        progress["updatedMonotonic"] = now
 
     for idx, segment in enumerate(segments):
         text_parts.append(segment.text)

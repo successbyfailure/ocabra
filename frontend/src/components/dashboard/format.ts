@@ -131,6 +131,7 @@ export function audioProgressText(audio: {
   realtimeFactor: number | null
 }): string {
   if (audio.phase === "diarizing") return "diarizando (quién habla)"
+  if (audio.phase === "preparing") return "preparando el audio (decodificar y buscar la voz)"
   const pct = audio.pct != null ? ` (${audio.pct.toFixed(0)}%)` : ""
   const speed = audio.realtimeFactor ? ` · ${fmtRealtime(audio.realtimeFactor)} tiempo real` : ""
   return `transcribiendo ${fmtClock(audio.processedSeconds)} / ${fmtClock(audio.totalSeconds)}${pct}${speed}`
