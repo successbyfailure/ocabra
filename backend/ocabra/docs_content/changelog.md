@@ -18,6 +18,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ## 0.120.0 — 2026-11-19
 
+### Nuevo
+
+- **`POST /v1/images/upscale`: mejorar la resolución de una foto.** Hasta
+  ahora solo se podía escalar vídeo (`/ocabra/video/upscale`), y
+  `/v1/images/edits` rechaza estos modelos porque es img2img con prompt. Ahora
+  mandas la foto en multipart (`image`, `model`) con cualquiera de los modelos
+  de escalado (`realesrgan-x4plus`, `ultrasharp-x4`, `remacri-x4`,
+  `real-esrgan-compact-x4`, `ultrasharp-v2-lite`) y recibes la imagen escalada
+  4x en PNG. Opcionales: `scale` o `target_width`/`target_height` para una
+  salida menor (solo reducen: nunca se estira por encima de lo que da el
+  modelo; mira `X-Ocabra-Delivered-Resolution`), `output_format`
+  (`png`/`jpeg`/`webp`), `output_quality` y `response_format=b64_json` si
+  prefieres JSON al estilo OpenAI. La transparencia se conserva en PNG y WebP.
+  Las fotos grandes se procesan por teselas; el límite es 25 MB y 3840×2160 px
+  de entrada (413 si te pasas). Un modelo que no es de escalado da 400
+  `model_not_capable` sin llegar a cargarse.
+
 ### Cambiado
 
 - **Un modelo que comparte GPU con otro ya no se desaloja entre dos peticiones
