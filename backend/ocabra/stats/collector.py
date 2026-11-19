@@ -19,10 +19,11 @@ import structlog
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
+from starlette.requests import HTTPConnection
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ocabra.config import settings
-from ocabra.core import privacy
+from ocabra.core import admission, privacy
 from ocabra.core.background_tasks import spawn
 from ocabra.core.model_manager_helpers import compute_worker_key
 from ocabra.core.request_telemetry import RequestRuntimeTelemetry, current_inflight_request_id
@@ -408,6 +409,250 @@ def _tool_call_words(tool_calls: object) -> int | None:
     return words if found else None
 
 
+def _chunk_output_words(chunk: dict, *, sse: bool) -> tuple[int, bool, int, bool]:
+    """Words one parsed stream event adds: ``(content, found, with_reasoning, found)``.
+
+    The same rules as :func:`_stream_output_tokens`, applied to a single
+    event so a stream can be counted as it passes instead of re-reading it.
+    """
+    words = 0
+    found = False
+    extra = 0  # reasoning/thinking words: only the live counter sees them
+    extra_found = False
+    if sse:
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") if isinstance(choice, dict) else None
+            content = delta.get("content") if isinstance(delta, dict) else None
+            if isinstance(content, str) and content:
+                words += len(content.split())
+                found = True
+            if isinstance(delta, dict):
+                reasoning = delta.get("reasoning_content")
+                if isinstance(reasoning, str) and reasoning:
+                    extra += len(reasoning.split())
+                    extra_found = True
+            tool_words = _tool_call_words(
+                delta.get("tool_calls") if isinstance(delta, dict) else None
+            )
+            if tool_words is not None:
+                words += tool_words
+                found = True
+    else:
+        msg = chunk.get("message")
+        content = (msg or {}).get("content") if isinstance(msg, dict) else None
+        if not content:
+            content = chunk.get("response")
+        if isinstance(content, str) and content:
+            words += len(content.split())
+            found = True
+        if isinstance(msg, dict):
+            thinking = msg.get("thinking")
+            if isinstance(thinking, str) and thinking:
+                extra += len(thinking.split())
+                extra_found = True
+        tool_words = _tool_call_words(msg.get("tool_calls") if isinstance(msg, dict) else None)
+        if tool_words is not None:
+            words += tool_words
+            found = True
+    return words, found, words + extra, found or extra_found
+
+
+class _StreamAccumulator:
+    """Incremental reader of a streamed response body (BUG-36).
+
+    The streaming tee used to keep every chunk and re-parse the whole body:
+    on each chunk until the first token, every 0.5 s for the live progress,
+    and three more times at the end. CPU on the event loop grew with the
+    square of the stream length and memory with the whole response. This
+    parses each complete line exactly once as it passes and keeps only what
+    the stats need: the word counters, the last ``usage`` event (SSE), the
+    last ``done`` event (NDJSON) and the last in-band error. The results are
+    the ones :func:`_stream_output_tokens`, :func:`_extract_last_payload_from_stream`
+    and :func:`_extract_stream_error` give for the whole body.
+
+    Memory: the unfinished last line, capped (``_MAX_LINE_TEXT`` for SSE and
+    NDJSON, ``_MAX_LINE_OTHER`` for audio/video, where only a JSON error line
+    could matter). A line longer than the cap is dropped, as if it were not
+    JSON. The audio body of TTS/music is kept on request (``keep_body``),
+    because its length is what ``audio_seconds`` comes from; past
+    ``_MAX_AUDIO_BODY`` only the head and the total size are kept.
+    """
+
+    _MAX_LINE_TEXT = 16 * 1024 * 1024
+    _MAX_LINE_OTHER = 64 * 1024
+    _MAX_AUDIO_BODY = 64 * 1024 * 1024
+    _TAIL_PEEK_LIMIT = 64 * 1024
+
+    def __init__(self, content_type: str, *, keep_body: bool = False) -> None:
+        self._sse = "event-stream" in content_type
+        self._ndjson = not self._sse and "ndjson" in content_type
+        self._text = self._sse or self._ndjson
+        self._max_line = self._MAX_LINE_TEXT if self._text else self._MAX_LINE_OTHER
+        self._pending = bytearray()
+        self._dropping = False  # inside a line longer than the cap
+        self._keep_body = keep_body
+        self._body: list[bytes] = []
+        self._body_size = 0
+        self.total_size = 0
+        self.body_truncated = False
+        self.content_words = 0
+        self.content_found = False
+        self.all_words = 0
+        self.all_found = False
+        self.last_usage_payload: dict | None = None
+        self.last_done_payload: dict | None = None
+        self.last_error_payload: dict | None = None
+        # Instrumentation for the tests: bytes handed to the line parser.
+        self.bytes_parsed = 0
+
+    # ── input ─────────────────────────────────────────────────────────
+    def feed(self, chunk: bytes) -> None:
+        self.total_size += len(chunk)
+        if self._keep_body and chunk:
+            if self._body_size + len(chunk) <= self._MAX_AUDIO_BODY:
+                self._body.append(chunk)
+                self._body_size += len(chunk)
+            else:
+                self.body_truncated = True
+        newline = chunk.rfind(b"\n")
+        if newline < 0:
+            self._append_pending(chunk)
+            return
+        head = chunk[:newline]
+        if self._dropping:
+            # The rest of an oversized line ends here; the line is discarded.
+            first = head.find(b"\n")
+            self._dropping = False
+            self._pending.clear()
+            if first < 0:
+                head = b""
+            else:
+                head = head[first + 1 :]
+            data = head
+        elif self._pending:
+            data = bytes(self._pending) + head
+            self._pending.clear()
+        else:
+            data = head
+        if data:
+            self._parse_block(data)
+        self._append_pending(chunk[newline + 1 :])
+
+    def finish(self) -> None:
+        """Parse the last line when the stream did not end with a newline."""
+        if self._pending and not self._dropping:
+            self._parse_block(bytes(self._pending))
+        self._pending.clear()
+        self._dropping = False
+
+    def _append_pending(self, data: bytes) -> None:
+        if not data or self._dropping:
+            return
+        if len(self._pending) + len(data) > self._max_line:
+            self._pending.clear()
+            self._dropping = True
+            return
+        self._pending += data
+
+    # ── parsing ───────────────────────────────────────────────────────
+    def _parse_block(self, data: bytes) -> None:
+        """Complete lines (``\\n``-separated). Decoded per line so a multi-byte
+        character split across chunks never breaks; ``str.splitlines`` on
+        each piece keeps the old whole-body segmentation exactly."""
+        self.bytes_parsed += len(data)
+        for raw in data.split(b"\n"):
+            if not raw:
+                continue
+            for line in raw.decode("utf-8", errors="ignore").splitlines():
+                event = self._parse_line(line)
+                if event is not None:
+                    self._absorb(event)
+
+    def _parse_line(self, line: str) -> dict | None:
+        if self._sse:
+            if not line.startswith("data: "):
+                return None
+            data = line[6:].strip()
+        else:
+            data = line.strip()
+        # Only an object matters to any reader (they all look up keys);
+        # anything else — "[DONE]", audio bytes — is skipped without parsing.
+        if not data.startswith("{"):
+            return None
+        try:
+            event = json.loads(data)
+        except Exception:
+            return None
+        return event if isinstance(event, dict) else None
+
+    def _absorb(self, event: dict) -> None:
+        if "error" in event:
+            self.last_error_payload = event
+        if self._sse:
+            if event.get("usage"):
+                self.last_usage_payload = event
+        elif self._ndjson:
+            if event.get("done") is True:
+                self.last_done_payload = event
+        if self._text:
+            words, found, all_words, all_found = _chunk_output_words(event, sse=self._sse)
+            self.content_words += words
+            self.content_found = self.content_found or found
+            self.all_words += all_words
+            self.all_found = self.all_found or all_found
+
+    # ── results ───────────────────────────────────────────────────────
+    def output_tokens(self, *, include_reasoning: bool = False) -> int | None:
+        if include_reasoning:
+            return self.all_words if self.all_found else None
+        return self.content_words if self.content_found else None
+
+    def has_visible_output(self) -> bool:
+        """Whether a content/reasoning/tool token was already streamed.
+
+        Includes the unfinished last line when it already parses (a chunk
+        that ends right after the JSON, before its newline), which is what
+        the whole-body parse saw. Bounded: only until the first token, and
+        only for a short line.
+        """
+        if self.all_words > 0:
+            return True
+        if not self._text or not self._pending or self._dropping:
+            return False
+        if len(self._pending) > self._TAIL_PEEK_LIMIT:
+            return False
+        for line in bytes(self._pending).decode("utf-8", errors="ignore").splitlines():
+            event = self._parse_line(line)
+            if event is not None and _chunk_output_words(event, sse=self._sse)[2] > 0:
+                return True
+        return False
+
+    def last_payload(self) -> dict | None:
+        """Same as :func:`_extract_last_payload_from_stream` on the whole body."""
+        if self._sse:
+            return self.last_usage_payload
+        if self._ndjson:
+            return self.last_done_payload
+        return None
+
+    def stream_error(self) -> tuple[str, str | None] | None:
+        """Same as :func:`_extract_stream_error` on the whole body."""
+        if self.last_error_payload is None:
+            return None
+        error = self.last_error_payload["error"]
+        if isinstance(error, dict):
+            return str(error.get("message") or "Streaming inference failed"), error.get("code")
+        return str(error), None
+
+    def audio(self, content_type: str) -> tuple[bytes, str] | tuple[bytes, str, int]:
+        """``output_audio`` for ``_record_stat``: the body, or its head and
+        the total size when it went past the cap."""
+        body = b"".join(self._body)
+        if self.body_truncated:
+            return body, content_type, self.total_size
+        return body, content_type
+
+
 def _strip_subtitle_markup(text: str) -> str:
     """Drop SRT/VTT indices and timestamp lines so a word count reflects speech."""
     kept = []
@@ -594,6 +839,19 @@ def _mark_stream_first_token(
         telemetry.mark_first_token(now_monotonic)
 
 
+def _mark_stream_first_token_from(request: Request, acc: _StreamAccumulator) -> None:
+    """:func:`_mark_stream_first_token` over the running parse of the stream.
+
+    Constant work per chunk once the first token is known; before that, at
+    most a peek at the unfinished last line (see ``has_visible_output``).
+    """
+    telemetry = getattr(request.state, "runtime_telemetry", None)
+    if not isinstance(telemetry, RequestRuntimeTelemetry) or telemetry.ttft_ms is not None:
+        return
+    if acc.has_visible_output():
+        telemetry.mark_first_token(None)
+
+
 def _payload_streaming(payload: object, path: str = "") -> bool | None:
     """Si la petición va en streaming.
 
@@ -766,6 +1024,36 @@ class StatsMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
 
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """ASGI entry: the two cases ``BaseHTTPMiddleware.dispatch`` can't see.
+
+        * WebSocket (``/v1/realtime``): ``BaseHTTPMiddleware`` passes it
+          through untouched, so a Realtime session skipped maintenance mode
+          and the in-flight cap (BUG-38). Checked here, before the handshake
+          is accepted.
+        * Multipart upload: the ``model`` field is peeked from the form
+          without reading the file part (BUG-37/38) and left in the scope for
+          ``dispatch``; the body is replayed to the endpoint as it came.
+        """
+        if scope["type"] == "websocket":
+            if _should_track(HTTPConnection(scope).url.path):
+                if await _deny_websocket(scope, receive, send):
+                    return
+            await self.app(scope, receive, send)
+            return
+        if scope["type"] == "http":
+            conn = HTTPConnection(scope)
+            content_type = conn.headers.get("content-type", "")
+            if _should_track(conn.url.path) and admission.is_multipart(content_type):
+                try:
+                    model, receive = await admission.peek_multipart_field(receive, content_type)
+                except Exception as exc:  # noqa: BLE001 - admission must not break uploads
+                    logger.warning("multipart_model_peek_failed", error=str(exc))
+                    model = None
+                if model:
+                    scope[_MULTIPART_MODEL_SCOPE_KEY] = model
+        await super().__call__(scope, receive, send)
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         import asyncio
 
@@ -782,7 +1070,11 @@ class StatsMiddleware(BaseHTTPMiddleware):
         # Track in-flight requests so the pressure eviction loop can avoid
         # evicting models that are currently serving a request.
         requested_model_id = _extract_model_id(request=request, body=request_payload)
-        inflight_model_id = await _resolve_inflight_model_id(request, requested_model_id)
+        # A multipart upload has no JSON body to read ``model`` from; ``__call__``
+        # peeked it from the form. Admission only: the stats keep taking the
+        # name the endpoint leaves in ``request.state.stats_model_id``.
+        admission_model_id = requested_model_id or request.scope.get(_MULTIPART_MODEL_SCOPE_KEY)
+        inflight_model_id = await _resolve_inflight_model_id(request, admission_model_id)
         inflight_request_id: str | None = None
         try:
             mm = request.app.state.model_manager
@@ -808,20 +1100,38 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     output_tokens=None,
                 )
             )
-            return JSONResponse(
-                status_code=503,
-                headers={"Retry-After": "30"},
-                content={
-                    "error": {
-                        "message": (
-                            f"Model '{inflight_model_id}' is under maintenance. "
-                            "Please retry shortly."
-                        ),
-                        "type": "server_error",
-                        "code": "model_maintenance",
-                    }
-                },
+            return admission.maintenance_response(inflight_model_id)
+        if mm and inflight_model_id and requested_model_id is None:
+            # Multipart upload (BUG-38): ``model`` came from a peek at the
+            # form (see ``__call__``), not from a JSON body. Its endpoint
+            # marks the request in-flight itself (``begin_request``), so here
+            # it is only checked against the cap, never counted: counting it
+            # twice would halve the worker's real cap. Not registered, so
+            # nothing below may end it either.
+            remote_bound = await _request_bound_for_peer(request, mm, inflight_model_id)
+            effective_cap = mm.effective_inflight_cap(
+                inflight_model_id,
+                settings.max_inflight_per_model,
+                request_kind=request_kind,
+                remote_bound=remote_bound,
             )
+            if effective_cap > 0 and mm.inflight_count(inflight_model_id) >= effective_cap:
+                spawn(
+                    _record_stat(
+                        request=request,
+                        model_id=inflight_model_id,
+                        started_at=started_at,
+                        duration_ms=(time.monotonic() - start) * 1000,
+                        error_message="model_at_capacity",
+                        status_code=429,
+                        endpoint_path=path,
+                        request_kind=request_kind,
+                        input_tokens=None,
+                        output_tokens=None,
+                    )
+                )
+                return admission.capacity_response(inflight_model_id, effective_cap)
+            inflight_model_id = None
         if mm and inflight_model_id:
             auth_meta = await _resolve_inflight_auth_meta(request)
             _apply_peer_rules(request, auth_meta)
@@ -874,26 +1184,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         output_tokens=None,
                     )
                 )
-                # A low-concurrency worker (e.g. a single-slot Ollama model)
-                # drains its queue far slower than the flat 2s this used to
-                # suggest unconditionally — tell low-slot callers to back off
-                # longer so they don't hammer an already-saturated worker.
-                retry_after_s = 2 if effective_cap > 4 else 10
-                return JSONResponse(
-                    status_code=429,
-                    headers={"Retry-After": str(retry_after_s)},
-                    content={
-                        "error": {
-                            "message": (
-                                f"Model '{inflight_model_id}' is at capacity "
-                                f"({effective_cap} concurrent requests for this "
-                                "worker). Please retry shortly."
-                            ),
-                            "type": "rate_limit_error",
-                            "code": "model_at_capacity",
-                        }
-                    },
-                )
+                return admission.capacity_response(inflight_model_id, effective_cap)
             request.state.inflight_model_id = inflight_model_id
             request.state.inflight_request_id = inflight_request_id
             # Antes de ``call_next``: la app interna hereda el contexto y asi
@@ -1081,7 +1372,9 @@ class StatsMiddleware(BaseHTTPMiddleware):
             original_iterator = response.body_iterator
 
             async def tee_and_record():
-                chunks: list[bytes] = []
+                # Parsed as it passes, once per line (BUG-36): only the audio
+                # of TTS/music is kept, for its length (``audio_seconds``).
+                acc = _StreamAccumulator(content_type, keep_body=request_kind in _AUDIO_KINDS)
                 error_msg: str | None = None
                 stream_cancelled = False
                 last_progress_at = 0.0
@@ -1090,8 +1383,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     async for chunk in original_iterator:
                         if isinstance(chunk, str):
                             chunk = chunk.encode("utf-8")
-                        chunks.append(chunk)
-                        _mark_stream_first_token(request, chunks, content_type)
+                        acc.feed(chunk)
+                        _mark_stream_first_token_from(request, acc)
                         if (
                             not first_token_reported
                             and mm
@@ -1102,19 +1395,18 @@ class StatsMiddleware(BaseHTTPMiddleware):
                             mm.mark_request_first_token(inflight_request_id)
                         yield chunk
                         # Live progress for the model/GPU card "is this hung
-                        # or still working" indicator (2026-10-29). Throttled
-                        # to ~2/s — re-parsing the whole accumulated body on
-                        # every chunk would be O(n^2) over a long stream.
+                        # or still working" indicator (2026-10-29). The count
+                        # is already running; the throttle (~2/s) only spares
+                        # the model manager's lock.
                         if mm and inflight_request_id:
                             now_mono = time.monotonic()
                             if now_mono - last_progress_at >= 0.5:
                                 last_progress_at = now_mono
-                                out_tok = _stream_output_tokens(
-                                    b"".join(chunks), content_type, include_reasoning=True
-                                )
                                 mm.update_request_progress(
                                     inflight_request_id,
-                                    output_tokens_estimate=out_tok,
+                                    output_tokens_estimate=acc.output_tokens(
+                                        include_reasoning=True
+                                    ),
                                 )
                 except asyncio.CancelledError:
                     # Once response headers have been sent, a downstream
@@ -1154,8 +1446,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
                             inflight_request_id,
                         )
                     if model_id:
-                        all_body = b"".join(chunks)
-                        stream_error = _extract_stream_error(all_body, content_type)
+                        acc.finish()
+                        stream_error = acc.stream_error()
                         recorded_status = status_code
                         if stream_cancelled:
                             recorded_status = 499
@@ -1164,7 +1456,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         elif stream_error is not None:
                             error_msg, error_code = stream_error
                             recorded_status = _stream_error_status(error_code)
-                        last_payload = _extract_last_payload_from_stream(all_body, content_type)
+                        last_payload = acc.last_payload()
                         _update_engine_runtime_telemetry(request, last_payload)
                         in_tok, out_tok, cached_tok, reason_tok = _extract_usage_tokens_detailed(
                             last_payload, request_kind, request_payload
@@ -1178,7 +1470,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         # the request so the row isn't left as "—".
                         if request_kind in _TEXT_GEN_KINDS:
                             if out_tok is None:
-                                out_tok = _stream_output_tokens(all_body, content_type)
+                                out_tok = acc.output_tokens()
                             if in_tok is None:
                                 in_tok = _count_input_tokens(request_payload, request_kind)
                         work_size_meta = _extract_work_size_meta(
@@ -1207,7 +1499,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                                 work_size_meta=work_size_meta,
                                 via_router_profile_id=via_router_profile_id,
                                 output_audio=(
-                                    (all_body, content_type)
+                                    acc.audio(content_type)
                                     if request_kind in _AUDIO_KINDS and recorded_status < 400
                                     else None
                                 ),
@@ -1311,6 +1603,81 @@ class StatsMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# Where ``StatsMiddleware.__call__`` leaves the ``model`` of a multipart form.
+_MULTIPART_MODEL_SCOPE_KEY = "ocabra.multipart_model"
+
+
+async def _deny_websocket(scope: Scope, receive: Receive, send: Send) -> bool:
+    """Maintenance mode and in-flight cap for a WebSocket handshake (BUG-38).
+
+    The model is the ``model`` query parameter (``/v1/realtime?model=``).
+    Same answers as an HTTP request: 503 + ``Retry-After`` under maintenance,
+    429 + ``Retry-After`` when the worker is at its cap. The session is not
+    counted in-flight here: it can last for hours, and each of its turns
+    marks itself in-flight (``RealtimeSession`` → ``begin_request``); the
+    check only stops a new session from piling onto a saturated worker.
+    Returns True when the handshake was denied. Best effort: a failure
+    lets the session through, as before.
+    """
+    conn = HTTPConnection(scope)
+    requested = (conn.query_params.get("model") or "").strip()
+    if not requested:
+        return False
+    try:
+        mm = getattr(conn.app.state, "model_manager", None)
+    except AttributeError:
+        mm = None
+    if mm is None:
+        return False
+    path = conn.url.path
+    request_kind = (
+        "realtime_transcription"
+        if (conn.query_params.get("intent") or "").strip().lower() == "transcription"
+        else "realtime_session"
+    )
+    try:
+        model_id = await _resolve_inflight_model_id(conn, requested)  # type: ignore[arg-type]
+        if not model_id:
+            return False
+        response = None
+        error_code = None
+        if mm.is_in_maintenance(model_id):
+            response = admission.maintenance_response(model_id)
+            error_code, status = "model_maintenance", 503
+        else:
+            remote_bound = await _request_bound_for_peer(conn, mm, model_id)  # type: ignore[arg-type]
+            effective_cap = mm.effective_inflight_cap(
+                model_id,
+                settings.max_inflight_per_model,
+                request_kind=request_kind,
+                remote_bound=remote_bound,
+            )
+            if effective_cap > 0 and mm.inflight_count(model_id) >= effective_cap:
+                response = admission.capacity_response(model_id, effective_cap)
+                error_code, status = "model_at_capacity", 429
+    except Exception as exc:  # noqa: BLE001 - never block a session on this
+        logger.warning("realtime_admission_check_failed", model=requested, error=str(exc))
+        return False
+    if response is None:
+        return False
+    spawn(
+        _record_stat(
+            request=conn,  # type: ignore[arg-type]
+            model_id=model_id,
+            started_at=datetime.now(UTC),
+            duration_ms=0.0,
+            error_message=error_code,
+            status_code=status,
+            endpoint_path=path,
+            request_kind=request_kind,
+            input_tokens=None,
+            output_tokens=None,
+        )
+    )
+    await admission.send_websocket_denial(response, scope, receive, send)
+    return True
+
+
 def _client_addr(request: Request) -> str | None:
     """Real client IP: X-Real-IP, then X-Forwarded-For (first hop), falling
     back to the direct peer.
@@ -1343,7 +1710,16 @@ def _should_track(path: str) -> bool:
 
 
 async def _extract_request_payload(request: Request) -> dict | None:
-    """Read and cache JSON request body when present."""
+    """Read and cache JSON request body when present.
+
+    Uploads and media (multipart, audio, video, image, octet-stream) are not
+    read (BUG-37): they can never be a JSON object, and reading them pulled a
+    whole audio file into memory a second time just for a parse that fails.
+    Everything else is read as before; Starlette hands the endpoint the same
+    cached bytes, so a JSON body is not held twice.
+    """
+    if admission.body_is_binary(request.headers.get("content-type", "")):
+        return None
     try:
         body = await request.json()
         return body if isinstance(body, dict) else None
@@ -1400,6 +1776,55 @@ async def _request_bound_for_peer(request: Request, mm: Any, model_id: str) -> b
         return False
 
 
+async def _predict_router_worker(request: Request, registry: Any, profile: Any) -> str | None:
+    """Worker key the router will most likely serve this request with.
+
+    Admission runs before the endpoint asks ``RouterResolver.pick``, so this
+    is a prediction. It used to be the first local target of the list, and
+    the cap was checked against it even when the router would pick a
+    different one (BUG-38): a router whose first target was cold but whose
+    second was warm and saturated admitted everything, and one whose first
+    target was saturated rejected requests the router would have sent to an
+    idle warm one. ``pick`` sends a request to the first target that is
+    already LOADED, wherever it is in the list, and only cold-starts in list
+    order when nothing is warm; this mirrors that (without its session veto,
+    capability and context checks). The in-flight count is moved to the
+    worker actually chosen afterwards (``rebind_request`` in
+    ``api/openai/_deps.py``).
+    """
+    from ocabra.core.model_manager import ModelStatus
+
+    fm = getattr(request.app.state, "federation_manager", None)
+    mm = getattr(request.app.state, "model_manager", None)
+    first: str | None = None
+    for target_id in profile.routing_targets or []:
+        target = await registry.get(target_id)
+        if target is not None and target.enabled and target.base_model_id:
+            key = compute_worker_key(target.base_model_id, target.load_overrides)
+            if first is None:
+                first = key
+            if mm is None:
+                break
+            try:
+                state = await mm.get_state(key)
+                if state is None and key != target.base_model_id:
+                    state = await mm.get_state(target.base_model_id)
+            except Exception:  # noqa: BLE001 - fall back to list order
+                state = None
+            if state is not None and getattr(state, "status", None) == ModelStatus.LOADED:
+                return key
+            continue
+        if target is None and fm is not None and first is None:
+            # A target only a peer has (a pod first in
+            # ``recomendado-sota``): its own id, not the next
+            # local target's — that charged the pod's requests
+            # to ornith here (in-flight, admission, stats).
+            remote_id = fm.remote_model_for(str(target_id))
+            if remote_id is not None:
+                return remote_id
+    return first
+
+
 async def _resolve_inflight_model_id(request: Request, requested: str | None) -> str | None:
     """Resolve a public profile/model id to the worker key used by ModelManager.
 
@@ -1430,23 +1855,7 @@ async def _resolve_inflight_model_id(request: Request, requested: str | None) ->
                 profile = alias_target[0] if alias_target is not None else None
             if profile is not None and profile.enabled:
                 if getattr(profile, "profile_kind", "execution") == "router":
-                    fm = getattr(request.app.state, "federation_manager", None)
-                    for target_id in profile.routing_targets or []:
-                        target = await registry.get(target_id)
-                        if target is not None and target.enabled and target.base_model_id:
-                            return compute_worker_key(
-                                target.base_model_id,
-                                target.load_overrides,
-                            )
-                        if target is None and fm is not None:
-                            # A target only a peer has (a pod first in
-                            # ``recomendado-sota``): its own id, not the next
-                            # local target's — that charged the pod's requests
-                            # to ornith here (in-flight, admission, stats).
-                            remote_id = fm.remote_model_for(str(target_id))
-                            if remote_id is not None:
-                                return remote_id
-                    return None
+                    return await _predict_router_worker(request, registry, profile)
                 return compute_worker_key(profile.base_model_id, profile.load_overrides)
 
             # Legacy canonical model ids resolve through their default profile.
@@ -1599,16 +2008,25 @@ async def _extract_response_payload_and_rebuild(response: Response) -> tuple[dic
 _AUDIO_KINDS = {"tts", "music"}
 
 
-async def _audio_duration_s(body: bytes, content_type: str) -> float | None:
+async def _audio_duration_s(
+    body: bytes, content_type: str, total_size: int | None = None
+) -> float | None:
     """Seconds of audio in a generated response body, or None.
 
     WAV from its header, raw PCM (24 kHz mono 16-bit, the OpenAI speech
     default) from its size, anything else (mp3, opus, aac, flac) with
     ffprobe — a TTS response is a few hundred KB, and this runs after the
     response was sent.
+
+    ``total_size``: the streamed body was longer than the streaming tee
+    keeps (``_StreamAccumulator._MAX_AUDIO_BODY``) and ``body`` is only its
+    head. WAV and PCM still come out right from the header and the size;
+    a compressed format cannot be measured from a head, so it gives None.
     """
     if not body:
         return None
+    truncated = total_size is not None and total_size > len(body)
+    full_size = total_size if truncated else len(body)
     ctype = (content_type or "").split(";")[0].strip().lower()
     if body[:4] == b"RIFF" and body[8:12] == b"WAVE":
         import struct
@@ -1618,15 +2036,15 @@ async def _audio_duration_s(body: bytes, content_type: str) -> float | None:
             data_at = body.find(b"data", 12)
             if byte_rate > 0 and data_at > 0:
                 declared = struct.unpack("<I", body[data_at + 4 : data_at + 8])[0]
-                size = len(body) - (data_at + 8)
+                size = full_size - (data_at + 8)
                 # A streamed WAV declares a placeholder size: trust the bytes.
                 frames = size if declared in (0, 0xFFFFFFFF) or declared > size else declared
                 return round(frames / byte_rate, 3)
         except struct.error:
             return None
     if ctype in ("audio/pcm", "audio/l16"):
-        return round(len(body) / (24000 * 2), 3)
-    if not ctype.startswith("audio/"):
+        return round(full_size / (24000 * 2), 3)
+    if not ctype.startswith("audio/") or truncated:
         return None
     import shutil
 
@@ -1668,7 +2086,7 @@ async def _record_stat(
     draft_n_accepted: int | None = None,
     predicted_tokens_per_second: float | None = None,
     prompt_tokens_per_second: float | None = None,
-    output_audio: tuple[bytes, str] | None = None,
+    output_audio: tuple[bytes, str] | tuple[bytes, str, int] | None = None,
 ) -> None:
     """Write a RequestStat row to the database and update Prometheus counters.
 
