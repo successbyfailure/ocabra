@@ -23,8 +23,6 @@ class Settings(BaseSettings):
     # the environment is now ignored — see _app_version_is_the_code_s.
     app_version: str = APP_VERSION
     log_level: str = "INFO"
-    api_host: str = "0.0.0.0"
-    api_port: int = 8000
 
     # Database
     database_url: str = "postgresql+asyncpg://ocabra:ocabra@postgres:5432/ocabra"
@@ -81,7 +79,6 @@ class Settings(BaseSettings):
     gpu_throttle_cooldown_s: int = 300
     gpu_throttle_recovery_margin_c: int = 5
     hf_cache_dir: str = "/data/hf_cache"
-    ai_models_root: str = "/docker/ai-models"
     hf_token: str = ""
     ollama_base_url: str = "http://ollama:11434"
     # False on hosts without an Ollama daemon (the ocabra-node image): skips the
@@ -401,7 +398,6 @@ class Settings(BaseSettings):
     sglang_startup_timeout_s: int = 120
     # Chatterbox TTS
     chatterbox_python_bin: str = "/opt/chatterbox-venv/bin/python"
-    chatterbox_model_name: str = "ResembleAI/chatterbox-turbo"
     # Piper TTS (CPU-only VITS, fast-lane voice assistant path)
     piper_python_bin: str = "/opt/piper-venv/bin/python"
     # Voxtral TTS (vllm-omni)

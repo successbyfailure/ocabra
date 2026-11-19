@@ -15,13 +15,3 @@ export function SkeletonList({ count = 5, className = "h-12" }: { count?: number
     </div>
   )
 }
-
-export function SkeletonCard() {
-  return (
-    <div className="animate-pulse rounded-lg border border-border bg-card p-4 space-y-3">
-      <div className="h-4 w-1/3 rounded bg-muted" />
-      <div className="h-3 w-2/3 rounded bg-muted" />
-      <div className="h-8 w-full rounded bg-muted" />
-    </div>
-  )
-}

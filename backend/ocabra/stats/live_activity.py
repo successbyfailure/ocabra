@@ -690,6 +690,18 @@ _PROC_TREE_TTL_S = 5.0
 _proc_tree_cache: dict[int, tuple[float, set[int]]] = {}
 
 
+def _drop_expired(cache: dict, now: float, ttl_s: float, keep: Any = ()) -> None:
+    """Quita de ``cache`` (valores ``(instante, ...)``) lo caducado.
+
+    Las claves son PIDs o modelos que dejan de existir: sin esto, cada worker
+    que se reinicia deja su entrada para siempre. Se llama al escribir, que es
+    cuando ya se ha pagado una medida y el recorrido es despreciable. Lo que
+    está en ``keep`` (lo que la llamada en curso va a leer) no se toca.
+    """
+    for key in [k for k, v in cache.items() if now - v[0] > ttl_s and k not in keep]:
+        cache.pop(key, None)
+
+
 def _process_tree(pid: int) -> set[int]:
     """PID del worker y todos sus descendientes (cache de 5 s).
 
@@ -707,6 +719,7 @@ def _process_tree(pid: int) -> set[int]:
         pids |= {child.pid for child in psutil.Process(pid).children(recursive=True)}
     except Exception:  # noqa: BLE001 — proceso muerto o sin permiso
         pass
+    _drop_expired(_proc_tree_cache, now, _PROC_TREE_TTL_S)
     _proc_tree_cache[pid] = (now, pids)
     return pids
 
@@ -831,6 +844,7 @@ async def model_rates(keys: set[str], estimator: Any) -> dict[str, dict[str, Any
             measured = await asyncio.wait_for(_measured_model_rates(missing), timeout=2.0)
         except Exception:  # noqa: BLE001 — sin BD: solo la regresión
             measured = {}
+        _drop_expired(_model_rates_cache, now, _PREFILL_RATE_TTL_S, keep=keys)
         for key in missing:
             _model_rates_cache[key] = (now, measured.get(key, {}))
     calibrations = getattr(estimator, "_calibrations", {}) or {}
@@ -1226,6 +1240,7 @@ async def ram_by_model(worker_pids: dict[str, list[int]]) -> dict[str, int]:
             pending[model] = pids
     if pending:
         measured = await asyncio.to_thread(lambda: {m: _tree_rss_mb(p) for m, p in pending.items()})
+        _drop_expired(_ram_cache, now, _RAM_TTL_S)
         for model, mb in measured.items():
             _ram_cache[model] = (now, mb)
             result[model] = mb

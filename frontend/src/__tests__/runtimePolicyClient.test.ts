@@ -24,10 +24,10 @@ describe("runtime_policy round trip", () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ({
       ok: true,
       status: 200,
-      json: async () => (init?.method === "PATCH" ? stored : stored),
+      json: async () => (init?.method === "PATCH" ? stored : [stored]),
     }))
     vi.stubGlobal("fetch", fetchMock)
-    const profile = await api.profiles.get("qwen")
+    const [profile] = await api.profiles.listAll()
     await api.profiles.update("qwen", { runtimePolicy: { ...profile.runtimePolicy!, downgradeGraceSeconds: 300 } })
     const body = JSON.parse(String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]?.[1]?.body))
     expect(body.runtime_policy.reserve_mb_by_preset).toEqual({ dual: { "0": 2700 } })

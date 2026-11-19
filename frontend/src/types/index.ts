@@ -105,8 +105,6 @@ export type BackendType =
  * disjoint, but it also means `startsWith("llama_cpp")` does not match the
  * fork: use this helper instead.
  */
-export const LLAMA_CPP_FAMILY: readonly BackendType[] = ["llama_cpp", "llamacpp_mks"];
-
 export function isLlamaCppFamily(backendType: string | undefined | null): boolean {
   return backendType === "llama_cpp" || backendType === "llamacpp_mks";
 }
@@ -321,28 +319,6 @@ export interface WhisperConfig {
   numWorkers?: number | null;
 }
 
-export interface ModelMemoryEstimate {
-  backendType: BackendType;
-  gpuIndex: number | null;
-  totalVramMb: number | null;
-  freeVramMb: number | null;
-  budgetVramMb: number | null;
-  requestedContextLength: number | null;
-  estimatedWeightsMb: number | null;
-  estimatedEngineMbPerGpu: number | null;
-  estimatedKvCacheMb: number | null;
-  estimatedMaxContextLength: number | null;
-  modelLoadingMemoryMb: number | null;
-  maximumConcurrency: number | null;
-  tensorParallelSize: number | null;
-  fitsCurrentGpu: boolean | null;
-  enginePresent: boolean | null;
-  source: "heuristic" | "runtime_probe" | "gguf_header";
-  status: "ok" | "warning" | "error";
-  warning: string | null;
-  notes: string[];
-}
-
 // Raw shape of GET /ocabra/models/{id}/capacity (snake_case, passed through).
 export interface ModelCapacity {
   model_id: string;
@@ -438,15 +414,6 @@ export interface HFVLLMSupport {
   runtimeProbe: HFVLLMRuntimeProbe | null;
 }
 
-export interface ModelPatchRequest {
-  loadPolicy?: LoadPolicy;
-  preferredGpu?: number | null;
-  pinPermanent?: boolean;
-  displayName?: string;
-  schedules?: EvictionSchedule[];
-  extraConfig?: BackendExtraConfig;
-}
-
 export interface EvictionSchedule {
   id: string;
   days: number[];
@@ -489,8 +456,6 @@ export interface DownloadJob {
 }
 
 export type DownloadSource = "huggingface" | "ollama" | "bitnet";
-export type DownloadStatus =
-  "queued" | "downloading" | "completed" | "failed" | "cancelled";
 
 /**
  * One backend able to serve a file, from the server's compatibility engine
@@ -571,14 +536,6 @@ export interface HFModelCard {
   compatibleBackends?: CompatibleBackend[];
   createdAt?: string | null;
   lastModified?: string | null;
-}
-
-export interface HFModelDetail extends HFModelCard {
-  siblings: Record<string, unknown>[];
-  readmeExcerpt: string | null;
-  suggestedBackend: BackendType;
-  estimatedVramGb: number | null;
-  vllmSupport?: HFVLLMSupport | null;
 }
 
 export interface HFModelVariant {
@@ -1313,20 +1270,6 @@ export interface ServerPower {
   totalPowerW: number | null;
 }
 
-export interface GPUStatHistoryPoint {
-  timestamp: string;
-  usedVramMb: number;
-  utilizationPct: number;
-  temperatureC: number;
-  powerDrawW: number;
-}
-
-export interface GPUStatHistory {
-  gpuIndex: number;
-  window: string;
-  points: GPUStatHistoryPoint[];
-}
-
 export type ServiceStatus =
   | "unknown"
   | "idle"
@@ -1477,12 +1420,6 @@ export interface UpdateUserPayload {
 
 export interface CreateGroupPayload {
   name: string;
-  description?: string | null;
-  grantsAllModels?: boolean;
-}
-
-export interface UpdateGroupPayload {
-  name?: string;
   description?: string | null;
   grantsAllModels?: boolean;
 }

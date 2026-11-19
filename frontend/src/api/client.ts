@@ -8,9 +8,7 @@ import type {
   BackendType,
   LoadPolicy,
   GPUState,
-  GPUStatHistory,
   ModelState,
-  ModelPatchRequest,
   ModelProfile,
   ProfileCreate,
   ProfileUpdate,
@@ -20,7 +18,6 @@ import type {
   DownloadJob,
   DownloadSource,
   HFModelCard,
-  HFModelDetail,
   HFModelVariant,
   OllamaModelCard,
   OllamaModelVariant,
@@ -36,7 +33,6 @@ import type {
   ServiceState,
   CompileJob,
   ModelsStorageStats,
-  ModelMemoryEstimate,
   AuthUser,
   ApiKey,
   AdminApiKey,
@@ -46,7 +42,6 @@ import type {
   CreateUserPayload,
   UpdateUserPayload,
   CreateGroupPayload,
-  UpdateGroupPayload,
   RecentRequestsData,
   ByUserStats,
   ByGroupStats,
@@ -610,82 +605,6 @@ function toModelsStorageStats(raw: unknown): ModelsStorageStats {
     totalBytes: Number(data.total_bytes ?? data.totalBytes ?? 0),
     usedBytes: Number(data.used_bytes ?? data.usedBytes ?? 0),
     freeBytes: Number(data.free_bytes ?? data.freeBytes ?? 0),
-  };
-}
-
-function toModelMemoryEstimate(raw: unknown): ModelMemoryEstimate {
-  const data = isRecord(raw) ? raw : {};
-  return {
-    backendType: String(
-      data.backend_type ?? data.backendType ?? "vllm",
-    ) as ModelMemoryEstimate["backendType"],
-    gpuIndex:
-      data.gpu_index == null && data.gpuIndex == null
-        ? null
-        : Number(data.gpu_index ?? data.gpuIndex),
-    totalVramMb:
-      data.total_vram_mb == null && data.totalVramMb == null
-        ? null
-        : Number(data.total_vram_mb ?? data.totalVramMb),
-    freeVramMb:
-      data.free_vram_mb == null && data.freeVramMb == null
-        ? null
-        : Number(data.free_vram_mb ?? data.freeVramMb),
-    budgetVramMb:
-      data.budget_vram_mb == null && data.budgetVramMb == null
-        ? null
-        : Number(data.budget_vram_mb ?? data.budgetVramMb),
-    requestedContextLength:
-      data.requested_context_length == null &&
-      data.requestedContextLength == null
-        ? null
-        : Number(data.requested_context_length ?? data.requestedContextLength),
-    estimatedWeightsMb:
-      data.estimated_weights_mb == null && data.estimatedWeightsMb == null
-        ? null
-        : Number(data.estimated_weights_mb ?? data.estimatedWeightsMb),
-    estimatedEngineMbPerGpu:
-      data.estimated_engine_mb_per_gpu == null &&
-      data.estimatedEngineMbPerGpu == null
-        ? null
-        : Number(
-            data.estimated_engine_mb_per_gpu ?? data.estimatedEngineMbPerGpu,
-          ),
-    estimatedKvCacheMb:
-      data.estimated_kv_cache_mb == null && data.estimatedKvCacheMb == null
-        ? null
-        : Number(data.estimated_kv_cache_mb ?? data.estimatedKvCacheMb),
-    estimatedMaxContextLength:
-      data.estimated_max_context_length == null &&
-      data.estimatedMaxContextLength == null
-        ? null
-        : Number(
-            data.estimated_max_context_length ?? data.estimatedMaxContextLength,
-          ),
-    modelLoadingMemoryMb:
-      data.model_loading_memory_mb == null && data.modelLoadingMemoryMb == null
-        ? null
-        : Number(data.model_loading_memory_mb ?? data.modelLoadingMemoryMb),
-    maximumConcurrency:
-      data.maximum_concurrency == null && data.maximumConcurrency == null
-        ? null
-        : Number(data.maximum_concurrency ?? data.maximumConcurrency),
-    tensorParallelSize:
-      data.tensor_parallel_size == null && data.tensorParallelSize == null
-        ? null
-        : Number(data.tensor_parallel_size ?? data.tensorParallelSize),
-    fitsCurrentGpu:
-      data.fits_current_gpu == null && data.fitsCurrentGpu == null
-        ? null
-        : Boolean(data.fits_current_gpu ?? data.fitsCurrentGpu),
-    enginePresent:
-      data.engine_present == null && data.enginePresent == null
-        ? null
-        : Boolean(data.engine_present ?? data.enginePresent),
-    source: String(data.source ?? "heuristic") as ModelMemoryEstimate["source"],
-    status: String(data.status ?? "ok") as ModelMemoryEstimate["status"],
-    warning: (data.warning ?? null) as string | null,
-    notes: Array.isArray(data.notes) ? data.notes.map(String) : [],
   };
 }
 
@@ -1374,31 +1293,6 @@ function toHFModelCard(raw: unknown): HFModelCard {
     compatibilityReason: (data.compatibility_reason ??
       data.compatibilityReason ??
       null) as string | null,
-    vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
-    compatibleBackends: toCompatibleBackends(
-      data.compatible_backends ?? data.compatibleBackends,
-    ),
-  };
-}
-
-function toHFModelDetail(raw: unknown): HFModelDetail {
-  const data = isRecord(raw) ? raw : {};
-  return {
-    ...toHFModelCard(raw),
-    siblings: Array.isArray(data.siblings)
-      ? (data.siblings as Record<string, unknown>[])
-      : [],
-    readmeExcerpt: (data.readme_excerpt ?? data.readmeExcerpt ?? null) as
-      string | null,
-    suggestedBackend: String(
-      data.suggested_backend ?? data.suggestedBackend ?? "vllm",
-    ) as HFModelDetail["suggestedBackend"],
-    estimatedVramGb:
-      data.estimated_vram_gb != null
-        ? Number(data.estimated_vram_gb)
-        : data.estimatedVramGb != null
-          ? Number(data.estimatedVramGb)
-          : null,
     vllmSupport: toHFVLLMSupport(data.vllm_support ?? data.vllmSupport),
     compatibleBackends: toCompatibleBackends(
       data.compatible_backends ?? data.compatibleBackends,
@@ -2265,13 +2159,6 @@ export const api = {
   gpus: {
     list: async () =>
       (await request<unknown[]>("GET", "/ocabra/gpus")).map(toGpuState),
-    get: async (index: number) =>
-      toGpuState(await request<unknown>("GET", `/ocabra/gpus/${index}`)),
-    stats: (index: number, window = "5m") =>
-      request<GPUStatHistory>(
-        "GET",
-        `/ocabra/gpus/${index}/stats${buildQuery({ window })}`,
-      ),
   },
   estimate: {
     // Bloque 20 — DurationEstimator entrypoint. Returns expected duration
@@ -2368,29 +2255,6 @@ export const api = {
         "POST",
         `/ocabra/models/${encodeURIComponent(modelId)}/downsize`,
       ),
-    patch: (modelId: string, patch: ModelPatchRequest) =>
-      request<unknown>(
-        "PATCH",
-        `/ocabra/models/${encodeURIComponent(modelId)}`,
-        patch,
-      ).then(toModelState),
-    estimateMemory: (
-      modelId: string,
-      body: {
-        preferredGpu?: number | null;
-        extraConfig?: ModelPatchRequest["extraConfig"];
-        runProbe?: boolean;
-      },
-    ) =>
-      request<unknown>(
-        "POST",
-        `/ocabra/models/${encodeURIComponent(modelId)}/memory-estimate`,
-        {
-          preferred_gpu: body.preferredGpu ?? null,
-          extra_config: body.extraConfig ?? null,
-          run_probe: Boolean(body.runProbe),
-        },
-      ).then(toModelMemoryEstimate),
     delete: (modelId: string) =>
       request<void>("DELETE", `/ocabra/models/${encodeURIComponent(modelId)}`),
     update: async (modelId: string) =>
@@ -2527,13 +2391,6 @@ export const api = {
           null) as BackendType | null,
       };
     },
-    compatibility: async (modelKey: string): Promise<CompatibleBackend[]> =>
-      toCompatibleBackends(
-        await request<unknown>(
-          "GET",
-          `/ocabra/logical-models/${encodeURIComponent(modelKey)}/compatibility`,
-        ),
-      ),
   },
 
   profiles: {
@@ -2590,14 +2447,6 @@ export const api = {
         }),
       ),
 
-    get: async (profileId: string): Promise<ModelProfile> =>
-      toModelProfile(
-        await request<unknown>(
-          "GET",
-          `/ocabra/profiles/${encodeURIComponent(profileId)}`,
-        ),
-      ),
-
     update: async (
       profileId: string,
       data: ProfileUpdate,
@@ -2634,14 +2483,6 @@ export const api = {
           },
         ),
       ),
-
-    listRuntimePresets: async (profileId: string): Promise<RuntimePreset[]> =>
-      (
-        await request<unknown[]>(
-          "GET",
-          `/ocabra/profiles/${encodeURIComponent(profileId)}/runtime-presets`,
-        )
-      ).map(toRuntimePreset),
 
     resolveRuntimePresets: async (
       profileId: string,
@@ -2953,13 +2794,6 @@ export const api = {
       );
       return raw.map(toHFModelCard);
     },
-    getHFDetail: async (repoId: string): Promise<HFModelDetail> =>
-      toHFModelDetail(
-        await request<unknown>(
-          "GET",
-          `/ocabra/registry/hf/${encodeURIComponent(repoId)}`,
-        ),
-      ),
     getHFVariants: async (repoId: string): Promise<HFModelVariant[]> =>
       (
         await request<unknown[]>(
@@ -3153,16 +2987,6 @@ export const api = {
       }
       return res.json() as Promise<OpenAIFileObject>;
     },
-    listFiles: (purpose?: string) =>
-      request<{ object: string; data: OpenAIFileObject[]; has_more: boolean }>(
-        "GET",
-        `/v1/files${purpose ? `?purpose=${encodeURIComponent(purpose)}` : ""}`,
-      ),
-    deleteFile: (fileId: string) =>
-      request<{ id: string; object: string; deleted: boolean }>(
-        "DELETE",
-        `/v1/files/${encodeURIComponent(fileId)}`,
-      ),
     fileContentUrl: (fileId: string) =>
       `${BASE}/v1/files/${encodeURIComponent(fileId)}/content`,
     create: (payload: {
@@ -3186,11 +3010,6 @@ export const api = {
         has_more: boolean;
       }>("GET", `/v1/batches${query}`);
     },
-    retrieve: (batchId: string) =>
-      request<OpenAIBatchJob>(
-        "GET",
-        `/v1/batches/${encodeURIComponent(batchId)}`,
-      ),
     cancel: (batchId: string) =>
       request<OpenAIBatchJob>(
         "POST",
@@ -3202,15 +3021,6 @@ export const api = {
     list: async (): Promise<import("@/types").BackendModuleState[]> =>
       (await request<unknown[]>("GET", "/ocabra/backends")).map(
         toBackendModuleState,
-      ),
-    get: async (
-      backendType: string,
-    ): Promise<import("@/types").BackendModuleState> =>
-      toBackendModuleState(
-        await request<unknown>(
-          "GET",
-          `/ocabra/backends/${encodeURIComponent(backendType)}`,
-        ),
       ),
     // NOTE: POST /install is modelled as GET here because EventSource only supports GET.
     // The backend exposes the install endpoint as GET so SSE works with a query param.
@@ -3257,13 +3067,6 @@ export const api = {
   services: {
     list: async () =>
       (await request<unknown[]>("GET", "/ocabra/services")).map(toServiceState),
-    get: async (serviceId: string) =>
-      toServiceState(
-        await request<unknown>(
-          "GET",
-          `/ocabra/services/${encodeURIComponent(serviceId)}`,
-        ),
-      ),
     refresh: async (serviceId: string) =>
       toServiceState(
         await request<unknown>(
@@ -3444,15 +3247,6 @@ export const api = {
     me: async (): Promise<AuthUser> =>
       toAuthUser(await request<unknown>("GET", "/ocabra/auth/me")),
 
-    changePassword: (
-      currentPassword: string,
-      newPassword: string,
-    ): Promise<void> =>
-      request<void>("PUT", "/ocabra/auth/password", {
-        current_password: currentPassword,
-        new_password: newPassword,
-      }),
-
     listKeys: async (): Promise<ApiKey[]> =>
       (await request<unknown[]>("GET", "/ocabra/auth/keys")).map(toApiKey),
 
@@ -3489,13 +3283,6 @@ export const api = {
           role: data.role,
           email: data.email ?? null,
         }),
-      ),
-    get: async (id: string): Promise<AdminUser> =>
-      toAdminUser(
-        await request<unknown>(
-          "GET",
-          `/ocabra/users/${encodeURIComponent(id)}`,
-        ),
       ),
     update: async (id: string, data: UpdateUserPayload): Promise<AdminUser> =>
       toAdminUser(
@@ -3582,18 +3369,6 @@ export const api = {
           grants_all_models: data.grantsAllModels ?? false,
         }),
       ),
-    update: async (id: string, data: UpdateGroupPayload): Promise<Group> =>
-      toGroup(
-        await request<unknown>(
-          "PATCH",
-          `/ocabra/groups/${encodeURIComponent(id)}`,
-          {
-            name: data.name,
-            description: data.description,
-            grants_all_models: data.grantsAllModels,
-          },
-        ),
-      ),
     remove: (id: string): Promise<void> =>
       request<void>("DELETE", `/ocabra/groups/${encodeURIComponent(id)}`),
     listModels: async (id: string): Promise<string[]> => {
@@ -3636,34 +3411,6 @@ export const api = {
         "DELETE",
         `/ocabra/groups/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
       ),
-    /**
-     * Returns the IDs of groups that contain the given model.
-     * Fetches all groups and filters client-side using their model lists.
-     */
-    getModelGroups: async (modelId: string): Promise<string[]> => {
-      const groups = await api.groups.list();
-      const results = await Promise.all(
-        groups.map(async (group) => {
-          const modelIds = await api.groups.listModels(group.id);
-          return modelIds.includes(modelId) ? group.id : null;
-        }),
-      );
-      return results.filter((id): id is string => id !== null);
-    },
-    /**
-     * Synchronizes group membership for a model by adding to addGroupIds
-     * and removing from removeGroupIds.
-     */
-    updateModelGroups: async (
-      modelId: string,
-      addGroupIds: string[],
-      removeGroupIds: string[],
-    ): Promise<void> => {
-      await Promise.all([
-        ...addGroupIds.map((gid) => api.groups.addModel(gid, modelId)),
-        ...removeGroupIds.map((gid) => api.groups.removeModel(gid, modelId)),
-      ]);
-    },
   },
 
   federation: {

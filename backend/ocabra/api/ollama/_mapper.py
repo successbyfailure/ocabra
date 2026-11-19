@@ -8,7 +8,6 @@ import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from ocabra.api.openai._deps import engine_suffixed_error
 from ocabra.api.openai._deps import resolve_model as resolve_openai_model
 from ocabra.core.model_ref import build_model_ref, parse_model_ref
 
@@ -163,49 +162,3 @@ async def resolve_model(
         if not user.can_access_model(model_id):
             return model_id, None
     return model_id, mapped_state
-
-
-async def resolve_ollama_profile(
-    model_manager,
-    profile_registry,
-    requested_name: str,
-    user: UserContext | None = None,
-):
-    """Resolve an Ollama model name via profiles, with legacy fallback.
-
-    Tries profile resolution first (via ``resolve_profile``), then falls
-    back to the legacy ``resolve_model`` path for native Ollama models.
-
-    Returns:
-        Tuple of ``(profile | None, model_id, ModelState | None)``.
-    """
-    from ocabra.api.openai._deps import resolve_profile as _resolve_profile
-
-    # An engine-suffixed name (``gemma4:26b-ollama``) is not a public name.
-    # Checked here and not left to ``resolve_profile`` because the ``except``
-    # below swallows its 404 and the legacy fallback would answer with a bare
-    # "not found", losing the two names the caller should switch to.
-    suffixed = getattr(profile_registry, "engine_suffixed_name", None)
-    alternativa = await suffixed(requested_name.strip()) if suffixed is not None else None
-    if alternativa is not None:
-        raise engine_suffixed_error(requested_name.strip(), *alternativa)
-
-    # Try profile resolution first (profile_id might be a slug like "chat")
-    try:
-        profile, state = await _resolve_profile(
-            requested_name,
-            model_manager,
-            profile_registry,
-            user=user,
-        )
-        return profile, state
-    except Exception:
-        pass
-
-    # Fallback: resolve as native Ollama model
-    model_id, state = await resolve_model(model_manager, requested_name, user=user)
-    if state is not None:
-        # Build a minimal "virtual" profile for the legacy path
-        return None, state
-
-    return None, None

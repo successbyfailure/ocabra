@@ -923,9 +923,6 @@ class BackendInstaller:
     # Internals
     # ------------------------------------------------------------------
 
-    def _is_installed(self, backend_type: str) -> bool:
-        return (self._backends_dir / backend_type / METADATA_FILENAME).exists()
-
     def _register(self, backend_type: str, backend: BackendInterface) -> None:
         """Register *backend* with the worker pool, swallowing errors."""
         try:

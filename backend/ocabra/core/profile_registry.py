@@ -641,27 +641,6 @@ class ProfileRegistry:
         self._profiles.pop(profile_id, None)
         logger.info("profile_deleted", profile_id=profile_id)
 
-    async def set_default(
-        self, session: AsyncSession, base_model_id: str, profile_id: str
-    ) -> ModelProfile:
-        """Set a profile as default for its base model, clearing any previous default."""
-        result = await session.execute(
-            select(ModelProfile).where(ModelProfile.profile_id == profile_id)
-        )
-        db_profile = result.scalar_one_or_none()
-        if db_profile is None:
-            raise ValueError(f"Profile '{profile_id}' not found.")
-        if db_profile.base_model_id != base_model_id:
-            raise ValueError(f"Profile '{profile_id}' does not belong to model '{base_model_id}'.")
-
-        await self._clear_default(session, base_model_id)
-        db_profile.is_default = True
-        await session.commit()
-        await session.refresh(db_profile)
-        # Refresh all profiles for this model in cache
-        await self._refresh_model_profiles(session, base_model_id)
-        return db_profile
-
     async def _validate_router_targets(
         self,
         profile_id: str,

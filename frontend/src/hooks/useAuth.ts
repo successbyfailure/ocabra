@@ -1,7 +1,7 @@
 import { useEffect } from "react"
 import { api } from "@/api/client"
 import { useAuthStore } from "@/stores/authStore"
-import type { AuthUser, UserRole } from "@/types"
+import type { AuthUser } from "@/types"
 
 /**
  * Bootstraps auth state by calling GET /ocabra/auth/me on mount.
@@ -34,14 +34,6 @@ export function useAuth(): void {
 /** Returns the current authenticated user or null. */
 export function useCurrentUser(): AuthUser | null {
   return useAuthStore((s) => s.user)
-}
-
-/**
- * Returns true if the current user has at least `minRole`.
- * Returns false if the user is not authenticated.
- */
-export function useRequireRole(minRole: UserRole): boolean {
-  return useAuthStore((s) => s.hasRole(minRole))
 }
 
 /** Returns true if the current user is a system_admin. */

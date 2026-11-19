@@ -1147,28 +1147,6 @@ class ServiceManager:
             error=err or f"exit_code={code}",
         )
 
-    async def _start_container(self, state: ServiceState) -> None:
-        """Start a container, trying docker start first, then docker compose up."""
-        # Try plain `docker start` first (container already exists)
-        if state.docker_container_name:
-            code, _out, _err = await self._docker(
-                "container.action", container=state.docker_container_name, action="start"
-            )
-            if code == 0:
-                logger.info("container_started", container=state.docker_container_name)
-                return
-
-        # Fallback: `docker compose up -d` (builds image if needed)
-        if state.compose_service_name:
-            await self._compose_up(state)
-            return
-
-        logger.warning(
-            "container_start_failed",
-            service_id=state.service_id,
-            error="no container or compose service configured",
-        )
-
     async def _compose_up(self, state: ServiceState) -> None:
         """Run `docker compose up -d <service>` (builds if image missing)."""
         code, _out, err = await self._docker(

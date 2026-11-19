@@ -74,11 +74,6 @@ async def test_una_clave_inexistente_no_falla(fake_redis):
     assert await redis_client.delete_keys_with_prefix("model:state:no/existe") == 0
 
 
-async def test_delete_key_borra_una_sola(fake_redis):
-    await redis_client.delete_key("model:state:llama_cpp/gemma4-12b")
-    assert "model:state:llama_cpp/gemma4-12b" not in fake_redis.claves
-
-
 async def test_delete_model_limpia_redis(monkeypatch):
     """El gestor tiene que invocar la limpieza al eliminar un modelo."""
     from ocabra.core import model_manager as mm_mod

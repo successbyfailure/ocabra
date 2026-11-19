@@ -185,7 +185,7 @@ describe("api client mappings", () => {
   it("maps runtime presets and their MAX context mode", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
-        JSON.stringify([
+        JSON.stringify([{ profile_id: "gemma4:12b", runtime_presets: [
           {
             id: "preset-1",
             profile_id: "gemma4:12b",
@@ -202,12 +202,13 @@ describe("api client mappings", () => {
             is_default: false,
             priority: 40,
           },
-        ]),
+        ] }]),
         { status: 200, headers: { "Content-Type": "application/json" } },
       ),
     )
 
-    const presets = await api.profiles.listRuntimePresets("gemma4:12b")
+    const [profile] = await api.profiles.listAll()
+    const presets = profile.runtimePresets
 
     expect(presets[0]).toMatchObject({
       presetKey: "max",

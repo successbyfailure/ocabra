@@ -360,9 +360,6 @@ class TunnelConnection:
     def active_streams(self) -> int:
         return len(self._client_streams) + len(self._served)
 
-    async def wait_closed(self) -> None:
-        await self._closed.wait()
-
     async def send_frame(self, frame_type: int, stream_id: int, payload: bytes = b"") -> None:
         if self.closed:
             raise TunnelClosed("tunnel closed")

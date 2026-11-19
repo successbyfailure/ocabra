@@ -137,31 +137,6 @@ async def test_resolve_profile_no_toca_los_nombres_propios(registro):
     assert "if you need that specific engine" not in str(getattr(exc.value, "detail", ""))
 
 
-# ── La puerta de los endpoints Ollama ────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_resolve_ollama_profile_rechaza_el_nombre_con_motor(registro):
-    from ocabra.api.ollama._mapper import resolve_ollama_profile
-
-    with pytest.raises(HTTPException) as exc:
-        await resolve_ollama_profile(object(), registro, "qwen3-coder:30b-ollama")
-    assert exc.value.status_code == 404
-    mensaje = str(exc.value.detail)
-    assert "qwen3-coder:30b" in mensaje
-    assert "ollama/qwen3-coder:30b" in mensaje
-
-
-@pytest.mark.asyncio
-async def test_en_ollama_el_404_no_se_lo_come_el_fallback(registro):
-    """El ``except`` de ``resolve_ollama_profile`` traga el 404 de
-    ``resolve_profile``; por eso la puerta va antes del ``try``."""
-    from ocabra.api.ollama._mapper import resolve_ollama_profile
-
-    with pytest.raises(HTTPException):
-        await resolve_ollama_profile(object(), registro, "  gemma4:26b-ollama  ")
-
-
 # ── Compatibilidad con registros que no implementan la puerta ─
 
 

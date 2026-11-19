@@ -17,7 +17,8 @@ Design and decisions: docs/tasks/model-backends-unification-plan.md.
 
 Frozen semantics: migration 0034 depends on this module. Changing what
 build_plan decides changes what that migration does on a database that has not
-run it yet — treat edits here like edits to a migration.
+run it yet — treat edits here like edits to a migration. Live code keeps its
+own copy of the backend priority (``ocabra.core.model_deployments``).
 """
 
 from __future__ import annotations

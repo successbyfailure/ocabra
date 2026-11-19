@@ -442,27 +442,6 @@ async def stats_by_group(
 
 
 @router.get(
-    "/stats/by-model",
-    summary="Stats aggregated by model",
-    description="Return request totals, error counts, latency and token usage grouped by model_id.",
-)
-async def stats_by_model(
-    from_dt: datetime | None = Query(None, alias="from"),
-    to_dt: datetime | None = Query(None, alias="to"),
-    _user: UserContext = Depends(require_role("model_manager")),
-) -> dict:
-    """Return request statistics grouped by model.
-
-    Returns:
-        { byModel: [{ modelId, backendTypes, totalRequests, totalErrors,
-                      avgDurationMs, totalInputTokens, totalOutputTokens,
-                      totalTokens, totalEnergyWh, estimatedCostUsd }] }
-    """
-    from ocabra.stats.aggregator import get_stats_by_model
-    return await get_stats_by_model(from_dt, to_dt)
-
-
-@router.get(
     "/stats/batch-vs-interactive",
     summary="Batches API vs. direct request volume",
     description="Request totals, errors, tokens and cost split between Batches "

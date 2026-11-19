@@ -107,57 +107,6 @@ class TestModalityDeclarations:
 
 
 # ---------------------------------------------------------------------------
-# Tests: WorkerPool modality helpers
-# ---------------------------------------------------------------------------
-
-
-class TestWorkerPoolModalities:
-    def _make_pool(self):
-        from ocabra.backends._mock import MockBackend
-        from ocabra.backends.diffusers_backend import DiffusersBackend
-        from ocabra.backends.vllm_backend import VLLMBackend
-        from ocabra.backends.whisper_backend import WhisperBackend
-        from ocabra.core.worker_pool import WorkerPool
-
-        pool = WorkerPool()
-        pool.register_backend("vllm", VLLMBackend())
-        pool.register_backend("whisper", WhisperBackend())
-        pool.register_backend("diffusers", DiffusersBackend())
-        pool.register_backend("mock", MockBackend())
-        return pool
-
-    def test_get_backends_for_modality_text(self):
-        pool = self._make_pool()
-        text_backends = pool.get_backends_for_modality(ModalityType.TEXT_GENERATION)
-        assert "vllm" in text_backends
-        assert "mock" in text_backends
-        assert "whisper" not in text_backends
-        assert "diffusers" not in text_backends
-
-    def test_get_backends_for_modality_image(self):
-        pool = self._make_pool()
-        image_backends = pool.get_backends_for_modality(ModalityType.IMAGE_GENERATION)
-        assert image_backends == ["diffusers"]
-
-    def test_get_backends_for_modality_excludes_disabled(self):
-        pool = self._make_pool()
-        pool.register_disabled_backend("vllm", "no GPU available")
-        text_backends = pool.get_backends_for_modality(ModalityType.TEXT_GENERATION)
-        assert "vllm" not in text_backends
-        assert "mock" in text_backends
-
-    def test_supports_modality_true(self):
-        pool = self._make_pool()
-        assert pool.supports_modality("vllm", ModalityType.TEXT_GENERATION) is True
-        assert pool.supports_modality("vllm", ModalityType.EMBEDDINGS) is True
-
-    def test_supports_modality_false(self):
-        pool = self._make_pool()
-        assert pool.supports_modality("whisper", ModalityType.TEXT_GENERATION) is False
-        assert pool.supports_modality("nonexistent", ModalityType.TEXT_GENERATION) is False
-
-
-# ---------------------------------------------------------------------------
 # Tests: unsupported modality methods raise NotImplementedError
 # ---------------------------------------------------------------------------
 

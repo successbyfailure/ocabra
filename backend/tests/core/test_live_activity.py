@@ -1024,6 +1024,38 @@ async def test_ram_by_model_sums_the_process_tree_and_caches(monkeypatch):
     assert calls == [[2555]]  # la segunda vez, de la caché
 
 
+@pytest.mark.asyncio
+async def test_ram_cache_drops_models_that_are_gone(monkeypatch):
+    """MUE-10: la caché no crece con cada worker que desaparece."""
+    la._ram_cache.clear()
+    la._ram_cache["viejo/modelo"] = (0.0, 1234)
+    monkeypatch.setattr(la, "_tree_rss_mb", lambda pids: 100)
+    await la.ram_by_model({"nuevo/modelo": [1]})
+    assert "viejo/modelo" not in la._ram_cache
+    assert "nuevo/modelo" in la._ram_cache
+
+
+def test_process_tree_cache_drops_dead_pids():
+    la._proc_tree_cache.clear()
+    la._proc_tree_cache[999_999] = (0.0, {999_999})
+    la._process_tree(1)
+    assert 999_999 not in la._proc_tree_cache
+
+
+@pytest.mark.asyncio
+async def test_model_rates_cache_drops_stale_models(monkeypatch):
+    la._model_rates_cache.clear()
+    la._model_rates_cache["viejo/modelo"] = (0.0, {})
+
+    async def fake_measured(keys):
+        return {}
+
+    monkeypatch.setattr(la, "_measured_model_rates", fake_measured)
+    await la.model_rates({"nuevo/modelo"}, SimpleNamespace())
+    assert "viejo/modelo" not in la._model_rates_cache
+    assert "nuevo/modelo" in la._model_rates_cache
+
+
 def test_tree_rss_counts_children_once(monkeypatch):
     monkeypatch.setattr(la, "_process_tree", lambda pid: {pid, pid + 1})
 

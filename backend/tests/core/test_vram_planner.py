@@ -125,14 +125,6 @@ def test_ollama_translator_matches_measured_footprint():
     assert abs(predicted_32k - measured_32k) / measured_32k < 0.03  # within 3%
 
 
-def test_ollama_translator_multiplies_by_parallel():
-    one = vp.plan_ollama_vram_mb(QWEN3_4B, 2400, 8192, num_parallel=1)
-    two = vp.plan_ollama_vram_mb(QWEN3_4B, 2400, 8192, num_parallel=2)
-    # the KV portion doubles; weights+overhead stays put
-    kv = vp.kv_vram_mb(QWEN3_4B, 8192)
-    assert abs((two - one) - kv) < 2
-
-
 def test_max_context_inverse_of_estimate():
     weights, free = 2400, 22000
     # Disable the normal 10% safety margin when testing the mathematical
@@ -435,10 +427,6 @@ def test_plan_use_case_lets_3x32k_fit_on_the_3090_alone():
     )
     assert plan["effective_context"] == 32768
     assert plan["warnings"] == []
-
-
-def test_vllm_footprint_is_fixed_fraction():
-    assert vp.vllm_footprint_mb(24576, 0.85) == int(24576 * 0.85)
 
 
 def test_vllm_max_model_len_shrinks_with_concurrency():

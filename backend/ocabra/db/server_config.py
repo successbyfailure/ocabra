@@ -22,13 +22,10 @@ from ocabra.database import Base
 _ENV_ONLY_FIELDS: frozenset[str] = frozenset({
     "models_dir",
     "hf_cache_dir",
-    "ai_models_root",
     "hf_token",
     "ollama_base_url",
     "database_url",
     "redis_url",
-    "api_host",
-    "api_port",
     "app_version",
     "gateway_service_token",
     "ocabra_secrets_key",

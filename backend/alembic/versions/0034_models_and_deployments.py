@@ -17,7 +17,7 @@ Schema:
 - The FKs from ``model_profiles.base_model_id`` and ``agents.base_model_id`` to
   ``model_configs.model_id`` gain ON UPDATE CASCADE so deployments can be renamed.
 
-Data: :func:`ocabra.core.model_unification.apply_plan` on the plan computed from
+Data: :func:`ocabra.db.migration_support.model_unification.apply_plan` on the plan computed from
 this very database (preview it with ``backend/scripts/model_unification_plan.py``).
 It refuses to run on blocking anomalies (name collisions...).
 
@@ -71,7 +71,7 @@ def upgrade() -> None:
     _recreate_fk("model_profiles", "model_profiles_base_model_id_fkey", "base_model_id", on_update="CASCADE")
     _recreate_fk("agents", "agents_base_model_id_fkey", "base_model_id", on_update="CASCADE")
 
-    from ocabra.core.model_unification import apply_plan, build_plan, snapshot
+    from ocabra.db.migration_support.model_unification import apply_plan, build_plan, snapshot
 
     bind = op.get_bind()
     apply_plan(bind, build_plan(snapshot(bind)))

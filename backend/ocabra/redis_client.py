@@ -78,11 +78,6 @@ async def get_key(key: str) -> Any | None:
     return json.loads(value) if value else None
 
 
-async def delete_key(key: str) -> None:
-    """Borra una clave de Redis. No falla si no existe."""
-    await get_redis().delete(key)
-
-
 async def delete_keys_with_prefix(prefix: str) -> int:
     """Borra ``prefix`` y todas las claves ``prefix::*``, devolviendo cuantas.
 

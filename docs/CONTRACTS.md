@@ -1655,6 +1655,4 @@ ENERGY_COST_EUR_KWH=0.15        # Para estimación de coste
 
 # Servidor
 LOG_LEVEL=INFO
-API_HOST=0.0.0.0
-API_PORT=8000
 ```

@@ -37,10 +37,6 @@ function toPositiveNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null
 }
 
-export function getWritableExtraConfig(model: ModelState): BackendExtraConfig {
-  return isRecord(model.extraConfig) ? ({ ...model.extraConfig } as BackendExtraConfig) : {}
-}
-
 export function getVllmConfig(model: ModelState): VLLMConfig | null {
   if (model.backendType !== "vllm") return null
   return getConfigSection<VLLMConfig>(model, "vllm")
@@ -70,28 +66,6 @@ export function getLlamaCppConfig(model: ModelState): LlamaCppConfig | null {
     )
   }
   return config
-}
-
-export interface WhisperCppConfig {
-  threads?: number | null
-  diarizationModelId?: string | null
-  [key: string]: unknown
-}
-
-/** whisper.cpp section (`extra_config.whisper_cpp`), camelCase view. */
-export function getWhisperCppConfig(model: ModelState): WhisperCppConfig | null {
-  if (model.backendType !== "whisper_cpp") return null
-  const extra = model.extraConfig
-  if (!isRecord(extra) || !isRecord(extra.whisper_cpp)) return null
-  return toCamelView(extra.whisper_cpp) as WhisperCppConfig
-}
-
-/** Default reasoning effort stored at the top level of extra_config. */
-export function getDefaultReasoningEffort(model: ModelState | null | undefined): string {
-  const extra = model?.extraConfig
-  if (!isRecord(extra)) return ""
-  const value = extra.default_reasoning_effort ?? extra.defaultReasoningEffort
-  return typeof value === "string" ? value : ""
 }
 
 export function getBitNetConfig(model: ModelState): BitNetConfig | null {
@@ -164,15 +138,6 @@ export function getModelContextSummary(model: ModelState): ModelContextSummary {
     maxInputTokens: configuredContext,
     maxOutputTokens: configuredContext,
   }
-}
-
-export function formatTokenCount(value: number | null): string {
-  if (!value || value <= 0) return "-"
-  if (value >= 1000) {
-    const compact = value / 1000
-    return Number.isInteger(compact) ? `${compact}k` : `${compact.toFixed(1)}k`
-  }
-  return String(value)
 }
 
 export type ModelCategory = "chat" | "embeddings" | "image" | "tts" | "stt" | "music" | "video" | "other"

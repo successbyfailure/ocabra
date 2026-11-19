@@ -176,34 +176,3 @@ def test_user_detail_accepts_uuid_username_and_email():
         assert resp.status_code == 200, f"failed for {identifier}: {resp.text}"
         # First positional arg is the identifier as-is.
         assert mock_get.await_args.args[0] == identifier
-
-
-def test_by_model_endpoint_returns_payload():
-    app = _make_app()
-    client = TestClient(app)
-
-    fake_payload = {
-        "byModel": [
-            {
-                "modelId": "llama3:8b",
-                "backendTypes": ["ollama"],
-                "totalRequests": 42,
-                "totalErrors": 1,
-                "avgDurationMs": 800,
-                "totalInputTokens": 1000,
-                "totalOutputTokens": 500,
-                "totalTokens": 1500,
-                "totalEnergyWh": 0.12,
-                "estimatedCostUsd": 0.0034,
-            },
-        ],
-    }
-
-    with patch(
-        "ocabra.stats.aggregator.get_stats_by_model",
-        new=AsyncMock(return_value=fake_payload),
-    ):
-        resp = client.get("/ocabra/stats/by-model")
-
-    assert resp.status_code == 200
-    assert resp.json() == fake_payload

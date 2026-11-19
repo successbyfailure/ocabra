@@ -43,34 +43,6 @@ class RuntimeSelection:
     reused_loaded_runtime: bool
 
 
-def resolve_max_context(
-    *,
-    model_max: int | None,
-    backend_max: int | None,
-    hardware_max: int | None,
-    admin_cap: int | None = None,
-) -> int:
-    """Return the effective maximum from every known positive capacity limit.
-
-    Unknown limits are ``None``. At least one authoritative positive bound is
-    required: advertising an unbounded context would be unsafe.
-    """
-
-    named_limits = {
-        "model": model_max,
-        "backend": backend_max,
-        "hardware": hardware_max,
-        "admin": admin_cap,
-    }
-    invalid = [name for name, value in named_limits.items() if value is not None and value <= 0]
-    if invalid:
-        raise ValueError(f"context limits must be positive: {', '.join(invalid)}")
-    limits = [value for value in named_limits.values() if value is not None]
-    if not limits:
-        raise ValueError("at least one context limit is required")
-    return min(limits)
-
-
 def build_runtime_key(
     *,
     model_id: str,
@@ -180,12 +152,3 @@ def select_runtime_preset(
             chosen.runtime_key is not None and chosen.runtime_key in loaded
         ),
     )
-
-
-def advertised_effective_max(presets: Iterable[ResolvedRuntimePreset]) -> int:
-    """Highest context served by an enabled preset for public model metadata."""
-
-    contexts = [preset.effective_context for preset in presets if preset.enabled]
-    if not contexts:
-        raise ContextCapacityError("profile has no enabled runtime presets")
-    return max(contexts)

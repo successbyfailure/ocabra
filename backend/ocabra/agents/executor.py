@@ -343,17 +343,6 @@ def _build_subagent_tool(agent: AgentSpec, child_slug: str) -> dict[str, Any]:
     }
 
 
-def _subagent_args_to_messages(args: dict[str, Any]) -> list[dict[str, Any]]:
-    """Translate a subagent tool payload into a minimal chat history."""
-    task = str(args.get("task") or "").strip()
-    context = str(args.get("context") or "").strip()
-    if context:
-        content = f"{task}\n\nContext:\n{context}"
-    else:
-        content = task
-    return [{"role": "user", "content": content}]
-
-
 def _last_message_role(messages: list[dict[str, Any]]) -> str | None:
     if not messages:
         return None

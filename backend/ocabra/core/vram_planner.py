@@ -735,27 +735,6 @@ def _arch_from_gguf_cached(path: str, _mtime_ns: int, _size: int) -> ModelArch |
 # ---------------------------------------------------------------------------
 
 
-def plan_ollama_vram_mb(
-    arch: ModelArch,
-    weights_mb: float,
-    num_ctx: int,
-    num_parallel: int = 1,
-    *,
-    kv_dtype_bytes: float = 2.0,
-    overhead_mb: float = DEFAULT_OVERHEAD_MB,
-) -> int:
-    """Ollama reserves KV for ``num_ctx`` per slot × ``num_parallel`` slots up front."""
-    kv_tokens = max(1, num_ctx) * max(1, num_parallel)
-    return estimate_total_vram_mb(
-        weights_mb,
-        arch,
-        kv_tokens,
-        kv_dtype_bytes=kv_dtype_bytes,
-        overhead_mb=overhead_mb,
-        slots=max(1, num_parallel),
-    )
-
-
 # Share of a MoE layer's weights that are experts (``--n-cpu-moe`` moves only
 # those to RAM; attention, norms and the shared expert stay on GPU). Only the
 # fallback when the GGUF tensor table is not available
@@ -901,12 +880,6 @@ def plan_llama_cpp_vram_mb(
         slots=max(1, parallel_slots),
         rs_rollback_snapshots=rs_rollback_snapshots,
     )
-
-
-def vllm_footprint_mb(total_vram_mb: float, gpu_memory_utilization: float = 0.85) -> int:
-    """vLLM grabs this fraction of the GPU up front regardless of context — the KV
-    pool is carved from it, so the footprint for placement is essentially fixed."""
-    return int(total_vram_mb * gpu_memory_utilization)
 
 
 def vllm_max_model_len(

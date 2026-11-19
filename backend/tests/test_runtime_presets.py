@@ -5,9 +5,7 @@ import pytest
 from ocabra.core.runtime_presets import (
     ContextCapacityError,
     ResolvedRuntimePreset,
-    advertised_effective_max,
     build_runtime_key,
-    resolve_max_context,
     select_runtime_preset,
 )
 
@@ -29,23 +27,6 @@ def _preset(
         is_default=default,
         enabled=enabled,
     )
-
-
-def test_resolve_max_context_uses_smallest_effective_limit() -> None:
-    assert resolve_max_context(
-        model_max=262_144,
-        backend_max=300_000,
-        hardware_max=270_000,
-        admin_cap=200_000,
-    ) == 200_000
-
-
-def test_resolve_max_context_ignores_unknown_limits() -> None:
-    assert resolve_max_context(
-        model_max=262_144,
-        backend_max=None,
-        hardware_max=180_000,
-    ) == 180_000
 
 
 def test_runtime_key_is_canonical_and_excludes_preset_name() -> None:
@@ -130,11 +111,10 @@ def test_prefer_default_can_opt_out_of_loaded_larger_runtime() -> None:
     assert result.reused_loaded_runtime is False
 
 
-def test_disabled_max_is_not_advertised_or_selected() -> None:
+def test_disabled_max_is_not_selected() -> None:
     presets = [
         _preset("64k", 65_536, default=True),
         _preset("max", 262_144, enabled=False),
     ]
-    assert advertised_effective_max(presets) == 65_536
     with pytest.raises(ContextCapacityError):
         select_runtime_preset(presets, required_tokens=70_000)

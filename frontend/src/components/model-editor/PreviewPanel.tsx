@@ -1,12 +1,8 @@
 import { useState } from "react"
 import { ChevronDown, ChevronRight, Loader2, RefreshCw, TerminalSquare } from "lucide-react"
-import { gpuColor } from "@/components/dashboard/GpuBadge"
-import { shortGpuName } from "@/components/dashboard/gpuNames"
 import { fmtContext } from "@/components/dashboard/format"
-import { cn } from "@/lib/cn"
 import type { GPUState } from "@/types"
 import { formatValue } from "./draft"
-import type { PreviewGpu } from "./types"
 import type { LadderRung } from "./usePresetLadder"
 import { GpuBadge } from "@/components/dashboard/GpuBadge"
 import type { ModelEditorState } from "./useModelEditor"
@@ -28,62 +24,6 @@ export const PART_META: Record<string, { label: string; color: string }> = {
 export function fmtMb(mb: number | null | undefined): string {
   if (mb == null) return "—"
   return mb >= 1024 ? `${(mb / 1024).toFixed(mb >= 10240 ? 0 : 1)} GB` : `${Math.round(mb)} MB`
-}
-
-/** Barra de una GPU: lo que ocupa el resto, la huella prevista de este modelo
- *  por partes y el hueco libre. */
-export function GpuMemoryBar({
-  gpu,
-  share,
-  ownLiveMb,
-  compact,
-}: {
-  gpu: GPUState
-  share: PreviewGpu | undefined
-  ownLiveMb: number
-  compact?: boolean
-}) {
-  const total = Math.max(1, gpu.totalVramMb)
-  const others = Math.max(0, gpu.usedVramMb - ownLiveMb)
-  const mine = share?.mb ?? 0
-  const room = total - others
-  const fits = mine <= room
-  const fitsAlone = mine <= total
-  const pct = (mb: number) => `${Math.min(100, (mb / total) * 100)}%`
-  const color = gpuColor(gpu.index)
-  return (
-    <div className="space-y-1" data-gpu-bar={gpu.index}>
-      <div className="flex items-center justify-between gap-2 text-[11px]">
-        <span className="flex items-center gap-1.5 font-medium" style={{ color }}>
-          <span className="h-2 w-2 rounded-full" style={{ background: color }} />#{gpu.index} {shortGpuName(gpu.name)}
-        </span>
-        <span className="tabular-nums text-muted-foreground">
-          {share ? (
-            <>
-              <span className={fits ? "text-emerald-300" : fitsAlone ? "text-amber-300" : "text-red-300"}>{fmtMb(mine)}</span> / {fmtMb(room)} libres
-            </>
-          ) : (
-            <>sin usar · {fmtMb(room)} libres</>
-          )}
-        </span>
-      </div>
-      <div className={cn("relative flex overflow-hidden rounded-md bg-muted/50", compact ? "h-2.5" : "h-4")}>
-        <div className="h-full bg-slate-600/70" style={{ width: pct(others) }} title={`Otros: ${fmtMb(others)}`} />
-        {share &&
-          Object.entries(Object.keys(share.breakdown).length ? share.breakdown : { model: share.mb }).map(([part, mb]) => (
-            <div
-              key={part}
-              className="h-full border-l border-black/20"
-              style={{ width: pct(mb), background: PART_META[part]?.color ?? "#a78bfa" }}
-              title={`${PART_META[part]?.label ?? part}: ${fmtMb(mb)}`}
-            />
-          ))}
-        {share && !fits && (
-          <div className="absolute inset-y-0 right-0 w-1 bg-red-500" title="No cabe con lo que hay cargado" />
-        )}
-      </div>
-    </div>
-  )
 }
 
 export function PreviewPanel({

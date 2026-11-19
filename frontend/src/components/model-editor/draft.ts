@@ -1,12 +1,6 @@
 import type { EvictionSchedule } from "@/types"
 import type { DeploymentDraft, DraftChange, Json, JsonObject, RawModel, SchemaField } from "./types"
 
-/** Sección del extra_config en la que lee cada backend (llamacpp_mks comparte
- *  la de llama.cpp). Debe coincidir con config_section_for del backend. */
-export function sectionFor(backend: string): string {
-  return backend === "llama_cpp" || backend === "llamacpp_mks" ? "llama_cpp" : backend
-}
-
 export function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
@@ -180,13 +174,4 @@ export function formatValue(value: Json | undefined): string {
   if (Array.isArray(value)) return value.length ? value.map((v) => formatValue(v)).join(", ") : "[]"
   if (isObject(value)) return JSON.stringify(value)
   return String(value)
-}
-
-/** ¿Se cumplen las dependencias de un campo (``requires``) en el borrador? */
-export function requirementsMet(field: SchemaField, extra: JsonObject): boolean {
-  if (!field.requires) return true
-  return Object.entries(field.requires).every(([key, expected]) => {
-    const value = getPath(extra, key.split("."))
-    return deepEqual(value, expected)
-  })
 }

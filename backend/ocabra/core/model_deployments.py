@@ -37,6 +37,13 @@ logger = structlog.get_logger(__name__)
 VALIDATED_POLICY_KEYS = ("validated_vram_mb", "validated_context_tokens")
 VALIDATED_BY_BACKEND_KEY = "validated_by_backend"
 
+# Lower = preferred as the default backend of a model when the current default
+# deployment is removed. Ollama stays secondary on purpose (decision
+# 2026-11-07). Migration 0034 has its own frozen copy in
+# ``ocabra.db.migration_support.model_unification``.
+BACKEND_PRIORITY = {"llamacpp_mks": 0, "llama_cpp": 1, "ollama": 99}
+DEFAULT_PRIORITY = 10
+
 
 class DeploymentError(ValueError):
     """The requested change is not possible (unknown model/backend, ...)."""
@@ -238,8 +245,6 @@ async def remove_deployment(
     presets) would go with it, since profiles cascade with their deployment.
     Removing the last deployment removes the model.
     """
-    from ocabra.core.model_unification import BACKEND_PRIORITY, DEFAULT_PRIORITY
-
     async with database.AsyncSessionLocal() as session:
         model = await session.get(LogicalModel, model_key)
         if model is None:

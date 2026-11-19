@@ -482,30 +482,6 @@ class TrtllmCompileManager:
         else:
             raise ValueError(f"Unknown build phase: {phase}")
 
-    def _is_awq_model(self, state: CompileJobState) -> bool:
-        """Check if the source model is AWQ-quantized by reading its config.json."""
-        import json as _json
-        from pathlib import Path as _Path
-        # Use container-side path (where the API runs)
-        models_dir = settings.models_dir or (
-            settings.tensorrt_llm_engines_dir.rsplit("/tensorrt_llm", 1)[0]
-            if settings.tensorrt_llm_engines_dir and "/tensorrt_llm" in settings.tensorrt_llm_engines_dir
-            else "/data/models"
-        )
-        raw = state.source_model
-        parts = raw.split("/", 1)
-        if parts[0] in {"vllm", "tensorrt_llm", "llama_cpp", "llamacpp_mks", "sglang"}:
-            raw = parts[1]
-        hf_dir_name = raw.replace("/", "--")
-        cfg_path = _Path(models_dir) / "huggingface" / hf_dir_name / "config.json"
-        try:
-            cfg = _json.loads(cfg_path.read_text())
-            qcfg = cfg.get("quantization_config") or {}
-            qm = str(qcfg.get("quant_type") or qcfg.get("quant_method") or "").lower()
-            return "awq" in qm
-        except Exception:
-            return False
-
     def _resolve_hf_tokenizer_path(self, source_model: str) -> str | None:
         """Derive the HuggingFace model directory from source_model (used as tokenizer)."""
         raw = source_model

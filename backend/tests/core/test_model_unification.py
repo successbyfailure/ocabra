@@ -1,9 +1,9 @@
-"""Tests for the model/backends unification planner (ocabra.core.model_unification)."""
+"""Tests for the model/backends unification planner (ocabra.db.migration_support.model_unification)."""
 
 from __future__ import annotations
 
 from ocabra.core import artifacts
-from ocabra.core import model_unification as plan_mod
+from ocabra.db.migration_support import model_unification as plan_mod
 
 BLOBS = "/data/ollama_models/blobs"
 

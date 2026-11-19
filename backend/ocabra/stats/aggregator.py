@@ -772,52 +772,6 @@ async def get_stats_by_group(
     return {"byGroup": summaries}
 
 
-async def get_stats_by_model(
-    from_dt: datetime | None = None,
-    to_dt: datetime | None = None,
-) -> dict:
-    """Return request stats aggregated by model_id."""
-    from_dt, to_dt = _normalize_window(from_dt, to_dt)
-
-    async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
-        )
-        result = await session.execute(q)
-        rows = result.scalars().all()
-
-    by_model: dict = defaultdict(list)
-    for row in rows:
-        by_model[row.model_id].append(row)
-
-    summaries = []
-    for model_id, mrows in sorted(by_model.items(), key=lambda x: -len(x[1])):
-        n = len(mrows)
-        durations = [max(0, int(r.duration_ms or 0)) for r in mrows]
-        errors = sum(
-            1 for r in mrows if r.error or (r.status_code is not None and r.status_code >= 400)
-        )
-        backends = sorted({r.backend_type for r in mrows if r.backend_type})
-        total_input = sum(max(0, int(r.input_tokens or 0)) for r in mrows)
-        total_output = sum(max(0, int(r.output_tokens or 0)) for r in mrows)
-        summaries.append(
-            {
-                "modelId": model_id,
-                "backendTypes": backends,
-                "totalRequests": n,
-                "totalErrors": errors,
-                "avgDurationMs": int(sum(durations) / n) if n else 0,
-                "totalInputTokens": total_input,
-                "totalOutputTokens": total_output,
-                "totalTokens": total_input + total_output,
-                "totalEnergyWh": round(sum(r.energy_wh or 0 for r in mrows), 2),
-                "estimatedCostUsd": round(estimate_cost_for_rows(mrows), 4),
-            }
-        )
-    return {"byModel": summaries}
-
-
 async def get_batch_vs_interactive_stats(
     from_dt: datetime | None = None,
     to_dt: datetime | None = None,

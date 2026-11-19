@@ -10,7 +10,7 @@ Usage (inside the api container, where /data and the DB are reachable)::
     docker compose exec -T api python - < backend/scripts/model_unification_plan.py
     docker compose exec -T api python - --json < backend/scripts/model_unification_plan.py
 
-Logic lives in ``ocabra.core.model_unification``; see
+Logic lives in ``ocabra.db.migration_support.model_unification``; see
 docs/tasks/model-backends-unification-plan.md.
 """
 
@@ -27,7 +27,7 @@ async def _plan() -> dict:
     from sqlalchemy.ext.asyncio import create_async_engine
 
     from ocabra.config import settings
-    from ocabra.core.model_unification import build_plan, snapshot
+    from ocabra.db.migration_support.model_unification import build_plan, snapshot
 
     engine = create_async_engine(settings.database_url)
     try:
@@ -52,7 +52,7 @@ def main() -> None:
     if args.json:
         json.dump(plan, sys.stdout, indent=2, ensure_ascii=False, default=str)
     else:
-        from ocabra.core.model_unification import render
+        from ocabra.db.migration_support.model_unification import render
 
         print(render(plan))
 
