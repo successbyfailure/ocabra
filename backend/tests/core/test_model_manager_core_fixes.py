@@ -464,3 +464,34 @@ async def test_pin_autoload_does_not_unload_error_models(monkeypatch):
     await mm._autoload_pinned()
     await asyncio.sleep(0)
     unload.assert_not_awaited()
+
+
+def test_releasing_the_same_request_twice_does_not_take_another_slot():
+    """REF-08 follow-up: end_request with a known id that was already released
+    decremented the counter again, freeing a slot that belonged to another
+    request."""
+    from ocabra.core.model_manager import ModelManager
+    from ocabra.core.worker_pool import WorkerPool
+
+    mm = ModelManager(WorkerPool())
+    first = mm.begin_request("m")
+    mm.begin_request("m")
+    mm.end_request("m", first)
+    mm.end_request("m", first)
+    assert mm._in_flight_count("m") == 1
+
+
+def test_annotate_request_attributes_an_anonymously_admitted_upload():
+    """A browser-session upload is admitted without a user (admission only
+    reads API keys); the handler then knows who it is."""
+    from ocabra.api._deps_auth import UserContext
+    from ocabra.core.model_manager import ModelManager
+    from ocabra.core.worker_pool import WorkerPool
+
+    mm = ModelManager(WorkerPool())
+    rid = mm.begin_request("m")
+    mm.annotate_request(rid, UserContext(user_id="u1", username="javi", role="user"))
+    assert mm._active_requests[rid].username == "javi"
+    # An owner already known is not overwritten.
+    mm.annotate_request(rid, UserContext(user_id="u2", username="other", role="user"))
+    assert mm._active_requests[rid].username == "javi"

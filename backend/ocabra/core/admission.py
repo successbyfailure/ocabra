@@ -961,6 +961,9 @@ class EndpointInflight:
             if isinstance(current, str) and current and current != self._worker_key:
                 self._mm.rebind_request(admitted, current, self._worker_key)
                 state.inflight_model_id = self._worker_key
+            annotate = getattr(self._mm, "annotate_request", None)
+            if self._user is not None and callable(annotate):
+                annotate(admitted, self._user)
             return admitted
         self._own = self._mm.begin_request(self._worker_key, user=self._user)
         return self._own

@@ -16,6 +16,45 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.117.0 — 2026-11-19
+
+### Retirado
+
+- **Acción** — Se elimina la integración con **LiteLLM**: desaparece
+  `POST /ocabra/config/litellm/sync` y los campos `litellm*` de
+  `GET /ocabra/config`. `PATCH /ocabra/config` sigue aceptando esas claves y las
+  ignora. Las variables `LITELLM_*` ya no hacen nada.
+- **Acción** — Se elimina la integración con **Langfuse** (trazas). Las
+  variables `LANGFUSE_*` ya no hacen nada.
+- **Acción** — Se elimina `GET /ocabra/stats/by-model`, que no usaba nada (las
+  estadísticas por modelo están en `GET /ocabra/stats/performance`).
+- Se retira **Hunyuan3D** de los servicios y del gateway (ya no estaba en el
+  compose). Sus claves en `PATCH /ocabra/config` se aceptan y se ignoran.
+
+### Corregido
+
+- **Ráfagas de subidas**: varias transcripciones o ediciones de imagen
+  simultáneas podían superar el límite de peticiones a la vez del modelo,
+  porque se contaban después de leer el fichero. Ahora se cuentan al entrar:
+  las que sobran reciben `429` con `Retry-After`.
+- **`/v1/images/generations` contaba cada petición dos veces** contra ese
+  límite, así que un modelo de imagen admitía la mitad de lo configurado.
+- **Cargas que expulsan otro modelo** terminan antes y expulsan menos: la espera
+  a que se libere la memoria acaba en cuanto la tarjeta lo muestra (antes podía
+  esperar 12 s de más), y ya no se expulsa un segundo modelo cuando bastaba con
+  uno.
+- **Un modelo podía quedarse «descargándose» para siempre** si se cancelaba su
+  descarga a mitad; ahora vuelve a su estado anterior y la siguiente petición lo
+  carga.
+- **Una transcripción con diarización** ya no pierde la memoria que necesita
+  porque otro modelo se cargue a la vez en la misma tarjeta.
+- `POST /ocabra/models/{id}/context` espera a una carga en curso del mismo
+  modelo y responde `409` (reintentable) si no puede hacerlo; los `503`
+  `context_temporarily_reduced` llegan al momento en vez de tras una espera
+  larga.
+
+---
+
 ## 0.116.0 — 2026-11-19
 
 ### Nuevo

@@ -648,6 +648,23 @@ class ModelManager:
         assert request_id is not None  # max_inflight<=0 never rejects
         return request_id
 
+    def annotate_request(self, request_id: str, user) -> None:
+        """Attribute an admitted request to ``user`` if it has no owner yet.
+
+        Admission only identifies API keys; a browser-session upload reaches
+        the handler with its ``UserContext`` but was admitted anonymously, so
+        the dashboard showed it as "anónimo" (REF-08 follow-up).
+        """
+        fields = _request_attribution(user)
+        if not request_id or not fields:
+            return
+        with self._in_flight_lock:
+            active = self._active_requests.get(request_id)
+            if active is None or active.user_id or active.username:
+                return
+            for name, value in fields.items():
+                setattr(active, name, value)
+
     def rebind_request(self, request_id: str, old_model_id: str, new_model_id: str) -> None:
         """Move an admitted request from its public key to the resolved runtime."""
 
@@ -1107,7 +1124,11 @@ class ModelManager:
         Also updates last_request_at in-memory for LRU accuracy.
         """
         with self._in_flight_lock:
-            if request_id and request_id in self._active_requests:
+            if request_id:
+                if request_id not in self._active_requests:
+                    # Already released (or never begun): a second release of
+                    # the same request must not take another slot's count.
+                    return
                 del self._active_requests[request_id]
             count = self._in_flight.get(model_id, 0)
             if count <= 1:
