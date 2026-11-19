@@ -182,7 +182,7 @@ Ownership principal:
 - `docs/CONTRACTS.md`
 - `docs/PLAN.md`
 - `docs/ROADMAP.md`
-- `docs/DOC_AUDIT.md`
+- `docs/archive/DOC_AUDIT.md`
 - tests backend/frontend asociados
 
 Responsabilidades:

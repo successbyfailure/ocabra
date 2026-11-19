@@ -12,7 +12,7 @@ Exposes:
 Filtering by group is enforced for non-admin callers (mirrors the pattern
 used by ``/ocabra/stats/recent``).
 
-Plan: docs/tasks/agents-mcp-plan.md — Fase 5 / Stats endpoints.
+Plan: docs/archive/agents-mcp-plan.md — Fase 5 / Stats endpoints.
 """
 
 from __future__ import annotations

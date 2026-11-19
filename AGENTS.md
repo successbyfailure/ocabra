@@ -1,106 +1,38 @@
-# AGENTS.md — Guía de colaboración multi-agente
+# AGENTS.md — Guía para agentes de IA
 
-Este fichero es leído por cualquier agente de IA (Claude, GPT-4o, Gemini, etc.)
-que trabaje en este repositorio.
-
-## Lectura obligatoria al iniciar
-
-Antes de analizar, proponer o modificar nada en este repositorio:
-
-1. Lee `CLAUDE.md` completo.
-2. Usa `CLAUDE.md` como instrucciones operativas base para trabajar en oCabra.
-3. Después vuelve a este `AGENTS.md` para aplicar las reglas de colaboración multi-agente y los límites por stream.
-
-Si hay conflicto entre instrucciones, prioriza primero la seguridad y el alcance pedido por el usuario, luego `CLAUDE.md`, y después este `AGENTS.md`.
+Lo lee cualquier agente (Claude, GPT, Gemini…) que trabaje en este repositorio.
+Las instrucciones operativas están en `CLAUDE.md`: léelo entero primero. Si hay
+conflicto, manda la seguridad y el alcance que pida el usuario, luego
+`CLAUDE.md`, luego este fichero.
 
 ## Proyecto
 
-**oCabra** es un servidor de modelos de IA multi-GPU con las siguientes características:
-- Compatible con APIs OpenAI (`/v1/*`) y Ollama (`/api/*`)
-- Gestión dinámica de carga/descarga de modelos con políticas `pin`, `warm`, `on_demand`
-- Soporte para LLM, imagen, audio, TTS y modelos multimodal
-- Hardware objetivo: RTX 3060 (12 GB) + RTX 3090 (24 GB)
+**oCabra** es un servidor de modelos de IA multi-GPU compatible con las APIs de
+OpenAI (`/v1/*`) y Ollama (`/api/*`), con API de administración propia
+(`/ocabra/*`), autenticación propia (JWT + API keys, grupos de acceso a
+modelos), carga/descarga dinámica con políticas `pin`/`warm`/`on_demand`,
+federación entre nodos y backends instalables en caliente. Hardware de
+producción: RTX 3060 (12 GB) + RTX 3090 (24 GB).
 
-**Documentación esencial:**
-- `docs/PLAN.md` — Plan completo, arquitectura, fases y estado actual
-- `docs/ROADMAP.md` — Trabajo pendiente y orden de ejecución (**fuente de verdad del backlog**)
-- `docs/CONTRACTS.md` — Interfaces entre módulos (LEE ESTO ANTES DE IMPLEMENTAR)
-- `docs/CONVENTIONS.md` — Estilo de código y naming
-- `docs/REFACTOR_PLAN.md` — Historial del refactor (cerrado); 3 items residuales documentados
-- `docs/agents/` — Estado resumido por stream, no plan maestro
-- `docs/tasks/` — Solo `langfuse-integration-plan.md` sigue activo; el resto son archivo histórico
+## Documentación
 
-## Reglas de colaboración multi-agente
+- `docs/ROADMAP.md` — backlog y orden de ejecución (**fuente de verdad del trabajo pendiente**).
+- `docs/PLAN.md` — arquitectura y fases (histórico en parte).
+- `docs/CONTRACTS.md` — interfaces entre módulos; si cambias uno, actualízalo.
+- `docs/CONVENTIONS.md` — estilo y naming.
+- `docs/tasks/` — planes en curso; `docs/archive/` — planes ya entregados (solo consulta).
+- `/docs`, `/docs/changelog`, `/docs/models` — documentación que sirve el propio servidor.
 
-### 1. Ownership de streams
+## Reglas de trabajo
 
-Cada agente trabaja en un stream asignado. **No modifiques ficheros de otro stream
-sin coordinación explícita.** Los límites están definidos en `docs/agents/`.
-
-| Stream | Módulos propios |
-|--------|----------------|
-| **Fase 0** | Toda la fundación (un agente secuencial) |
-| **1-A GPU** | `backend/ocabra/core/gpu_manager.py`, `scheduler.py` |
-| **1-B Model** | `backend/ocabra/core/model_manager.py`, `worker_pool.py` |
-| **1-C Registry** | `backend/ocabra/registry/`, `backend/ocabra/api/internal/downloads.py` |
-| **1-D Frontend base** | `frontend/src/` estructura base, stores, API client |
-| **2-A vLLM** | `backend/ocabra/backends/vllm_backend.py`, `workers/vllm_worker.py` |
-| **2-B Diffusers** | `backend/ocabra/backends/diffusers_backend.py`, `workers/diffusers_worker.py` |
-| **2-C Audio** | `backend/ocabra/backends/whisper_backend.py`, `tts_backend.py`, `workers/` |
-| **3-A OpenAI API** | `backend/ocabra/api/openai/` |
-| **3-B Ollama API** | `backend/ocabra/api/ollama/` |
-| **4-A Models UI** | `frontend/src/pages/Models.tsx`, `Explore.tsx` y sus componentes |
-| **4-B Playground** | `frontend/src/pages/Playground.tsx` y sus componentes |
-| **4-C Stats UI** | `frontend/src/pages/Stats.tsx` y sus componentes |
-| **4-D Settings UI** | `frontend/src/pages/Settings.tsx` y sus componentes |
-| **5 Integrations** | `backend/ocabra/integrations/`, `stats/`, polish general |
-
-### 2. Ficheros compartidos — protocolo de modificación
-
-Los siguientes ficheros son compartidos y requieren cuidado especial:
-
-- `backend/ocabra/main.py` — Solo añade routers en la sección marcada con `# ROUTERS`
-- `backend/ocabra/db/` — Añade modelos nuevos en ficheros propios, no modifiques los ajenos
-- `docker-compose.yml` — No modificar sin consenso
-- `frontend/src/App.tsx` — Solo añade rutas en la sección marcada con `# ROUTES`
-- `frontend/src/api/client.ts` — Añade métodos, no cambies la estructura base
-
-### 3. Contratos de interfaz
-
-Antes de implementar cualquier interfaz entre módulos, verifica `docs/CONTRACTS.md`.
-Si necesitas cambiar un contrato existente, documenta el cambio en ese fichero primero.
-
-### 4. Commits
-
-- Prefijo de commit según tipo: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`
-- Incluye el stream en el scope: `feat(1-A): add GPU pressure detection`
-- Un commit por unidad lógica de trabajo, no commits masivos
-
-### 5. Tests
-
-- Cada módulo nuevo debe tener tests en `backend/tests/` o `frontend/src/__tests__/`
-- Nomenclatura: `test_<módulo>.py` o `<Componente>.test.tsx`
-- No marques trabajo como completo si los tests fallan
-
-### 6. Variables de entorno
-
-Todas las variables de entorno nuevas deben añadirse a `.env.example` con comentario explicativo.
-Nunca escribas valores reales en el código; usa siempre `settings.<variable>` (pydantic-settings).
-
-## Dependencias entre streams (no inicies un stream sin que el anterior esté listo)
-
-```
-Fase 0  (fundación completa)
-  ├─→ 1-A (GPU Manager)      ─┐
-  ├─→ 1-B (Model Manager)    ─┤─→ 2-A (vLLM)     ─┐
-  ├─→ 1-C (Registry)         ─┤─→ 2-B (Diffusers) ─┤─→ 3-A (OpenAI API) ─┐
-  └─→ 1-D (Frontend base)    ─┘─→ 2-C (Audio)     ─┘─→ 3-B (Ollama API) ─┤─→ 4-A,B,C,D ─→ 5
-                                                                            └──────────────────┘
-```
-
-1-D puede empezar en paralelo con mocks antes de que 3-A/3-B estén listos.
-
-## Estado del proyecto
-
-La fuente de verdad del estado actual está en `docs/PLAN.md` y `docs/DOC_AUDIT.md`.
-`docs/agents/<stream>.md` solo resume ownership y backlog residual por stream.
+- **Producción corre del checkout `/docker/ocabra`** y puede haber otras sesiones
+  con cambios sin commitear: trabaja en un worktree propio, haz `git add` solo de
+  tus ficheros y construye imágenes siempre desde un worktree limpio.
+- No hay ownership por "streams" ni rama `dev`: el reparto lo decide el usuario
+  en cada tarea. No toques ficheros que te haya dicho que están en obras.
+- Commits: `<tipo>(<scope>): <descripción>` (`feat`, `fix`, `refactor`, `test`,
+  `docs`, `chore`, `perf`), en español como el historial, uno por unidad lógica.
+- Tests en `backend/tests/` o `frontend/src/__tests__/`; no des por terminado
+  nada con tests en rojo.
+- Variables de entorno nuevas: en `.env.example` con comentario; en el código,
+  siempre `settings.<campo>` (pydantic-settings).

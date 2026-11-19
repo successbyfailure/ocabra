@@ -1,5 +1,5 @@
 // Types for modular backend management (Bloque 15).
-// See docs/tasks/modular-backends-plan.md for the API contract.
+// See docs/archive/modular-backends-plan.md for the API contract.
 
 export type BackendInstallStatus =
   | "not_installed"

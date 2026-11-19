@@ -5,7 +5,8 @@ Este fichero es leído automáticamente por Claude Code al abrir el proyecto.
 ## Proyecto: oCabra
 
 Servidor de modelos de IA multi-GPU compatible con APIs OpenAI y Ollama.
-Lee `docs/PLAN.md` para el plan completo y `AGENTS.md` para las reglas generales de colaboración multi-agente.
+`docs/ROADMAP.md` es la fuente de verdad del trabajo pendiente; `AGENTS.md`
+resume las reglas de trabajo comunes a cualquier agente.
 
 ## Stack rápido
 
@@ -15,8 +16,8 @@ Lee `docs/PLAN.md` para el plan completo y `AGENTS.md` para las reglas generales
 | DB | PostgreSQL 16 + Alembic (migraciones) |
 | Cache | Redis 7 |
 | GPU | pynvml |
-| Backends IA | vLLM, Diffusers, faster-whisper, Transformers |
-| Frontend | React 18 + TypeScript + Vite + TailwindCSS + shadcn/ui |
+| Backends IA | llama.cpp (upstream y fork `llamacpp_mks`), Ollama, vLLM, SGLang, Diffusers, faster-whisper, whisper.cpp, TTS varios… (`backend/ocabra/backends/`), instalables en caliente vía OCI |
+| Frontend | React 18 + TypeScript + Vite + TailwindCSS + Radix UI + Zustand |
 | Deploy | Docker Compose + Caddy |
 
 ## Comandos clave
@@ -35,8 +36,9 @@ cd backend && alembic revision --autogenerate -m "descripcion"
 # Frontend dev
 cd frontend && npm run dev
 
-# Tests backend
+# Tests backend (con y sin Postgres: sin DATABASE_URL se saltan los requires_db)
 cd backend && pytest
+cd backend && env -u DATABASE_URL .venv/bin/python -m pytest -q
 
 # Tests frontend
 cd frontend && npm test
@@ -56,6 +58,9 @@ El número de versión vive en **dos** sitios y **deben coincidir siempre**:
   viejo (mapache, con código 0.82, decía 0.74.0); ahora un validador lo ignora.
   No lo vuelvas a añadir al `.env`.
 - `frontend/package.json` → `"version"` — el footer del sidebar (`src/components/layout/Sidebar.tsx`) lo lee en build-time vía `__APP_VERSION__` (inyectado por `vite.config.ts`), así que basta con subir `package.json`; no hay un tercer sitio que tocar a mano (antes era un string `"v0.5.0"` hardcodeado y por eso se desincronizaba).
+
+`backend/pyproject.toml` lleva `0.0.0` a propósito y no es la versión de la
+app: no lo subas.
 
 Tras cualquier cambio con entidad (feature, fix no trivial, cambio de
 comportamiento visible), sube **los dos** a la vez, al mismo valor, y
@@ -163,7 +168,10 @@ afuera.
 
 - Sigue `docs/CONVENTIONS.md` para nombres, estructura y estilo.
 - Sigue `docs/CONTRACTS.md` antes de implementar interfaces entre módulos.
-- **No toques código fuera de tu stream asignado** (ver `AGENTS.md` y `docs/agents/`).
+- **Producción corre de `/docker/ocabra`** y otras sesiones pueden dejar ahí
+  cambios sin commitear: trabaja en un worktree propio, haz `git add` solo de
+  tus ficheros y construye imágenes desde un worktree limpio
+  (`docker compose build` copia el árbol de trabajo entero, no `HEAD`).
 - Todos los endpoints nuevos deben tener docstring con descripción, parámetros y respuesta.
 - Usa `async/await` en todo el backend. No código síncrono en handlers de FastAPI.
 - Los modelos SQLAlchemy van en `backend/ocabra/db/`. Los schemas Pydantic van en `backend/ocabra/schemas/`.
@@ -172,28 +180,42 @@ afuera.
 
 ```
 ocabra/
-├── backend/ocabra/
-│   ├── api/openai/       # Compatibilidad OpenAI /v1/*
-│   ├── api/ollama/       # Compatibilidad Ollama /api/*
-│   ├── api/internal/     # API interna /ocabra/*
-│   ├── core/             # GPU manager, model manager, scheduler, worker pool
-│   ├── backends/         # vLLM, Diffusers, Whisper, TTS
-│   ├── registry/         # HuggingFace, Ollama registry, scanner local
-│   ├── stats/            # Métricas, energía, agregación
-│   └── db/               # SQLAlchemy models
-├── frontend/src/
-│   ├── pages/            # Dashboard, Models, Explore, Playground, Stats, Settings
-│   ├── components/       # Componentes reutilizables
-│   ├── api/              # Cliente API tipado
-│   └── stores/           # Zustand stores
-└── workers/              # Scripts de workers de backends IA
+├── backend/
+│   ├── ocabra/
+│   │   ├── main.py           # App FastAPI, arranque/parada, registro de routers
+│   │   ├── config.py         # Settings (pydantic-settings) y APP_VERSION
+│   │   ├── api/openai/       # Compatibilidad OpenAI /v1/* (chat, audio, imágenes, batches, files, realtime…)
+│   │   ├── api/ollama/       # Compatibilidad Ollama /api/*
+│   │   ├── api/internal/     # API de administración /ocabra/*
+│   │   ├── core/             # model_manager, scheduler, gpu_manager, worker_pool, admisión,
+│   │   │                     # federación, presets/VRAM, instalador de backends, cloud…
+│   │   ├── backends/         # Un adaptador por motor (llama.cpp, vLLM, whisper, diffusers…)
+│   │   ├── workers/          # Wrappers de proceso de algunos motores (llama.cpp, sglang, trt-llm)
+│   │   ├── agents/           # Agentes + clientes MCP
+│   │   ├── registry/         # HuggingFace, Ollama registry, escaneo local
+│   │   ├── stats/            # Métricas, energía, actividad en vivo, agregación
+│   │   ├── docker_agent/     # Servicio aparte con el socket de Docker (la api no lo tiene)
+│   │   ├── docs_content/     # changelog.md y models.md que sirve /docs
+│   │   ├── db/               # Modelos SQLAlchemy (+ migration_support/ para migraciones)
+│   │   └── schemas/          # Schemas Pydantic
+│   ├── workers/              # Scripts de worker en Python (diffusers, tts, diarización…)
+│   ├── alembic/              # Migraciones
+│   └── tests/
+├── frontend/src/             # pages/, components/, api/ (cliente tipado), stores/ (Zustand), types/
+├── gateway/                  # Proxy autenticado a los servicios interactivos (ComfyUI, A1111…)
+├── hw-monitor/               # Monitor de hardware del host
+├── services/                 # Imágenes de servicios interactivos
+├── caddy/                    # Proxy de entrada
+└── docs/                     # ROADMAP, PLAN, CONTRACTS, CONVENTIONS, tasks/ (en curso), archive/
 ```
 
 ## Lo que NO debes hacer
 
 - No hagas `git push` sin indicación explícita del usuario.
 - No borres migraciones de Alembic existentes.
-- No almacenes datos de conversaciones (el servidor es stateless).
+- No guardes historiales de conversación ni el contenido de las peticiones
+  más allá de lo que piden Files/Batches (que sí se guardan en disco, con
+  retención) y respeta el modo de privacidad (`privacy_mode`).
 - No instales dependencias globales; usa el entorno del proyecto.
 - No modifiques `docker-compose.yml` sin entender el impacto en otros servicios.
 - No uses `time.sleep()` en código async; usa `asyncio.sleep()`.
@@ -201,8 +223,8 @@ ocabra/
 
 ## Flujo de trabajo recomendado
 
-1. Lee tu briefing de stream en `docs/agents/`.
+1. Mira `docs/ROADMAP.md` y, si existe, el plan en `docs/tasks/` del tema.
 2. Consulta `docs/CONTRACTS.md` para las interfaces que consumes o produces.
-3. Implementa siguiendo `docs/CONVENTIONS.md`.
-4. Escribe tests para lo que implementas.
-5. Marca tu progreso en el briefing de tu stream si está disponible.
+3. Implementa siguiendo `docs/CONVENTIONS.md`, en un worktree propio.
+4. Escribe tests y pasa `ruff check` y los tests de backend y frontend.
+5. Si el cambio lo nota un cliente: sube versión y anota el changelog (ver arriba).

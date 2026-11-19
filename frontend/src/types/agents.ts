@@ -1,5 +1,5 @@
 // Types for the Agents + MCP domain.
-// See docs/tasks/agents-mcp-plan.md for the authoritative data model.
+// See docs/archive/agents-mcp-plan.md for the authoritative data model.
 
 export type MCPTransport = "http" | "sse" | "stdio"
 export type MCPAuthType = "none" | "api_key" | "bearer" | "basic" | "oauth2"

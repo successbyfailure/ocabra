@@ -14,7 +14,7 @@ This module is the entry point used by the OpenAI / Ollama chat endpoints once
 * Streaming variant emitting OpenAI SSE chunks plus ``ocabra.tool_result``
   custom events between hops.
 
-Plan: docs/tasks/agents-mcp-plan.md — Fase 2 + Fase 3.
+Plan: docs/archive/agents-mcp-plan.md — Fase 2 + Fase 3.
 """
 
 from __future__ import annotations

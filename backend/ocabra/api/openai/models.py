@@ -510,7 +510,7 @@ async def list_models(
                     }
                 )
 
-    # ── Agents (plan: docs/tasks/agents-mcp-plan.md — "Inventario de modelos")
+    # ── Agents (plan: docs/archive/agents-mcp-plan.md — "Inventario de modelos")
     try:
         agent_entries = await _list_agent_model_entries(user, now_ts)
     except Exception as exc:  # noqa: BLE001 — never block /v1/models on agent lookup

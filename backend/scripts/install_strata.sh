@@ -5,7 +5,7 @@
 #
 # The engine and the model weights are NOT installed here: they depend on the
 # model and the GPU, and `strata launch` fetches them when a model is prepared
-# (its run config then points at them; see docs/tasks/strata-backend-spike-plan.md).
+# (its run config then points at them; see docs/archive/strata-backend-spike-plan.md).
 #
 # Env from BackendInstaller: BACKEND_DIR, BIN_DIR.
 set -euo pipefail

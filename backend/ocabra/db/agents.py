@@ -1,6 +1,6 @@
 """SQLAlchemy ORM models for agents and the agent⇄mcp_server link table.
 
-Plan: docs/tasks/agents-mcp-plan.md — section "Modelo de datos" / agents.
+Plan: docs/archive/agents-mcp-plan.md — section "Modelo de datos" / agents.
 
 An agent has exactly one of ``base_model_id`` or ``profile_id`` (enforced by
 DB ``CHECK`` constraint ``ck_agents_exactly_one_base``).

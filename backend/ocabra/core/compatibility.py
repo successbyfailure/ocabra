@@ -8,7 +8,7 @@ One rule set, used by:
   Ollama tag would be servable by, so the UI can show backend icons.
 
 The rules mirror the verified matrix in
-docs/tasks/model-backends-unification-plan.md: GGUF is the only format really
+docs/archive/model-backends-unification-plan.md: GGUF is the only format really
 shared between backends (llama.cpp upstream, the llama.cpp-mks fork and Ollama
 when the file comes from Ollama; BitNet only for ternary/1-bit quants);
 safetensors LLM/encoder repos go to vLLM/SGLang; everything else (STT, TTS,

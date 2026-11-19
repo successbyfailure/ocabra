@@ -1,6 +1,4 @@
 // Typed client for /ocabra/mcp-servers.
-// Stream C (frontend). Backend (Stream A) not merged yet — UI falls back to
-// mocks in the store when the API responds with 404.
 
 import type {
   MCPServer,

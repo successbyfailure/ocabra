@@ -145,7 +145,7 @@ export const ModelCard = ({ model }: { model: ModelState }) => {
 
 ### Estilos
 - TailwindCSS utility classes exclusivamente
-- Componentes base de shadcn/ui (en `src/components/ui/`)
+- Primitivas de Radix UI (`@radix-ui/react-*`) directamente; los componentes base propios viven en `src/components/common/` (no hay shadcn/ui)
 - No CSS modules ni styled-components
 - Responsive: mobile-first, aunque el target principal es desktop
 
@@ -187,14 +187,7 @@ docs(contracts): add Redis key conventions
 ```
 
 ### Branches
-```
-main           # producción / estado estable
-dev            # integración de streams
-feat/1-A-gpu-manager
-feat/1-B-model-manager
-feat/2-A-vllm
-feat/3-A-openai-api
-fix/<descripción>
-```
 
-Cada stream trabaja en su propia rama `feat/<stream>` y hace PR a `dev`.
+`main` es la rama de trabajo y de producción (no hay rama `dev`). Para cambios
+largos o en paralelo con otras sesiones, usa una rama `feat/<tema>` o
+`fix/<tema>` en un worktree propio y fusiona en `main` cuando esté verificada.

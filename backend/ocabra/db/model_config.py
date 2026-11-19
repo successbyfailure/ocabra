@@ -25,7 +25,7 @@ class LogicalModel(Base):
     Its deployments (``ModelConfig`` rows, id ``<backend>/<model_key>``) carry
     the backend-specific configuration and the artifact; ``default_backend``
     says which one the public name resolves to. See
-    docs/tasks/model-backends-unification-plan.md (migration 0034).
+    docs/archive/model-backends-unification-plan.md (migration 0034).
     """
 
     __tablename__ = "models"

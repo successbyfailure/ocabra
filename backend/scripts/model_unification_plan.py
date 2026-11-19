@@ -11,7 +11,7 @@ Usage (inside the api container, where /data and the DB are reachable)::
     docker compose exec -T api python - --json < backend/scripts/model_unification_plan.py
 
 Logic lives in ``ocabra.db.migration_support.model_unification``; see
-docs/tasks/model-backends-unification-plan.md.
+docs/archive/model-backends-unification-plan.md.
 """
 
 from __future__ import annotations

@@ -956,7 +956,7 @@ async def _dispatch_agent(
 ):
     """Resolve and execute an agent invocation (``model="agent/<slug>"``).
 
-    Plan: docs/tasks/agents-mcp-plan.md — Fase 2/3.
+    Plan: docs/archive/agents-mcp-plan.md — Fase 2/3.
     """
     from fastapi import HTTPException
     from fastapi.responses import JSONResponse

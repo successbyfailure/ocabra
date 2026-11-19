@@ -1282,7 +1282,7 @@ cambios de pool que mantengan la misma colocación.
 
 - Contrato de runtimes adaptativos: `docs/CONTRACTS.md`, sección 8.9.
 - Backlog de presets actuales: `docs/ROADMAP.md`, Bloque 21.
-- Loader llama.cpp: `docs/tasks/llama-cpp-parity-plan.md`.
+- Loader llama.cpp: `docs/archive/llama-cpp-parity-plan.md`.
 - Documentación upstream de `llama-server`:
   <https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md>
 - Guía de desarrollo de `llama-server`:

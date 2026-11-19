@@ -3,7 +3,7 @@
 Última actualización: 2026-11-08
 
 Fuente de verdad del trabajo pendiente. `docs/PLAN.md` documenta la arquitectura y las
-fases completadas. `docs/REFACTOR_PLAN.md` recoge el estado del refactor (cerrado).
+fases completadas. `docs/archive/REFACTOR_PLAN.md` recoge el estado del refactor (cerrado).
 
 ---
 
@@ -18,7 +18,7 @@ La UI de compilación de engines TRT-LLM también está implementada y cableada.
 
 ## ✅ Bloque 1 — Auth, usuarios y grupos (COMPLETADO)
 
-Plan completo en `docs/tasks/auth-system-plan.md`.
+Plan completo en `docs/archive/auth-system-plan.md`.
 
 ### Implementado
 
@@ -196,7 +196,7 @@ Plan en `docs/tasks/backend-resilience-plan.md`.
 
 ## ✅ Bloque 12 — Federación P2P (COMPLETADO)
 
-Plan en `docs/tasks/federation-plan.md`.
+Plan en `docs/archive/federation-plan.md`.
 
 Implementado (5 fases):
 - **Fase 1**: `FederationManager` con heartbeat, DB `federation_peers`, cifrado Fernet, CRUD endpoints, circuit breaker
@@ -240,9 +240,12 @@ Implementado:
 
 ---
 
-## 🚧 Bloque 15 — Backends Modulares (Fase 2 cerrada al 10/11; pendiente Fase 3 OCI)
+## ✅ Bloque 15 — Backends Modulares (Fase 3 OCI hecha en v0.88.0)
 
-Plan en `docs/tasks/modular-backends-plan.md`.
+Plan en `docs/archive/modular-backends-plan.md`. La distribución OCI (Fase 3) se hizo por otro camino
+(repo único `ocabra-backends` en GHCR, `Dockerfile.backend-native`): ver
+`docs/archive/backend-distribution-plan.md`. Los Dockerfiles borrador de `backends/dockerfiles/`
+se borraron en 2026-11.
 
 Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI.
 5 fases: infraestructura → migrar backends → OCI → imagen slim → frontend.
@@ -324,7 +327,7 @@ GGUF/safetensors, model arena y export a GGUF + 16-bit safetensors.
 
 ## ✅ Bloque 17 — llama.cpp loader parity con LM Studio (entregado 2026-05-05)
 
-Plan completo en `docs/tasks/llama-cpp-parity-plan.md`. Schema compartido en
+Plan completo en `docs/archive/llama-cpp-parity-plan.md`. Schema compartido en
 `backend/ocabra/schemas/backend_load.py` (`LlamaCppLoadConfig` + `SpeculativeConfig`).
 
 Cobertura ahora: 100% de los flags que LM Studio expone (15+ campos) +
@@ -464,7 +467,7 @@ rehidratación estable del formulario de modelos ante broadcasts de GPU.
 
 Validación dirigida: 30 tests de Realtime y del colector de estadísticas en
 verde. La suite backend global sigue requiriendo el entorno completo descrito en
-`docs/DOC_AUDIT.md`.
+`docs/archive/DOC_AUDIT.md`.
 
 ---
 
@@ -775,7 +778,7 @@ corrección para el estado Mamba con tokens especulativos:
 
 ## ✅ Bloque 23 — Un modelo, varios backends (2026-11-07, v0.46.0–v0.47.x)
 
-Plan y estado: [`docs/tasks/model-backends-unification-plan.md`](tasks/model-backends-unification-plan.md).
+Plan y estado: [`docs/archive/model-backends-unification-plan.md`](archive/model-backends-unification-plan.md).
 El modelo (nombre público, tabla `models`) se separa de sus despliegues por backend
 (`<backend>/<model_key>`); el backend por defecto sirve el nombre público y los demás quedan como
 nombres ocultos. Sustituye a la convención manual `*-ollama` (que sigue resolviendo como variante
@@ -819,7 +822,7 @@ Hecho (2026-11): integración, settings, endpoint, pestaña de Settings y variab
 [✅ Hecho]  Bloque 12 — Federación P2P
 [✅ Hecho]  Bloque 13 — Observabilidad de potencia + stats ampliadas
 [✅ Hecho]  Bloque 14 — OpenAI Batches + Files API + ACL de modelos
-[🚧 En curso] Bloque 15 — Backends Modulares (Fases 1, 2 (10/11), 4, 5 hechas; pendientes Fase 3 CI/OCI + validación runtime nativos)
+[✅ Hecho]    Bloque 15 — Backends Modulares (OCI en v0.88.0, ver backend-distribution-plan)
 [🚧 En curso] Bloque 16 — Unsloth Studio (cableado completo; pendiente validación e2e y watcher de exports)
 [✅ Hecho]    Bloque 17 — llama.cpp loader parity (4 sprints; pendiente wiring scanner→DB del tokenizer fingerprint)
 [✅ Hecho]    Bloque 18 — Fiabilidad de peticiones y backends ternarios

@@ -1,6 +1,6 @@
 """SQLAlchemy ORM models for MCP servers.
 
-Plan: docs/tasks/agents-mcp-plan.md — section "Modelo de datos" / mcp_servers.
+Plan: docs/archive/agents-mcp-plan.md — section "Modelo de datos" / mcp_servers.
 
 Secret columns (``env_encrypted``, ``auth_value_encrypted``) store Fernet
 ciphertext (text, base64).  Plaintext secrets must never be persisted.

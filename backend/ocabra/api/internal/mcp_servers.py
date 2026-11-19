@@ -1,6 +1,6 @@
 """Internal REST endpoints for MCP server CRUD + refresh/test.
 
-Plan: docs/tasks/agents-mcp-plan.md — "API REST nueva" / MCP servers.
+Plan: docs/archive/agents-mcp-plan.md — "API REST nueva" / MCP servers.
 
 Role matrix:
 

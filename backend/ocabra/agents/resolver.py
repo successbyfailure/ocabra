@@ -1,6 +1,6 @@
 """Resolve ``model="agent/<slug>"`` requests to a concrete :class:`AgentSpec`.
 
-Plan: docs/tasks/agents-mcp-plan.md — Fase 2 / "resolver.py".
+Plan: docs/archive/agents-mcp-plan.md — Fase 2 / "resolver.py".
 
 The resolver loads the agent row, its MCP server bindings, and the per-binding
 ``allowed_tools`` overrides in a single eager-loaded query so the executor does

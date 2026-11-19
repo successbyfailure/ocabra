@@ -955,7 +955,7 @@ class Settings(BaseSettings):
     # pod if no hub tunnel has been up for this many minutes. 0 = off.
     ocabra_cloud_self_destruct_minutes: int = Field(default=0, ge=0)
 
-    # Agents + MCP (plan: docs/tasks/agents-mcp-plan.md)
+    # Agents + MCP (plan: docs/archive/agents-mcp-plan.md)
     mcp_tools_cache_ttl_seconds: int = Field(
         default=300,
         ge=0,

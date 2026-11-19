@@ -1,6 +1,6 @@
 """Internal REST endpoints for Agent CRUD + dry-run.
 
-Plan: docs/tasks/agents-mcp-plan.md — "API REST nueva" / Agents.
+Plan: docs/archive/agents-mcp-plan.md — "API REST nueva" / Agents.
 
 Role matrix:
 

@@ -4,7 +4,7 @@ Revision ID: 0017
 Revises: 0016
 Create Date: 2026-04-24
 
-Plan: docs/tasks/agents-mcp-plan.md — Fase 1 "Schema + registry".
+Plan: docs/archive/agents-mcp-plan.md — Fase 1 "Schema + registry".
 """
 
 from collections.abc import Sequence

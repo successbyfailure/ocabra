@@ -7,7 +7,7 @@ can serialise with ``model_dump(exclude_none=True)`` and let the runtime fall
 back to the global defaults defined in ``ocabra.config.settings``.
 
 Owner: Bloque 17 of the llama.cpp loader parity plan
-(``docs/tasks/llama-cpp-parity-plan.md``).
+(``docs/archive/llama-cpp-parity-plan.md``).
 
 The schema is **strictly additive** across the four sprints:
     * 17.1 — Tier 1 (foundation + trivial flags).

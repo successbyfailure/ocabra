@@ -13,7 +13,7 @@ behalf of an agent (that lives in the AgentExecutor, Stream B).  What it does
 expose is :meth:`call_tool`, which the executor will use as the single access
 point.
 
-Plan: docs/tasks/agents-mcp-plan.md — "Fase 1 — Schema + registry".
+Plan: docs/archive/agents-mcp-plan.md — "Fase 1 — Schema + registry".
 """
 
 from __future__ import annotations

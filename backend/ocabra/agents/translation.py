@@ -3,7 +3,7 @@
 These helpers are deliberately framework-free so they can be exercised in
 isolation by the unit tests.
 
-Plan: docs/tasks/agents-mcp-plan.md — section "Contratos" / Formato OpenAI ↔ MCP.
+Plan: docs/archive/agents-mcp-plan.md — section "Contratos" / Formato OpenAI ↔ MCP.
 """
 
 from __future__ import annotations

@@ -205,7 +205,7 @@ async def list_models(
 
         payloads.append(item)
 
-    # Add agent entries (plan: docs/tasks/agents-mcp-plan.md — Inventario).
+    # Add agent entries (plan: docs/archive/agents-mcp-plan.md — Inventario).
     try:
         payloads.extend(await _list_agent_entries(user))
     except Exception as exc:  # noqa: BLE001
@@ -3603,7 +3603,7 @@ def _read_first_positive_int(path: Path, keys: tuple[str, ...]) -> int:
 async def _list_agent_entries(user: UserContext) -> list[dict]:
     """Return agent entries formatted for ``GET /ocabra/models``.
 
-    See ``docs/tasks/agents-mcp-plan.md`` section "Inventario de modelos".
+    See ``docs/archive/agents-mcp-plan.md`` section "Inventario de modelos".
     Admins see every agent; other callers are filtered by ``group_id``.
     """
     import sqlalchemy as sa

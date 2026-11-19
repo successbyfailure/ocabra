@@ -36,7 +36,7 @@ LLAMA_CPP_FAMILY = frozenset({"llama_cpp", "llamacpp_mks"})
 # Both backends share the SAME ``extra_config`` section name. Their options
 # are the same llama-server flags, and sharing the key means a model can be
 # moved between them (the A/B that motivates the split) without rewriting its
-# config. Decided 2026-11-06; see docs/tasks/backend-distribution-plan.md.
+# config. Decided 2026-11-06; see docs/archive/backend-distribution-plan.md.
 LLAMA_CPP_CONFIG_SECTION = "llama_cpp"
 
 

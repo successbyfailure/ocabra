@@ -1,6 +1,4 @@
 // Typed client for /ocabra/agents.
-// Stream C (frontend). Backend (Stream A/B) not merged yet — UI falls back to
-// mocks in the store when the API responds with 404.
 
 import type {
   Agent,
@@ -166,8 +164,7 @@ export const agentsApi = {
     ),
 }
 
-// TODO: remove these once backend exposes /ocabra/stats/by-agent and
-// /ocabra/stats/tool-calls. See docs/tasks/agents-mcp-plan.md "Deudas abiertas".
+// Agent stats: /ocabra/stats/by-agent and /ocabra/stats/tool-calls.
 export const agentStatsApi = {
   byAgent: async (params: { from?: string; to?: string }): Promise<ByAgentStats> => {
     const raw = await request<AnyRecord>("GET", `/ocabra/stats/by-agent${buildQuery(params)}`)

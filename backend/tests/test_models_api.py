@@ -631,7 +631,7 @@ async def test_build_model_memory_estimate_marks_missing_tensorrt_engine(tmp_pat
 
 # ---------------------------------------------------------------------------
 # _estimate_llama_cpp_memory — unified with vram_planner.py (no more separate
-# llama_cpp_estimator.py breakdown; see docs/tasks/gpu-unlock-benchmark-plan.md)
+# llama_cpp_estimator.py breakdown; see docs/archive/gpu-unlock-benchmark-plan.md)
 # ---------------------------------------------------------------------------
 
 _DENSE_GGUF_KV = {

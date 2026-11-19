@@ -30,7 +30,7 @@ grupos de acceso a modelos, y gateway para servicios interactivos de generación
 | Backend Imagen | Diffusers + Accelerate |
 | Backend Audio | faster-whisper |
 | Backend TTS | Transformers (Qwen3-TTS, Kokoro), Chatterbox (Resemble AI) |
-| Frontend | React 18 + TypeScript + Vite + TailwindCSS + shadcn/ui |
+| Frontend | React 18 + TypeScript + Vite + TailwindCSS + Radix UI |
 | Charts | Recharts |
 | Estado frontend | Zustand |
 | Tiempo real | WebSockets + SSE (FastAPI nativo) |
@@ -42,7 +42,7 @@ grupos de acceso a modelos, y gateway para servicios interactivos de generación
 
 **Fases 0–8 completadas e implementadas. Bloques 1–19 entregados.**
 
-El backlog de refactorización y hardening de seguridad está cerrado (ver `docs/REFACTOR_PLAN.md`).
+El backlog de refactorización y hardening de seguridad está cerrado (ver `docs/archive/REFACTOR_PLAN.md`).
 El trabajo restante está en `docs/ROADMAP.md`.
 
 ### Implementado en código
@@ -108,7 +108,7 @@ El trabajo restante está en `docs/ROADMAP.md`.
 - **Revisión futura de fiabilidad global**: evaluar conjuntamente estrategias
   de recursos, concurrencia, admission control y timeouts. También queda
   aplazada la decisión sobre OpenAI Responses API. Fuente: `docs/ROADMAP.md`.
-- **Bloque 15 — Backends Modulares (EN CURSO, 2026-04-24)**: Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI. Plan en `docs/tasks/modular-backends-plan.md`. Equipo de agentes paralelos trabajando en Fase 1 (infra), Fase 3 (Dockerfiles) y Fase 5 (frontend).
+- **Bloque 15 — Backends Modulares (HECHO; OCI en v0.88.0)**: Cada backend instalable/desinstalable en runtime desde la UI. Imagen Docker slim + distribución OCI. Plan en `docs/archive/modular-backends-plan.md`. Equipo de agentes paralelos trabajando en Fase 1 (infra), Fase 3 (Dockerfiles) y Fase 5 (frontend).
 - **Fine-tuning de voz**: Motor genérico de fine-tuning con UI wizard (Chatterbox + Qwen3-TTS). Auto-crea perfiles al completar el entrenamiento.
 - **UI de Batches**: Listado y descarga de batches del usuario desde el dashboard (backend ya expuesto, falta la vista).
 
@@ -273,7 +273,7 @@ ocabra/
 │       │   │   ├── ChatInterface.tsx
 │       │   │   ├── ImageInterface.tsx
 │       │   │   └── AudioInterface.tsx
-│       │   └── ui/                  # shadcn/ui components
+│       │   └── common/              # Componentes base propios (Radix UI debajo)
 │       ├── api/
 │       │   └── client.ts            # Typed API client (oCabra internal API)
 │       ├── stores/

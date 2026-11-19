@@ -10,7 +10,7 @@ contract.  This module provides:
 * :func:`extract_per_request_headers` — collects the relevant ``x-ocabra-*``
   and ``x-mcp-*`` headers from a Starlette request.
 
-Plan: docs/tasks/agents-mcp-plan.md — Fase 2.
+Plan: docs/archive/agents-mcp-plan.md — Fase 2.
 """
 
 from __future__ import annotations

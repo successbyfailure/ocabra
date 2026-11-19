@@ -4,7 +4,7 @@ Revision ID: 0019
 Revises: 0018
 Create Date: 2026-05-05
 
-Plan: docs/tasks/llama-cpp-parity-plan.md — Sprint 17.4.
+Plan: docs/archive/llama-cpp-parity-plan.md — Sprint 17.4.
 
 Adds three nullable integer columns to ``model_configs`` so the local scanner
 can persist GGUF tokenizer fingerprints (vocab size + bos/eos token IDs) and

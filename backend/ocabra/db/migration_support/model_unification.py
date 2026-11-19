@@ -13,7 +13,7 @@ Turns the legacy one-row-per-(backend, weights) inventory into logical models
   transaction. Migration 0034 calls ``apply_plan(conn, build_plan(snapshot(conn)))``.
 
 The dry-run report is ``backend/scripts/model_unification_plan.py``.
-Design and decisions: docs/tasks/model-backends-unification-plan.md.
+Design and decisions: docs/archive/model-backends-unification-plan.md.
 
 Frozen semantics: migration 0034 depends on this module. Changing what
 build_plan decides changes what that migration does on a database that has not

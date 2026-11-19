@@ -1,6 +1,6 @@
 """Pydantic schemas for MCP server CRUD endpoints.
 
-Plan: docs/tasks/agents-mcp-plan.md — "API REST nueva" / MCP servers.
+Plan: docs/archive/agents-mcp-plan.md — "API REST nueva" / MCP servers.
 
 Secrets handling:
 

@@ -15,7 +15,7 @@ admision:
   ``DurationEstimator``) y espera de la cola simulando la liberacion de slots.
 * **Contexto por modelo**: niveles de contexto por colocacion (1 o 2 GPU), el
   activo, y lo reservado/ocupado por cada peticion. Ver la seccion "Barra de
-  contexto" de ``docs/tasks/dashboard-redesign-plan.md``.
+  contexto" de ``docs/archive/dashboard-redesign-plan.md``.
 
 Todo es de solo lectura y tolerante a fallos: un dato que no se puede calcular
 sale como ``None``, nunca rompe el endpoint.

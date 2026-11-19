@@ -3,7 +3,7 @@
 The nodes of a federation add up their models (local + what each peer
 offers, warm or cold). Each model can carry a strategy for choosing among
 the places that have it. Decided with the user on 2026-11-17 (see
-docs/tasks/federation-strategies-plan.md); strategies are added one at a
+docs/archive/federation-strategies-plan.md); strategies are added one at a
 time, as use cases need them:
 
 * ``auto`` — the default: warm beats cold, local bias (what federation did

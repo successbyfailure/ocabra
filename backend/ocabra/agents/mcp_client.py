@@ -15,7 +15,7 @@ override headers baked into the server config — that invariant is enforced by
 The ``mcp`` SDK is imported lazily so that a dev environment without the
 package can still import this module and run the tests that mock the clients.
 
-Plan: docs/tasks/agents-mcp-plan.md — "Contratos" / MCPClientInterface.
+Plan: docs/archive/agents-mcp-plan.md — "Contratos" / MCPClientInterface.
 """
 
 from __future__ import annotations

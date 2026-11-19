@@ -3,7 +3,7 @@
 A separate ``backend_type`` from upstream ``llama_cpp`` on purpose, so both can
 be installed at the same time and compared A/B, with per-model rollback by
 pointing a profile's ``base_model_id`` at one or the other. Decided 2026-11-06;
-see ``docs/tasks/backend-distribution-plan.md``.
+see ``docs/archive/backend-distribution-plan.md``.
 
 Everything about running a model is inherited from :class:`LlamaCppBackend` —
 the fork is upstream plus extra endpoints, not a different engine. Only the

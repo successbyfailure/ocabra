@@ -1,6 +1,6 @@
 """Pydantic schemas for agent CRUD endpoints.
 
-Plan: docs/tasks/agents-mcp-plan.md — "API REST nueva" / Agents.
+Plan: docs/archive/agents-mcp-plan.md — "API REST nueva" / Agents.
 
 Exactly one of ``base_model_id`` / ``profile_id`` must be set on create.
 ``AgentMCPServerLink.allowed_tools`` is an agent-scoped tool allowlist that is
