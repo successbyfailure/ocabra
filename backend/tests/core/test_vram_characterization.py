@@ -721,3 +721,18 @@ async def test_a_whisper_reservation_does_not_block_the_scheduler_like_a_service
         assert not env.gpu.has_service_lock(GPU_3060)
         assert await env.gpu.get_free_vram(GPU_3060) == 12_288 - 3_400 - 512
         assert await env.gpu.get_physical_free_vram(GPU_3060) == 12_288 - 3_400 - 512
+
+
+async def test_watchdog_rereads_the_card_before_evicting(monkeypatch):
+    """The tick reads the poll, then takes the arbiter: a release the poll has
+    not published yet must not cost a second model its place."""
+    monkeypatch.setattr(settings, "vram_eviction_threshold", 0.9, raising=False)
+    with Env(publish_lag_s=60.0) as env:
+        await env.resident("old", 12_000, [GPU_3090], last_used_s_ago=1_000)
+        await env.resident("new", 6_000, [GPU_3090], last_used_s_ago=1)
+        await env.resident("gone", 5_000, [GPU_3090], last_used_s_ago=1)
+        env.world.publish()
+        # "gone"'s process exits outside oCabra's books (crash): only NVML sees it.
+        env.world.release(env.backend.pids.pop("gone"))
+        await _one_watchdog_tick(env, monkeypatch)
+        assert env.backend.unloads == []

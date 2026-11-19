@@ -1694,11 +1694,31 @@ class ModelManager:
                                 if not held:
                                     logger.debug("vram_watchdog_skipped_load_in_progress")
                                     continue
-                                await self._evict_for_space(gpu_state.index, over_mb)
+                                # Re-read under the arbiter: the figure above
+                                # may predate a release or an eviction.
+                                over_mb = await self._watchdog_overage_mb(
+                                    gpu_state.index, threshold, over_mb
+                                )
+                                if over_mb > 0:
+                                    await self._evict_for_space(gpu_state.index, over_mb)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.warning("vram_watchdog_error", error=str(exc))
+
+    async def _watchdog_overage_mb(self, gpu_index: int, threshold: float, fallback: int) -> int:
+        """MB over the watchdog threshold on one GPU, read now (``fallback``
+        when no reading is available)."""
+        try:
+            self._refresh_live([gpu_index])
+            state = await self._gpu_manager.get_state(gpu_index)
+            used = int(state.used_vram_mb)
+            total = int(state.total_vram_mb)
+        except Exception:  # noqa: BLE001 - keep the figure the tick started with
+            return fallback
+        if total <= 0:
+            return fallback
+        return used - int(total * threshold)
 
     def set_gpu_manager(self, gpu_manager) -> None:
         self._gpu_manager = gpu_manager
