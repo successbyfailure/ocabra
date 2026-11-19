@@ -285,8 +285,8 @@ async def get_service_generations(
         "Evict on-demand/warm inference models (and other evictable services) on "
         "this service's preferred GPU until vram_needed_mb is free. Never evicts "
         "PIN-policy models. Call this right before loading a heavy pipeline in a "
-        "service that manages its own VRAM outside of oCabra's scheduler (Hunyuan, "
-        "TRELLIS.2, ...) — those services never trigger eviction on their own."
+        "service that manages its own VRAM outside of oCabra's scheduler (TRELLIS.2, "
+        "...) — those services never trigger eviction on their own."
     ),
     responses={404: {"description": "Service not found"}},
 )
