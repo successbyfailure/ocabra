@@ -870,6 +870,20 @@ async def delete_profile_alias(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Delete one alias of a profile.
+
+    Requires the ``model_manager`` role.
+
+    Args:
+        profile_id: Profile that owns the alias.
+        alias_id: Alias to remove (may contain ``/``).
+
+    Returns:
+        ``{"ok": True, "profile_id": str, "alias_id": str}``.
+
+    Raises:
+        HTTPException 404: the alias does not exist or belongs to another profile.
+    """
     registry = _get_registry(request)
     resolved = await registry.resolve_alias(alias_id)
     if resolved is None or resolved[0].profile_id != profile_id:
@@ -986,6 +1000,23 @@ async def rename_profile(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Rename a profile and update every router that targets it.
+
+    Requires the ``model_manager`` role. Historical
+    ``request_stats.via_router_profile_id`` rows keep the old id on purpose.
+    The OpenAI TTS voice-map cache is reloaded afterwards.
+
+    Args:
+        profile_id: Current profile id.
+        body: ``ProfileRename`` with ``new_profile_id``.
+
+    Returns:
+        The renamed profile.
+
+    Raises:
+        HTTPException 400: invalid or duplicate ``new_profile_id``.
+        HTTPException 404: unknown profile.
+    """
     registry = _get_registry(request)
     async with AsyncSessionLocal() as session:
         try:
@@ -1019,6 +1050,23 @@ async def clone_profile(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Copy a profile under a new id.
+
+    Requires the ``model_manager`` role. The clone never inherits
+    ``is_default``, so a base model keeps a single default profile.
+
+    Args:
+        profile_id: Source profile id.
+        body: ``ProfileClone`` with ``new_profile_id`` and optional
+            ``display_name``.
+
+    Returns:
+        The new profile (HTTP 201).
+
+    Raises:
+        HTTPException 400: invalid or duplicate ``new_profile_id``.
+        HTTPException 404: unknown source profile.
+    """
     registry = _get_registry(request)
     async with AsyncSessionLocal() as session:
         try:

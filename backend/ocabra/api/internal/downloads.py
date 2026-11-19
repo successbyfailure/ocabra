@@ -759,6 +759,15 @@ async def list_downloads(
     # (2026-11-09). Lanzar o cancelar sigue pidiendo model_manager.
     _user: UserContext = Depends(require_role("user")),
 ) -> list[DownloadJob]:
+    """List every download job, most recent first.
+
+    Open to any authenticated user (role ``user``) for the header's download
+    indicator; enqueueing and cancelling still require ``model_manager``.
+
+    Returns:
+        A list of ``DownloadJob`` (queued, downloading, completed, failed,
+        cancelled).
+    """
     return await download_manager.list_jobs()
 
 
@@ -776,6 +785,22 @@ async def enqueue_download(
     request: DownloadCreateRequest,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> DownloadJob:
+    """Queue a model download from HuggingFace, Ollama or BitNet.
+
+    Requires the ``model_manager`` role. With ``register``/``register_config`` the
+    model is registered automatically when the download completes.
+
+    Args:
+        request: ``DownloadCreateRequest`` (``source``, ``model_ref``, ``artifact``,
+            ``register_config``, ``allow_patterns``, ``local_dir``, ``revision``,
+            ``register``).
+
+    Returns:
+        The queued ``DownloadJob``.
+
+    Raises:
+        HTTPException 400: invalid source, or missing artifact for ``bitnet``.
+    """
     try:
         return await download_manager.enqueue(
             source=request.source,
@@ -838,6 +863,19 @@ async def cancel_download(
     job_id: str,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict[str, bool]:
+    """Cancel a queued or running download job.
+
+    Requires the ``model_manager`` role. Finished jobs are left unchanged.
+
+    Args:
+        job_id: Download job id.
+
+    Returns:
+        ``{"ok": True}``.
+
+    Raises:
+        HTTPException 404: unknown job.
+    """
     try:
         await download_manager.cancel(job_id)
     except KeyError as exc:
@@ -855,6 +893,22 @@ async def stream_download_progress(
     job_id: str,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> StreamingResponse:
+    """Stream a download job's progress as Server-Sent Events.
+
+    Requires the ``model_manager`` role. Relays the Redis channel
+    ``download:progress:{job_id}``; each event is a ``data:`` line with the job
+    JSON. The stream does not end by itself: the client closes it once the job
+    reaches a terminal status.
+
+    Args:
+        job_id: Download job id.
+
+    Returns:
+        ``text/event-stream``.
+
+    Raises:
+        HTTPException 404: unknown job.
+    """
     if await download_manager.get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="Download job not found")
 

@@ -1611,6 +1611,21 @@ async def cancel_model_load(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Cancel the in-progress load of a model and of its derived workers.
+
+    Requires the ``model_manager`` role. The load task is cancelled so its own
+    cleanup frees the port and the VRAM reservation.
+
+    Args:
+        model_id: Canonical model id or derived ``::<hash>`` worker key.
+
+    Returns:
+        ``{"model_id": str, "cancelled_workers": list[str]}``.
+
+    Raises:
+        HTTPException 404: unknown model.
+        HTTPException 409: no cancellable load is active.
+    """
     mm = request.app.state.model_manager
     if not await mm.get_state(model_id):
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
@@ -1630,6 +1645,23 @@ async def downsize_model_runtime(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Bring an idle multi-GPU runtime of a model back to its default preset.
+
+    Requires the ``model_manager`` role. Picks the loaded derived worker with the
+    largest effective context that can be downsized and reloads it on its
+    one-GPU default.
+
+    Args:
+        model_id: Canonical model id.
+
+    Returns:
+        ``{"model_id": str, "downsized_worker": str}``.
+
+    Raises:
+        HTTPException 404: unknown model.
+        HTTPException 409: no downsizable runtime is loaded, or it has requests
+            in flight.
+    """
     mm = request.app.state.model_manager
     if not await mm.get_state(model_id):
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
@@ -1732,6 +1764,22 @@ async def set_model_maintenance(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Pause or resume admission of new requests for a model.
+
+    Requires the ``model_manager`` role. While enabled, new requests for the model
+    and its derived workers get 503; requests in flight finish. In-memory only:
+    an API restart clears it.
+
+    Args:
+        model_id: Canonical model id.
+        body: ``MaintenanceToggle`` with ``enabled``.
+
+    Returns:
+        ``{"model_id": str, "maintenance": bool}``.
+
+    Raises:
+        HTTPException 404: unknown model.
+    """
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
     if not state:

@@ -37,6 +37,14 @@ async def list_services(
     # Arrancar, parar o descargar un servicio sigue pidiendo model_manager.
     _user: UserContext = Depends(require_role("user")),
 ) -> list[dict]:
+    """List the state of every registered interactive service.
+
+    Open to any authenticated user (role ``user``) so the dashboard can show it;
+    starting, stopping or unloading a service still requires ``model_manager``.
+
+    Returns:
+        One service state dict (ComfyUI, A1111, TRELLIS.2, ...) per service.
+    """
     sm = request.app.state.service_manager
     states = await sm.list_states()
     return [state.to_dict() for state in states]
@@ -93,6 +101,19 @@ async def refresh_service(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Run a health check and runtime probe and return the refreshed state.
+
+    Requires the ``model_manager`` role.
+
+    Args:
+        service_id: Service identifier.
+
+    Returns:
+        The updated service state dict.
+
+    Raises:
+        HTTPException 404: unknown service.
+    """
     sm = request.app.state.service_manager
     try:
         state = await sm.refresh(service_id)
@@ -116,6 +137,23 @@ async def patch_service_runtime(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Record whether a service has its runtime/weights loaded.
+
+    Requires the ``model_manager`` role. Used by services that manage their own
+    VRAM to report load/unload; optionally sets the active model reference.
+
+    Args:
+        service_id: Service identifier.
+        body: ``ServiceRuntimePatch`` (``runtime_loaded``, ``active_model_ref``,
+            ``detail``).
+
+    Returns:
+        The updated service state dict.
+
+    Raises:
+        HTTPException 404: unknown service.
+        HTTPException 409: the requested runtime state conflicts with the current one.
+    """
     sm = request.app.state.service_manager
     try:
         state = await sm.mark_runtime(
@@ -170,6 +208,22 @@ async def start_service(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Start the Docker container of an interactive service.
+
+    Requires the ``model_manager`` role.
+
+    Args:
+        service_id: Service identifier.
+
+    Returns:
+        The service state dict after starting.
+
+    Raises:
+        HTTPException 404: unknown service.
+        HTTPException 409: the service manager refused the start (e.g. already
+            running).
+        HTTPException 502: the container could not be started.
+    """
     sm = request.app.state.service_manager
     try:
         state = await sm.start_service(service_id)
@@ -242,6 +296,24 @@ async def ensure_service_vram(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Free VRAM on a service's preferred GPU before it loads a heavy pipeline.
+
+    Requires the ``model_manager`` role. Evicts on-demand/warm models (never PIN)
+    and other evictable services until ``vram_needed_mb`` is free, then reserves
+    that amount for the service until it unloads. The reservation is taken even
+    when eviction falls short, because the caller loads anyway.
+
+    Args:
+        service_id: Service identifier.
+        body: ``EnsureVramRequest`` (``vram_needed_mb``, ``suppress_reload_seconds``).
+
+    Returns:
+        ``{"ok": True, "gpu_indices": [...]}`` when enough VRAM was freed, or
+        ``{"ok": False, "detail": str}`` when it was not (still HTTP 200).
+
+    Raises:
+        HTTPException 404: unknown service.
+    """
     sm = request.app.state.service_manager
     state = await sm.get_state(service_id)
     if state is None:
@@ -291,6 +363,21 @@ async def unload_service(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Unload a service's runtime/weights to free its GPU VRAM.
+
+    Requires the ``model_manager`` role.
+
+    Args:
+        service_id: Service identifier.
+
+    Returns:
+        The service state dict after unloading.
+
+    Raises:
+        HTTPException 404: unknown service.
+        HTTPException 409: the service is not in an unloadable state.
+        HTTPException 502: the unload request to the service failed.
+    """
     sm = request.app.state.service_manager
     try:
         state = await sm.unload(service_id, reason="manual")

@@ -44,6 +44,18 @@ async def list_entries(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[dict]:
+    """List every OpenAI TTS (model, voice) -> profile pin.
+
+    Requires the ``model_manager`` role. Empty when nothing is pinned, in which
+    case OpenAI's own names (``tts-1`` + ``alloy``...) get a 404 on
+    ``/v1/audio/speech``.
+
+    Returns:
+        A list of ``OpenAITTSVoiceMapOut`` dicts.
+
+    Raises:
+        HTTPException 503: the compat registry is not initialised yet.
+    """
     registry = _get_registry(request)
     return [
         OpenAITTSVoiceMapOut.model_validate(e).model_dump(mode="json") for e in registry.list_all()
@@ -67,6 +79,23 @@ async def upsert_entry(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Create or overwrite the pin of an OpenAI (model, voice) pair.
+
+    Requires the ``model_manager`` role.
+
+    Args:
+        openai_model: OpenAI TTS model name (e.g. ``tts-1``).
+        voice_name: OpenAI voice name (e.g. ``alloy``).
+        body: ``OpenAITTSVoiceMapUpsert`` with ``target_profile_id`` (an existing,
+            enabled execution or router profile).
+
+    Returns:
+        The stored ``OpenAITTSVoiceMapOut``.
+
+    Raises:
+        HTTPException 400: the target profile is missing, unknown or disabled.
+        HTTPException 503: the compat registry is not initialised yet.
+    """
     registry = _get_registry(request)
     async with AsyncSessionLocal() as session:
         try:
@@ -92,6 +121,21 @@ async def delete_entry(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Remove the pin of an OpenAI (model, voice) pair.
+
+    Requires the ``model_manager`` role.
+
+    Args:
+        openai_model: OpenAI TTS model name.
+        voice_name: OpenAI voice name.
+
+    Returns:
+        ``{"ok": True}``.
+
+    Raises:
+        HTTPException 404: no such pin.
+        HTTPException 503: the compat registry is not initialised yet.
+    """
     registry = _get_registry(request)
     async with AsyncSessionLocal() as session:
         deleted = await registry.delete(session, openai_model=openai_model, voice_name=voice_name)

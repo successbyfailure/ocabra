@@ -94,6 +94,13 @@ class UpdateStartResponse(BaseModel):
 async def get_ollama_version(
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> VersionInfo:
+    """Return the local Ollama daemon version and the latest upstream release.
+
+    Requires the ``model_manager`` role.
+
+    Returns:
+        ``VersionInfo`` (``current``, ``latest``, ``update_available``).
+    """
     current, latest = await asyncio.gather(
         _registry.get_version(),
         _registry.get_latest_version(),
@@ -113,6 +120,15 @@ async def get_ollama_version(
 async def get_server_update_status(
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Return the state of the most recent Ollama daemon update.
+
+    Requires the ``model_manager`` role.
+
+    Returns:
+        Snapshot dict: ``status`` (``idle``, ``pulling``, ``restarting``, ``done``, ``error``),
+        ``detail``, ``started_at``, ``finished_at``, ``from_version``,
+        ``to_version``.
+    """
     return _update_state.snapshot()
 
 
@@ -128,6 +144,18 @@ async def get_server_update_status(
 async def start_server_update(
     _user: UserContext = Depends(require_role("system_admin")),
 ) -> UpdateStartResponse:
+    """Start updating the Ollama daemon container in the background.
+
+    Requires the ``system_admin`` role. Pulls the latest image (or rebuilds it
+    with ``--pull`` when the compose service uses ``build:``) through the
+    docker-agent and recreates the service; poll ``GET /ollama/server/update``.
+
+    Returns:
+        ``UpdateStartResponse`` with ``status="pulling"``.
+
+    Raises:
+        HTTPException 409: an update is already pulling or restarting.
+    """
     if _update_state.status in {"pulling", "restarting"}:
         raise HTTPException(status_code=409, detail="An Ollama update is already running")
 

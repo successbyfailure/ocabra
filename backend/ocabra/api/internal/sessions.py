@@ -73,6 +73,19 @@ async def list_sessions(
     request: Request,
     _user: UserContext = Depends(require_role("system_admin")),
 ) -> list[SessionInfoOut]:
+    """List the live Realtime sessions held by the SessionRegistry.
+
+    Requires the ``system_admin`` role.
+
+    Returns:
+        One ``SessionInfoOut`` per session: owner, API key name,
+        ``workers_held``, timestamps, ``is_paused`` (idle longer than
+        ``SESSION_PAUSE_THRESHOLD_S``; soft signal) and ``is_zombie`` (idle longer
+        than ``SESSION_MAX_IDLE_S``; the sweeper will drop it).
+
+    Raises:
+        HTTPException 503: the registry is not initialised yet (``Retry-After``).
+    """
     registry = _get_registry(request)
     pause_threshold = int(settings.session_pause_threshold_s)
     max_idle = int(settings.session_max_idle_s)
@@ -110,6 +123,21 @@ async def kill_session(
     request: Request,
     _user: UserContext = Depends(require_role("system_admin")),
 ) -> KillResponse:
+    """Unregister a Realtime session, releasing its workers for eviction.
+
+    Requires the ``system_admin`` role. Only the registry entry is removed: the
+    WebSocket itself is not closed by this call.
+
+    Args:
+        session_id: Session id from ``GET /sessions``.
+
+    Returns:
+        ``KillResponse`` (``session_id``, ``killed=True``).
+
+    Raises:
+        HTTPException 404: unknown session.
+        HTTPException 503: the registry is not initialised yet (``Retry-After``).
+    """
     registry = _get_registry(request)
     if registry.get(session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")

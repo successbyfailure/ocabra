@@ -64,6 +64,29 @@ async def upscale_video(
     crf: Annotated[int, Form()] = 14,
     _user: UserContext = Depends(require_role("user")),
 ) -> Response:
+    """Upscale/restore one self-contained video segment.
+
+    Any authenticated user (role ``user``) with access to the model; routers are
+    resolved like on ``/v1``. The worker is reloaded once if it is missing,
+    unhealthy or drops the connection. The request is recorded in stats as
+    ``video_upscale``.
+
+    Args:
+        file: Video segment without audio (multipart).
+        model: Upscaler model id or router (needs ``video_upscaling``).
+        target_height: Optional output height in pixels.
+        crf: Encoder CRF of the output (default 14).
+
+    Returns:
+        The upscaled segment as ``video/mp4``; the worker's stats headers
+        (frames, fps, VRAM, resolution) are forwarded.
+
+    Raises:
+        HTTPException 400: empty segment, or the model lacks the capability.
+        HTTPException 503: the upscaler worker is unavailable (``Retry-After``).
+        HTTPException: the worker's own error status (e.g. 507 for VRAM) is
+            passed through.
+    """
     payload = await file.read()
     if not payload:
         raise HTTPException(status_code=400, detail="Empty video segment")

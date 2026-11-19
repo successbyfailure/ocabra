@@ -38,6 +38,16 @@ async def server_status(
     request: Request,
     _user: UserContext = Depends(require_role("user")),
 ) -> dict[str, Any]:
+    """Return a snapshot of model loads and resident workers.
+
+    Any authenticated user (role ``user``). Never fails with 500: counters that
+    cannot be read are left empty.
+
+    Returns:
+        ``loads`` (``queue_depth``, ``waiting``, ``active``, ``in_progress``,
+        ``waiting_for_service_gpu``) and ``workers`` (``loaded_count``,
+        ``loaded_ids``, ``in_flight_requests``).
+    """
     mm = request.app.state.model_manager
     in_progress = sorted(getattr(mm, "_load_in_progress", set()) or ())
     queue_waiters = int(getattr(mm, "_load_queue_waiters", 0) or 0)

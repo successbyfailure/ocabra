@@ -185,6 +185,14 @@ async def _validate_subagent_slugs(
 async def list_agents(
     user: UserContext = Depends(require_role("user")),
 ) -> list[AgentOut]:
+    """List the agents visible to the caller, ordered by slug.
+
+    Any authenticated user (role ``user``). Admins see every agent; other users
+    only public agents (``group_id`` NULL) and those of their groups.
+
+    Returns:
+        A list of ``AgentOut`` with their MCP server links.
+    """
     async with AsyncSessionLocal() as session:
         rows = (
             (
@@ -271,6 +279,20 @@ async def get_agent(
     slug: str,
     user: UserContext = Depends(require_role("user")),
 ) -> AgentOut:
+    """Return one agent by slug.
+
+    Any authenticated user (role ``user``) with access to the agent's group.
+
+    Args:
+        slug: Agent slug.
+
+    Returns:
+        The ``AgentOut``.
+
+    Raises:
+        HTTPException 403: the agent belongs to a group the caller is not in.
+        HTTPException 404: unknown agent.
+    """
     async with AsyncSessionLocal() as session:
         row = await _load_agent_or_404(session, slug)
     if not _is_agent_accessible(row, user):
@@ -292,6 +314,25 @@ async def update_agent(
     body: AgentUpdate,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> AgentOut:
+    """Patch an agent; only the fields sent are changed.
+
+    Requires the ``model_manager`` role. Setting ``base_model_id`` clears
+    ``profile_id`` and vice versa (exactly one must remain). ``mcp_servers``,
+    when sent, replaces the whole link set; ``subagent_slugs`` must name
+    existing agents.
+
+    Args:
+        slug: Agent slug (not changeable).
+        body: ``AgentUpdate``.
+
+    Returns:
+        The updated ``AgentOut``.
+
+    Raises:
+        HTTPException 400: base/profile constraint broken, unknown MCP server or
+            subagent.
+        HTTPException 404: unknown agent.
+    """
     patch = body.model_dump(exclude_unset=True)
     async with AsyncSessionLocal() as session:
         row = await _load_agent_or_404(session, slug)
@@ -373,6 +414,19 @@ async def delete_agent(
     slug: str,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict[str, Any]:
+    """Delete an agent and its MCP server links.
+
+    Requires the ``model_manager`` role.
+
+    Args:
+        slug: Agent slug.
+
+    Returns:
+        ``{"ok": True, "slug": str}``.
+
+    Raises:
+        HTTPException 404: unknown agent.
+    """
     async with AsyncSessionLocal() as session:
         row = await _load_agent_or_404(session, slug)
         await session.delete(row)

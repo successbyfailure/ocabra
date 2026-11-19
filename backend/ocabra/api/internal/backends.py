@@ -151,6 +151,15 @@ async def list_backends(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[dict[str, Any]]:
+    """List every known inference backend with its install state.
+
+    Requires the ``model_manager`` role. Built-in backends are included with
+    ``install_source='built-in'``.
+
+    Returns:
+        One ``BackendStateResponse`` per backend, plus ``models_loaded``: how many
+        models of that backend are currently loaded.
+    """
     installer = _get_installer(request)
     loaded = await _loaded_by_backend(request)
     return [
@@ -171,6 +180,19 @@ async def get_backend(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict[str, Any]:
+    """Return the install state of a single backend.
+
+    Requires the ``model_manager`` role.
+
+    Args:
+        backend_type: Backend identifier (e.g. ``vllm``, ``llama_cpp``).
+
+    Returns:
+        ``BackendStateResponse`` plus ``models_loaded``.
+
+    Raises:
+        HTTPException 404: the backend is not registered.
+    """
     installer = _get_installer(request)
     try:
         state = installer.get_state(backend_type)
@@ -205,6 +227,25 @@ async def install_backend(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> StreamingResponse:
+    """Install (or update) a modular backend, streaming progress as SSE.
+
+    Requires the ``model_manager`` role. Unknown backends and blocked reinstalls
+    fail before the stream opens; errors during the install arrive as a
+    ``data: {"error": ...}`` event instead.
+
+    Args:
+        backend_type: Backend identifier.
+        payload: ``InstallRequest`` with ``method`` (``auto``, ``oci`` or ``source``).
+
+    Returns:
+        ``text/event-stream`` with one ``data:`` line (backend state JSON) per
+        progress update, ending at ``installed`` or ``error``.
+
+    Raises:
+        HTTPException 404: the backend is not registered.
+        HTTPException 409: an install is already running or models of this
+            backend are loaded.
+    """
     installer = _get_installer(request)
 
     # Fail fast on unknown backend / invalid method so the caller gets a real
@@ -270,6 +311,18 @@ async def install_backend_get(
     method: str = "auto",
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> StreamingResponse:
+    """GET alias of the install stream, for the browser ``EventSource`` API.
+
+    Requires the ``model_manager`` role. Same behaviour and errors as the POST
+    variant.
+
+    Args:
+        backend_type: Backend identifier.
+        method: Install method as a query parameter (default ``auto``).
+
+    Returns:
+        The same ``text/event-stream`` as ``POST /backends/{backend_type}/install``.
+    """
     return await install_backend(
         backend_type,
         InstallRequest(method=method),
@@ -296,6 +349,20 @@ async def uninstall_backend(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict[str, Any]:
+    """Uninstall a modular backend.
+
+    Requires the ``model_manager`` role.
+
+    Args:
+        backend_type: Backend identifier.
+
+    Returns:
+        The resulting ``BackendStateResponse``.
+
+    Raises:
+        HTTPException 404: the backend is not registered.
+        HTTPException 409: models of this backend are loaded, or it is built-in.
+    """
     installer = _get_installer(request)
     try:
         state = await installer.uninstall(backend_type)
@@ -323,6 +390,20 @@ async def get_backend_logs(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict[str, Any]:
+    """Return the captured output of the last install/uninstall of a backend.
+
+    Requires the ``model_manager`` role. The buffer is bounded; the oldest lines
+    are dropped first.
+
+    Args:
+        backend_type: Backend identifier.
+
+    Returns:
+        ``{"backend_type": str, "lines": list[str]}``.
+
+    Raises:
+        HTTPException 404: the backend is not registered.
+    """
     installer = _get_installer(request)
     try:
         lines = installer.get_logs(backend_type)

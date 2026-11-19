@@ -220,6 +220,18 @@ async def list_local_models(
     refresh: bool = Query(default=False, description="Bypass the 30-s scan cache"),
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[LocalModel]:
+    """List the model files found under the models directory.
+
+    Requires the ``model_manager`` role. Also scans the shared Ollama models
+    directory when ``OLLAMA_SHARED_MODELS_DIR`` is set. Results are cached for
+    about 30 s.
+
+    Args:
+        refresh: ``true`` drops the cache and re-walks the disk.
+
+    Returns:
+        A list of ``LocalModel``.
+    """
     if refresh:
         _local_scanner.invalidate()
     ollama_shared = (
@@ -283,6 +295,27 @@ async def register_local_model(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict:
+    """Register weights that are already on disk under an explicit backend.
+
+    Requires the ``model_manager`` role. The exact file is pinned as
+    ``model_path`` in the backend's config section, launch defaults are applied,
+    and the model's default profile is created so it shows up in ``/v1/models``
+    without a restart.
+
+    Args:
+        body: ``RegisterLocalModelRequest`` (``model_ref``, ``path``,
+            ``backend_type``, optional ``display_name``, ``load_policy``,
+            ``preferred_gpu``).
+
+    Returns:
+        The new model state dict.
+
+    Raises:
+        HTTPException 400: unknown backend, invalid path, path outside
+            ``MODELS_DIR``/``OLLAMA_SHARED_MODELS_DIR``, or rejected config.
+        HTTPException 404: the path is not an existing file.
+        HTTPException 409: the resulting model id is already registered.
+    """
     if body.backend_type not in KNOWN_BACKEND_TYPES:
         raise HTTPException(status_code=400, detail=f"Unknown backend '{body.backend_type}'")
 

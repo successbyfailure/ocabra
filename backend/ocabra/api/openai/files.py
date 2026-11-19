@@ -123,6 +123,18 @@ async def list_files(
     purpose: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=10000),
 ) -> dict:
+    """List the caller's uploaded files, newest first (OpenAI-compatible).
+
+    Anonymous callers get an empty list. Only the caller's own files are listed,
+    admins included.
+
+    Args:
+        purpose: Optional filter by ``purpose`` (e.g. ``batch``).
+        limit: Maximum number of files (1-10000, default 100).
+
+    Returns:
+        ``{"object": "list", "data": [file objects], "has_more": bool}``.
+    """
     if user.user_id is None:
         return {"object": "list", "data": [], "has_more": False}
     async with AsyncSessionLocal() as session:
@@ -162,6 +174,19 @@ async def retrieve_file(
     file_id: str,
     user: Annotated[UserContext, Depends(get_openai_user)],
 ) -> dict:
+    """Return the metadata of one uploaded file (OpenAI-compatible).
+
+    Owners and admins only; anyone else gets the same 404 as a missing file.
+
+    Args:
+        file_id: File id, with or without the ``file-`` prefix.
+
+    Returns:
+        The OpenAI file object.
+
+    Raises:
+        HTTPException 404: ``file_not_found``.
+    """
     record = await _load_file(file_id, user)
     return record.to_openai_dict()
 
@@ -171,6 +196,19 @@ async def file_content(
     file_id: str,
     user: Annotated[UserContext, Depends(get_openai_user)],
 ):
+    """Download the raw content of an uploaded file (OpenAI-compatible).
+
+    Owners and admins only. Also used to fetch Batches output and error files.
+
+    Args:
+        file_id: File id, with or without the ``file-`` prefix.
+
+    Returns:
+        The file bytes as ``application/octet-stream``.
+
+    Raises:
+        HTTPException 404: ``file_not_found`` (unknown, not yours, or missing on disk).
+    """
     record = await _load_file(file_id, user)
     path = Path(record.storage_path)
     if not path.exists():  # noqa: ASYNC240 — solo metadatos (microsegundos); un to_thread costaria mas que la syscall
@@ -191,6 +229,20 @@ async def delete_file(
     file_id: str,
     user: Annotated[UserContext, Depends(get_openai_user)],
 ) -> dict:
+    """Delete an uploaded file and its content on disk (OpenAI-compatible).
+
+    Owners and admins only.
+
+    Args:
+        file_id: File id, with or without the ``file-`` prefix.
+
+    Returns:
+        ``{"id": ..., "object": "file", "deleted": true}``.
+
+    Raises:
+        HTTPException 404: ``file_not_found``.
+        HTTPException 409: ``file_in_use``: an active batch uses it as input.
+    """
     record = await _load_file(file_id, user)
     file_uuid = record.id
     async with AsyncSessionLocal() as session:

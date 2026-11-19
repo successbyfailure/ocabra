@@ -215,6 +215,21 @@ async def update_single_model(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> DownloadJob:
+    """Enqueue a re-pull of one installed model from its original registry.
+
+    Requires the ``model_manager`` role. The job goes through the normal download
+    queue (``kind="update"``) and is followed like any other download.
+
+    Args:
+        model_id: Canonical model id (``backend/model``).
+
+    Returns:
+        The enqueued ``DownloadJob``.
+
+    Raises:
+        HTTPException 404: unknown model.
+        HTTPException 409: the model has no re-pullable remote source.
+    """
     mm = request.app.state.model_manager
     state = await mm.get_state(model_id)
     if not state:
@@ -242,6 +257,16 @@ async def refresh_models_metadata(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> RefreshMetadataResponse:
+    """Refresh ``release_date``/``last_updated`` of every installed model.
+
+    Requires the ``model_manager`` role. Queries each model's upstream registry
+    (HuggingFace / Ollama) sequentially and stores the result under
+    ``extra_config.registry_metadata``.
+
+    Returns:
+        ``RefreshMetadataResponse`` with ``refreshed`` model ids and ``skipped``
+        entries (``model_id`` + ``reason``).
+    """
     mm = request.app.state.model_manager
     states = await mm.list_states()
 
@@ -286,6 +311,16 @@ async def update_all_models(
     request: Request,
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> UpdateAllResponse:
+    """Enqueue a re-pull for every installed model with a remote source.
+
+    Requires the ``model_manager`` role. Deployments that share the same upstream
+    artifact (e.g. an Ollama model and a llama.cpp profile reading its blob) get
+    a single job, owned preferably by the Ollama one; the rest are skipped.
+
+    Returns:
+        ``UpdateAllResponse`` with the ``enqueued`` jobs and ``skipped`` entries
+        (``model_id`` + ``reason``).
+    """
     mm = request.app.state.model_manager
     states = await mm.list_states()
 

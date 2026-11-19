@@ -52,6 +52,21 @@ async def gpu_usage_stats(
     active_threshold_pct: float = Query(5.0, alias="activeThresholdPct", ge=0.0, le=100.0),
     _user: UserContext = Depends(require_role("user")),
 ) -> dict:
+    """Return per-GPU usage aggregated over a time window.
+
+    Any authenticated user (role ``user``); global data, nothing per user.
+
+    Args:
+        from_dt: Window start (query ``from``, ISO 8601).
+        to_dt: Window end (query ``to``, ISO 8601).
+        active_threshold_pct: Utilisation above which an hour counts as active
+            (query ``activeThresholdPct``, 0-100, default 5).
+
+    Returns:
+        Per GPU: hours covered, active hours, average/peak VRAM, average
+        temperature, estimated kWh, and a time series (hourly up to 72 h,
+        daily beyond).
+    """
     from ocabra.stats.aggregator import get_gpu_usage_stats
 
     return await get_gpu_usage_stats(from_dt, to_dt, active_threshold_pct)
@@ -343,6 +358,23 @@ async def cancel_inflight_request(
     request_id: str,
     user: UserContext = Depends(require_role("user")),
 ) -> dict:
+    """Abort an in-flight inference by its request id.
+
+    Role ``user``: admins cancel any request, everyone else only their own.
+    Cancels the request's asyncio task, which closes the backend connection and
+    stops the generation.
+
+    Args:
+        request_id: Id of the in-flight request (as shown by the live feed).
+
+    Returns:
+        ``{"cancelled": True, "requestId": str, "hadTask": bool}``.
+
+    Raises:
+        HTTPException 403: the caller does not own the request.
+        HTTPException 404: unknown or already finished.
+        HTTPException 503: the model manager is not available (``Retry-After``).
+    """
     mm = getattr(request.app.state, "model_manager", None)
     if mm is None:
         raise HTTPException(

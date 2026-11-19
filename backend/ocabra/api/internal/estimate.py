@@ -63,6 +63,26 @@ async def estimate_request(
     request: Request,
     _user: UserContext = Depends(require_role("user")),
 ) -> EstimateResponse:
+    """Predict how long an inference request would take, without running it.
+
+    Any authenticated user (role ``user``). ``model`` may be a profile id, a
+    router (its first enabled target is used) or a canonical ``backend/model``
+    id. The cold-start cost is added when the model is not loaded.
+
+    Args:
+        body: ``EstimateRequest`` with ``model`` and the would-be request
+            ``body`` (``max_tokens``, ``messages`` or ``input_tokens``...).
+
+    Returns:
+        ``EstimateResponse`` (``expected_seconds``, ``p50_seconds``,
+        ``p95_seconds``, ``confidence``, ``source``, ``sample_count``,
+        ``cold_start_seconds``). Below ``router_confidence_floor`` prefer
+        ``p95_seconds``.
+
+    Raises:
+        HTTPException 404: unknown model or profile.
+        HTTPException 503: the estimator is not initialised yet (``Retry-After``).
+    """
     estimator: DurationEstimator | None = getattr(
         request.app.state, "duration_estimator", None
     )
