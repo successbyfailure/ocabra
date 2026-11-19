@@ -1,14 +1,77 @@
 # Contratos de interfaces entre módulos
 
-Este documento define las interfaces que deben respetar todos los agentes.
-**Consulta este fichero antes de implementar cualquier integración entre módulos.**
-Si necesitas cambiar un contrato, documenta el cambio aquí antes de implementarlo.
+Este documento resume las interfaces entre módulos que conviene conocer antes
+de integrar algo nuevo. **El código es la fuente de verdad**: cada sección
+indica el fichero que define el contrato, y donde el código y este documento
+discrepen, manda el código (y hay que corregir el documento). Las firmas no se
+copian enteras a propósito: se quedaban viejas en cuanto alguien añadía un
+campo.
+
+Última verificación contra el código: **2026-11-19**.
+
+Para la lista de endpoints HTTP, ver `docs/API.md` y el Swagger en `/docs`.
 
 ---
 
 ## 1. BackendInterface — Contrato de backends de inferencia
 
-Todo backend de inferencia (vLLM, Diffusers, Whisper, whisper.cpp, VibeASR, TTS, Ollama, llama.cpp, SGLang, Strata, TensorRT-LLM, BitNet, ACE-Step) debe implementar esta interfaz abstracta.
+Fuente: `backend/ocabra/backends/base.py`. Registro de backends:
+`backend/ocabra/main.py` (`worker_pool.register_backend(...)`) y, para los que
+se instalan por separado, `backend/ocabra/core/backend_installer.py`.
+
+Backends registrados hoy (prefijo del `model_id` = `backend_type`):
+`acestep`, `bitnet`, `chatterbox`, `diffusers`, `flashvsr`, `llama_cpp`,
+`llamacpp_mks`, `mage`, `ollama`, `piper`, `sglang`, `strata`,
+`tensorrt_llm` (solo si su runtime está disponible; si no, se registra como
+deshabilitado), `tts`, `upscaler`, `vibeasr`, `vllm`, `voxtral`, `whisper`,
+`whisper_cpp`.
+
+Todo backend hereda de `BackendInterface` e implementa estos métodos
+abstractos:
+
+| Método | Contrato |
+|--------|----------|
+| `load(model_id, gpu_indices, **kwargs) -> WorkerInfo` | Arranca el proceso del worker y devuelve su `WorkerInfo`. |
+| `unload(model_id)` | Para el worker y libera recursos. |
+| `health_check(model_id) -> bool` | `True` si el worker acepta peticiones. |
+| `get_capabilities(model_id) -> BackendCapabilities` | Capacidades detectadas del modelo. |
+| `get_vram_estimate_mb(model_id, extra_config=None) -> int` | VRAM estimada antes de cargar. `extra_config` es el `ModelState.extra_config` cuando se tiene; `None` debe funcionar igualmente. |
+| `forward_request(model_id, path, body) -> Any` | Reenvía una petición al worker. |
+| `forward_stream(model_id, path, body) -> AsyncIterator[bytes]` | Reenvía una petición streaming. |
+
+Ganchos opcionales con implementación por defecto:
+
+- `install_spec -> BackendInstallSpec | None` (propiedad): cómo instalar el
+  backend con el instalador modular (pip, apt, git, binarios extra, tamaño
+  estimado…). `None` = viene en la imagen o es un servicio externo (Ollama).
+- `prepare_request(model_id, path, body)`: transición previa a una petición
+  (p. ej. activar el proyector de visión de llama.cpp bajo demanda).
+- `request_headers(model_id) -> dict[str, str]`: cabeceras privadas que
+  `WorkerPool` añade al hablar con el worker (Strata, ver 1.1).
+- `attach_port_allocator(assign, release)` / `_acquire_aux_port()` /
+  `_release_aux_port()`: puertos para procesos auxiliares que arranca el propio
+  backend (sondas, sidecars), sacados del mismo rango que los workers
+  (`WORKER_PORT_RANGE_START`–`WORKER_PORT_RANGE_END`).
+- `supported_modalities()` y los métodos multimodales (`generate_text`,
+  `stream_text`, `generate_embeddings`, `generate_image`, `transcribe`,
+  `synthesize_speech`, `rerank`, `upscale_video`), que por defecto lanzan
+  `NotImplementedError`.
+
+`BackendCapabilities` es un dataclass de flags booleanos (`chat`,
+`completion`, `tools`, `vision`, `embeddings`, `pooling`, `rerank`,
+`classification`, `score`, `reasoning`, `image_generation`, `image_editing`,
+`audio_transcription`, `tts`, `music_generation`, `audio_input`,
+`video_input`, `audio_output`, `video_upscaling`, `streaming`) más campos
+numéricos donde `0` significa "desconocido": `context_length` (ventana
+efectiva que servirá el backend), `native_context_length`,
+`max_output_tokens`, `parallel_slots`, `context_per_request`, y el booleano
+`kv_cache_shared` (un único pool KV para todos los slots). Se serializa con
+`to_dict()` / `from_dict()`; consulta `base.py` para el significado exacto de
+cada campo.
+
+`WorkerInfo`: `backend_type`, `model_id`, `gpu_indices`, `port`, `pid`,
+`vram_used_mb` y `endpoint_url` opcional (worker que no escucha en
+`127.0.0.1:port`).
 
 No todo backend necesita un worker Python propio: cuando el proceso nativo
 ya expone HTTP (`whisper-server`, `llama-server`), `load()` lo lanza
@@ -18,77 +81,9 @@ para que el binario sirva exactamente el path que `audio.py` golpea) frente
 a `whisper_backend.py` (sí necesita `workers/whisper_worker.py` porque
 envuelve faster-whisper, una librería Python, no un servidor HTTP nativo).
 
-```python
-# backend/ocabra/backends/base.py
-
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import AsyncIterator, Any
-
-@dataclass
-class BackendCapabilities:
-    chat: bool = False
-    completion: bool = False
-    tools: bool = False
-    vision: bool = False
-    embeddings: bool = False
-    pooling: bool = False
-    rerank: bool = False
-    classification: bool = False
-    score: bool = False
-    reasoning: bool = False
-    image_generation: bool = False
-    audio_transcription: bool = False
-    tts: bool = False
-    music_generation: bool = False
-    streaming: bool = False
-    context_length: int = 0        # Ventana efectiva que servirá el backend (post-cap).
-    native_context_length: int = 0 # Nativa del modelo (opcional, 0 = desconocido).
-
-@dataclass
-class WorkerInfo:
-    backend_type: str           # Backend prefix in model_id; includes "strata" for Strata Terminal deployments.
-    model_id: str
-    gpu_indices: list[int]
-    port: int
-    pid: int
-    vram_used_mb: int
-
-class BackendInterface(ABC):
-
-    @abstractmethod
-    async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
-        """Carga el modelo. Retorna WorkerInfo con el proceso activo."""
-
-    @abstractmethod
-    async def unload(self, model_id: str) -> None:
-        """Descarga el modelo y libera recursos."""
-
-    @abstractmethod
-    async def health_check(self, model_id: str) -> bool:
-        """Retorna True si el worker está listo para recibir peticiones."""
-
-    @abstractmethod
-    async def get_capabilities(self, model_id: str) -> BackendCapabilities:
-        """Detecta y retorna las capacidades del modelo."""
-
-    @abstractmethod
-    async def get_vram_estimate_mb(self, model_id: str) -> int:
-        """Estima la VRAM necesaria antes de cargar el modelo."""
-
-    @abstractmethod
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        """Reenvía una petición al worker. Retorna la respuesta."""
-
-    @abstractmethod
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        """Reenvía una petición streaming al worker."""
-
-    def request_headers(self, model_id: str) -> dict[str, str]:
-        """Cabeceras privadas para WorkerPool; por defecto no añade ninguna."""
-```
-
 ### 1.1 Backend Strata
+
+Fuente: `backend/ocabra/backends/strata_backend.py`.
 
 Un despliegue `strata` sirve un run config creado por Strata Terminal. Su
 artefacto es `{"kind":"strata_config","source":"local","path":"/ruta/strata-*.json","ref":"modelo"}`;
@@ -106,18 +101,13 @@ el worker localhost.
 `_runtime.capacity_vram_by_gpu_mb` declara reservas asimétricas validadas.
 ModelManager usa ese mapa para admisión y locks, sin dividir el total al 50 %.
 
----
-
 ### 1.2 Escalado de vídeo (VIDEO_UPSCALING)
 
-Los backends de escalado (`upscaler`, `flashvsr`) implementan además:
-
-```python
-async def upscale_video(
-    self, model_id: str, video: bytes, **kwargs
-) -> tuple[bytes, dict[str, str]]:
-    """Escala un segmento. Devuelve (bytes, cabeceras `x-ocabra-*` de stats)."""
-```
+Los backends de escalado (`upscaler`, `flashvsr`) implementan
+`upscale_video(model_id, video, **kwargs)` y devuelven
+`(bytes del segmento, cabeceras x-ocabra-* de estadísticas)`. (La firma por
+defecto de `base.py` todavía anota `-> bytes`; los dos backends reales
+devuelven la tupla y es lo que espera `api/internal/video.py`.)
 
 Contrato deliberadamente pobre: **entra un segmento autocontenido sin audio y
 sale el segmento escalado**, sin estado entre peticiones. Así el planificador
@@ -136,183 +126,122 @@ aceptar partes `video_url` dentro de un chat.
 
 ## 2. GPUManager — Contrato de estado de GPU
 
-```python
-# Producido por: core/gpu_manager.py
-# Consumido por: core/scheduler.py, api/internal/gpus.py, stats/gpu_power.py
+Fuente: `backend/ocabra/core/gpu_manager.py` (`GPUState`, `GPUProcessInfo`).
 
-@dataclass
-class GPUState:
-    index: int
-    name: str
-    total_vram_mb: int
-    free_vram_mb: int
-    used_vram_mb: int
-    utilization_pct: float       # 0-100
-    temperature_c: float
-    power_draw_w: float
-    power_limit_w: float
-    locked_vram_mb: int          # VRAM reservada por modelos cargados
-    processes: list[GPUProcessInfo]
+`GPUState`: `index`, `name`, `total_vram_mb`, `free_vram_mb`,
+`used_vram_mb`, `utilization_pct` (0-100), `temperature_c`, `power_draw_w`,
+`power_limit_w`, `locked_vram_mb` (VRAM reservada por oCabra: modelos
+cargados y reservas previas a una asignación) y `processes:
+list[GPUProcessInfo]` (`pid`, `process_name`, `process_type`
+`"compute"|"graphics"`, `used_vram_mb`).
 
-
-
-@dataclass
-class GPUProcessInfo:
-    pid: int
-    process_name: str | None
-    process_type: str            # "compute" | "graphics"
-    used_vram_mb: int
-
-# Publicado en Redis como evento cada N segundos:
-# Canal: "gpu:stats"
-# Payload: list[GPUState] serializado como JSON
-```
+El bucle de sondeo (cada 2 s) guarda cada GPU en la clave Redis
+`gpu:state:{index}` (TTL 5 s) y, cuando oCabra es la fuente de verdad,
+publica la lista completa en el canal `gpu:stats`. Los cambios de power limit
+no se aplican desde la api: se publican en `gpu:set_power_limit`
+(`{"gpu_index", "limit_w"}`) y los aplica `hw-monitor`, que es el contenedor
+con privilegios.
 
 ---
 
 ## 3. ModelManager — Contrato de estado de modelo
 
-```python
-# Producido por: core/model_manager.py
-# Consumido por: api/internal/models.py, api/openai/models.py, api/ollama/tags.py
+Fuente: `backend/ocabra/core/model_manager.py` (`ModelStatus`, `LoadPolicy`,
+`ModelState`).
 
-from enum import Enum
+`ModelStatus`: `discovered`, `configured`, `loading`, `loaded`,
+`unloading`, `unloaded`, `error`.
 
-class ModelStatus(str, Enum):
-    DISCOVERED = "discovered"    # Conocido pero no configurado
-    CONFIGURED = "configured"    # Configurado, no cargado
-    LOADING = "loading"
-    LOADED = "loaded"
-    UNLOADING = "unloading"
-    UNLOADED = "unloaded"
-    ERROR = "error"
+`LoadPolicy`:
 
-class LoadPolicy(str, Enum):
-    PIN = "pin"             # Precargado al arranque, inmune a idle eviction,
-                            # excluido del desalojo educado por presión de VRAM
-                            # (_get_eviction_candidates). Si pin_permanent=False
-                            # (default, "soft pin") sigue siendo el último
-                            # recurso en _get_pressure_eviction_candidates
-                            # cuando no hay ninguna otra forma de hacer sitio,
-                            # y se recarga solo en cuanto vuelve a haber VRAM
-                            # libre. pin_permanent=True ("hard pin") lo excluye
-                            # también de esa vía — solo se mueve por unload
-                            # administrativo explícito o un schedule evict_all.
-    WARM = "warm"           # Cargado bajo demanda (no se precarga al arranque),
-                            # no baja por idle, candidato normal de desalojo
-                            # LRU por presión de VRAM. Nunca se recarga solo
-                            # tras un desalojo — espera a la siguiente petición.
-    ON_DEMAND = "on_demand" # Cargado bajo demanda, baja por idle, primera
-                            # prioridad de desalojo por presión de VRAM.
+- `pin` — precargado al arranque, inmune a la expulsión por inactividad y
+  excluido de la expulsión "educada" (`_get_eviction_candidates`). Con
+  `pin_permanent=False` (por defecto, *soft pin*) sigue siendo el último
+  recurso de la cascada de presión (`_get_pressure_eviction_candidates`, orden
+  decidido en `core/vram_arbiter.rank_pressure_candidates`) y se recarga solo
+  cuando vuelve a haber VRAM. Con `pin_permanent=True` (*hard pin*) tampoco
+  entra en esa cascada: solo se mueve con un unload administrativo o un
+  schedule `evict_all`.
+- `warm` — se carga bajo demanda, no baja por inactividad, candidato normal de
+  expulsión por presión. No se recarga solo tras una expulsión.
+- `on_demand` — se carga bajo demanda, baja por inactividad, primera prioridad
+  de expulsión por presión.
 
-@dataclass
-class ModelState:
-    model_id: str               # Despliegue: "<backend>/<model_key>" (p. ej. "llamacpp_mks/gemma4:26b").
-                            # Formato legacy sin prefijo ya no es válido.
-    model_key: str | None       # Modelo lógico (tabla `models`, = nombre público), p. ej. "gemma4:26b".
-                            # None solo en estados en memoria (inventario Ollama, workers derivados).
-    artifact: dict | None       # Qué fichero sirve: ver ocabra/core/artifacts.py. Las rutas
-                            # (model_path, mmproj, draft) se derivan de aquí en memoria y no se persisten.
-    backend_model_id: str       # Lo que recibe el backend: artifact.ref (tag de Ollama, repo HF, voz...)
-    display_name: str
-    backend_type: str           # Backend prefix in model_id: "vllm" | "bitnet" | "acestep" | "diffusers" | "mage" | "whisper" | "whisper_cpp" | "vibeasr" | "tts" | "chatterbox" | "piper" | "voxtral" | "upscaler" | "flashvsr" | "ollama" | "llama_cpp" | "sglang" | "tensorrt_llm"
-    status: ModelStatus
-    load_policy: LoadPolicy
-    pin_permanent: bool         # Solo aplica si load_policy == PIN — ver arriba
-    preferred_gpu: int | None   # None = usa el default del servidor
-    current_gpu: list[int]      # GPUs actuales (puede ser más de una)
-    vram_used_mb: int
-    capabilities: BackendCapabilities
-    last_request_at: datetime | None
-    loaded_at: datetime | None
-    worker_info: WorkerInfo | None
-    error_message: str | None
-    extra_config: dict
+`ModelState` (campos principales; la lista completa y `to_dict()` están en el
+código):
 
-    # Vista runtime agregada. Para modelos con presets, model_id sigue siendo
-    # el id canónico aunque el proceso real use ``model_id::<hash>``.
-    runtime_phase: str          # configured | loading | loaded | upsizing |
-                                # downsizing | unloading | unloaded | error
-    runtime_worker_id: str | None
-    runtime_slots: int          # Siempre >= 1; capacidad física configurada/activa
-    can_cancel_load: bool       # Hay una tarea LOADING cancelable
-    can_downsize: bool          # Hay un runtime multi-GPU cargado y ocioso
+- Identidad: `model_id` (despliegue `<backend>/<model_key>`, p. ej.
+  `llamacpp_mks/gemma4:26b`), `model_key` (modelo lógico, tabla `models`;
+  `None` en estados solo en memoria), `backend_model_id` (lo que recibe el
+  backend: tag de Ollama, repo HF, voz…), `backend_type`, `display_name`,
+  `artifact` (qué fichero sirve, ver `core/artifacts.py`; las rutas se derivan
+  en memoria y no se persisten).
+- Política: `load_policy`, `pin_permanent`, `preferred_gpu`, `extra_config`.
+- Estado: `status`, `current_gpu`, `vram_used_mb` (max(medido, reservado)),
+  `vram_estimate_mb` (lo que reservó el scheduler), `ram_used_mb` (RSS en
+  cargas solo-CPU), `capabilities`, `worker_info`, `error_message`,
+  `last_request_at`, `loaded_at`, `created_at`, `updated_at`,
+  `reload_suppressed_until`, `live_context` (contexto cambiado en caliente en
+  el fork de llama.cpp; no se persiste).
+- Vista runtime agregada (para modelos con presets, `model_id` sigue siendo el
+  canónico aunque el proceso real use `model_id::<hash>`): `runtime_phase`
+  (`configured|loading|loaded|upsizing|downsizing|unloading|unloaded|error`,
+  o `None`), `runtime_worker_id`, `runtime_slots` (>= 1), `can_cancel_load`,
+  `can_downsize`.
 
-# Publicado en Redis como evento en cada cambio de estado:
-# Canal: "model:events"
-# Payload: {"event": "status_changed", "model_id": str, "new_status": ModelStatus}
-```
+Cada transición se publica en el canal Redis `model:events` con
+`{"event", "model_id", "canonical_model_id", "new_status"}` (eventos:
+`status_changed`, `load_failed`, `load_cancelled`, `unload_failed`,
+`busy_timeout`, `metadata_updated`, `runtime_downsize_complete`) y el estado
+se guarda en `model:state:{model_id}`. Un fallo de Redis al publicar se
+registra y no rompe la máquina de estados.
 
 La API administrativa agrega cualquier worker derivado sobre su entrada
 canónica también durante transiciones, no solo cuando ya está cargado. El
-campo legado ``status`` conserva el ciclo de vida del worker seleccionado;
-``runtime_phase`` distingue un cambio de capacidad de una carga/descarga
+campo legado `status` conserva el ciclo de vida del worker seleccionado;
+`runtime_phase` distingue un cambio de capacidad de una carga/descarga
 normal.
 
 La identidad derivada se resuelve contra los ids canónicos del catálogo. No se
-puede separar por el primer ``::``: en llama.cpp el propio id GGUF usa
-``repositorio::artefacto`` y el worker añade después ``::<hash>``. Los eventos
-incluyen ``canonical_model_id`` para que los clientes no tengan que inferirlo.
+puede separar por el primer `::`: en llama.cpp el propio id GGUF usa
+`repositorio::artefacto` y el worker añade después `::<hash>`. Los eventos
+incluyen `canonical_model_id` para que los clientes no tengan que inferirlo.
 
 Las operaciones administrativas son:
 
-- ``POST /ocabra/models/{model_id}/cancel-load``: cancela las tareas de carga
+- `POST /ocabra/models/{model_id}/cancel-load`: cancela las tareas de carga
   del canónico o de sus derivados y ejecuta la limpieza normal del backend.
-- ``POST /ocabra/models/{model_id}/downsize``: si no hay peticiones activas,
+- `POST /ocabra/models/{model_id}/downsize`: si no hay peticiones activas,
   descarga el runtime multi-GPU y restaura el preset por defecto de una GPU.
-  Devuelve ``409`` si el runtime está ocupado o no existe una variante que
+  Devuelve `409` si el runtime está ocupado o no existe una variante que
   pueda reducirse.
 
 ---
 
 ## 4. WorkerPool — Contrato de registro de workers
 
-```python
-# backend/ocabra/core/worker_pool.py
+Fuente: `backend/ocabra/core/worker_pool.py`.
 
-class WorkerPool:
-    def register_backend(self, backend_type: str, backend: BackendInterface) -> None:
-        """Registra un backend disponible."""
-
-    def register_disabled_backend(self, backend_type: str, reason: str) -> None:
-        """Marca un backend como deshabilitado."""
-
-    async def get_backend(self, backend_type: str) -> BackendInterface:
-        """Retorna el backend registrado o falla si está deshabilitado/no existe."""
-
-    def get_worker(self, model_id: str) -> WorkerInfo | None:
-        """Retorna el WorkerInfo del modelo si está cargado."""
-
-    async def assign_port(self) -> int:
-        """Asigna un puerto libre del rango configurado (default: 18000-19000)."""
-
-    def set_worker(self, model_id: str, info: WorkerInfo) -> None:
-        """Registra un worker cargado."""
-
-    def remove_worker(self, model_id: str) -> None:
-        """Elimina un worker cargado y libera su puerto."""
-
-    def release_port(self, port: int) -> None:
-        """Libera un puerto."""
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        """Reenvía una petición HTTP al worker.
-
-        Lanza InferenceTimeoutError cuando el upstream no responde dentro de
-        settings.inference_request_timeout_seconds. La capa API traduce ese
-        error a HTTP 504 y cierra la conexión upstream para cancelar el trabajo.
-        """
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        """Reenvía una petición streaming al worker.
-
-        Puede lanzar InferenceTimeoutError si el upstream deja de producir
-        datos durante el timeout de inferencia configurado.
-        """
-```
+- Registro: `register_backend(backend_type, backend)`,
+  `register_disabled_backend(backend_type, reason)`, `registered_backends()`,
+  `await get_backend(backend_type)` (falla si no existe o está deshabilitado).
+- Workers: `get_worker(model_id)`, `set_worker(model_id, info)`,
+  `remove_worker(model_id)` (libera su puerto), `await assign_port()` /
+  `release_port(port)` sobre el rango `WORKER_PORT_RANGE_START`–`END`
+  (por defecto 18000–19000).
+- Reenvío: `forward_request(model_id, path, body, *, user_key=None, slots=1,
+  is_batch=False, kv_capacity_tokens=None, kv_tokens=0, telemetry=None)` y
+  `forward_stream(...)` con los mismos argumentos. Con `user_key` la petición
+  pasa por la cola justa (`core/fair_slot_gate.FairSlotGate`) del worker; sin
+  él va directa. Lanzan `InferenceTimeoutError` cuando el upstream no responde
+  (o deja de producir datos) dentro de `INFERENCE_REQUEST_TIMEOUT_SECONDS`; la
+  capa API lo traduce a HTTP 504 y cierra la conexión upstream para cancelar
+  el trabajo. Otros errores tipados: `WorkerGoneError`,
+  `WorkerDegradedError` (circuit breaker), `VisionNoRoomError`.
 
 Las peticiones se contabilizan contra la clave real del worker, derivada de
-`profile.base_model_id + profile.load_overrides`, aunque el cliente use un
+`profile.base_model_id + profile.load_overrides`
+(`core/model_manager_helpers.compute_worker_key`), aunque el cliente use un
 `profile_id`. El alias público se conserva por separado para estadísticas.
 Esto impide eviction y admisión incoherentes entre alias y modelo canónico.
 
@@ -320,20 +249,47 @@ Esto impide eviction y admisión incoherentes entre alias y modelo canónico.
 
 ## 5. API Interna oCabra — Contratos REST
 
-Base URL: `/ocabra/`
-Todos los endpoints retornan `Content-Type: application/json`.
-Errores internos de `/ocabra/*` siguen el formato estándar de FastAPI `{"detail": ...}`.
-Los endpoints de compatibilidad OpenAI y Ollama usan sus propios envelopes de error.
+Base URL: `/ocabra/`. La lista completa de rutas está en `docs/API.md` y los
+esquemas en el Swagger (`/docs`). Aquí solo se recogen las semánticas que no
+se deducen del esquema.
+
+Errores internos de `/ocabra/*` siguen el formato estándar de FastAPI
+`{"detail": ...}`. Los endpoints de compatibilidad OpenAI y Ollama usan sus
+propios envelopes de error.
 
 ### 5.1 Modelos
 
-```
-GET    /ocabra/models                    → list[ModelState]  # model_id is canonical backend/model; no legacy bare-name fallback at this boundary
-GET    /ocabra/models/storage            → ModelsStorageStats
+Nota OpenAI `/v1/*` y Ollama `/api/*`: el campo `model` acepta, por este orden, un alias oculto, un `profile_id` (el nombre público de un modelo es el `profile_id` de su perfil por defecto, igual a su `model_key`), un id de despliegue `<backend>/<model_key>` (resuelve al perfil de ese despliegue) y, en la vía legacy (`LEGACY_MODEL_ID_FALLBACK`), un `backend_model_id`/`model_key`; si varios despliegues coinciden, gana el **despliegue por defecto** del modelo.
 
-Nota OpenAI `/v1/*` y Ollama `/api/*`: el campo `model` acepta, por este orden, un alias oculto, un `profile_id` (el nombre público de un modelo es el `profile_id` de su perfil por defecto, igual a su `model_key`), un id de despliegue `<backend>/<model_key>` (resuelve al perfil de ese despliegue) y, en la vía legacy, un `backend_model_id`/`model_key`; si varios despliegues coinciden, gana el **despliegue por defecto** del modelo (antes, el primero del diccionario).
+`GET /ocabra/models` y `GET /ocabra/models/{model_id}` devuelven
+`ModelState.to_dict()` (ver §3) más `disk_size_bytes` cuando se puede estimar.
 
-### 5.1.1 Modelos lógicos (unificación modelo/backends, v0.47.0)
+`PATCH /ocabra/models/{model_id}` (`ModelPatch` en
+`api/internal/models.py`, `extra="forbid"`: una clave desconocida es 422)
+acepta `displayName`, `backendType`, `loadPolicy`, `pinPermanent`,
+`preferredGpu`, `vramEstimateMb`, `extraConfig` y `schedules` (también en
+snake_case). `extraConfig` se **fusiona en profundidad** con el existente
+(`_deep_merge_dicts`): enviar un subárbol no borra el resto.
+
+`DELETE /ocabra/models/{model_id}` elimina la configuración y los ficheros, y
+responde `{"ok": true, "deleted_path": str|null}`.
+
+Unload con el `model_id` canónico de un perfil con runtime presets: el worker
+realmente cargado vive en una clave derivada (`model_id::<hash>`), nunca en la
+canónica; `unload()` lo detecta y descarga todos los derivados cargados.
+
+`POST /ocabra/models/{model_id}/memory-estimate` (body: `preferred_gpu?`,
+`extra_config?`, `run_probe?`) evalúa una configuración sin persistir nada:
+
+- `source="heuristic"`: cálculo rápido sin arrancar runtime.
+- `source="runtime_probe"`: validación real con el engine (sobre todo vLLM).
+- Campos: `backend_type`, `preferred_gpu`, `source`, `estimated_total_mb`,
+  `estimated_weights_mb`, `estimated_engine_mb_per_gpu` y `engine_present`
+  (TensorRT-LLM), `estimated_kv_cache_mb`, `estimated_max_context_length`,
+  `maximum_concurrency`, `status` (`ok|warning|error`, si hay probe),
+  `warning`, `error`, `notes`.
+
+### 5.1.1 Modelos lógicos (unificación modelo/backends)
 
 Un **modelo** (`models.model_key`, nombre público) tiene un **despliegue** por backend
 (`model_configs`, id `<backend>/<model_key>`, único por `(model_key, backend_type)`) y un
@@ -348,124 +304,35 @@ Un **modelo** (`models.model_key`, nombre público) tiene un **despliegue** por 
 - Permisos: `group_models` guarda `model_key` (o ids de router / perfiles sueltos); conceder un
   `model_key` concede sus despliegues, perfiles y alias (`_expand_model_grants`).
 
-```
-GET    /ocabra/logical-models                                → list[LogicalModel]
-GET    /ocabra/logical-models/{model_key}                    → LogicalModel
-PATCH  /ocabra/logical-models/{model_key}                    {defaultBackend?, displayName?} → LogicalModel
-GET    /ocabra/logical-models/{model_key}/compatibility      → list[CompatibleBackend]
-POST   /ocabra/logical-models/{model_key}/deployments        {backend, sourceBackend?, extraConfig?} → 201 LogicalModel
-DELETE /ocabra/logical-models/{model_key}/deployments/{backend} → {modelKey, removed, newDefaultBackend}
-
-LogicalModel = {modelKey, displayName, category, defaultBackend,
-                deployments: [{modelId, backend, isDefault, installed, status, loadPolicy,
-                               pinPermanent, artifact, profiles}],
-                compatibleBackends: [CompatibleBackend & {deployed}],
-                publicProfiles, hiddenProfiles, registryMetadata}
-CompatibleBackend = {backend, status: "compatible"|"probable", installed, reason}
-```
+Endpoints: `/ocabra/logical-models[/{model_key}[/compatibility|/deployments[/{backend}]]]`
+(ver `api/internal/logical_models.py`). `LogicalModel` = `{modelKey,
+displayName, category, defaultBackend, deployments[], compatibleBackends[],
+publicProfiles, hiddenProfiles, registryMetadata}`; `CompatibleBackend` =
+`{backend, status: "compatible"|"probable", installed, reason}`.
 
 Las respuestas de búsqueda del registro (HF, BitNet, Ollama: tarjetas, detalle y variantes)
 llevan `compatible_backends: list[CompatibleBackend]` (reglas en `ocabra/core/compatibility.py`).
 La descarga acepta en `register_config`: `model_key`, `default_backend` y `backends` (despliegues
 extra del mismo fichero).
 
-GET    /ocabra/models/{model_id}         → ModelState
-POST   /ocabra/models/{model_id}/load    → ModelState
-POST   /ocabra/models/{model_id}/unload  → ModelState
-  Unload con el model_id canónico de un perfil con runtime presets (2026-10-30):
-  el worker realmente cargado vive en una clave derivada (`model_id::<hash>`,
-  ver ModelManager.add_model/_load_model), nunca en la canónica directamente —
-  unload() detecta esto y redirige a todos los derivados actualmente cargados
-  en vez de hacer no-op silencioso (comportamiento previo, encontrado en vivo
-  recuperando un worker colgado: la llamada devolvía 200 "unloaded" sin tocar
-  el proceso real).
-POST   /ocabra/models/{model_id}/memory-estimate → ModelMemoryEstimate
-  body: {
-    preferred_gpu?: int|null,
-    extra_config?: dict|null,
-    run_probe?: bool
-  }
-PATCH  /ocabra/models/{model_id}         → ModelState
-  body: {
-    load_policy?: "pin"|"warm"|"on_demand",
-    pin_permanent?: bool,
-    preferred_gpu?: int|null,
-    idle_timeout_seconds?: int|null,
-    display_name?: str,
-    extra_config?: dict
-  }
-DELETE /ocabra/models/{model_id}         → {"ok": true, "deleted_path": str|null}  # elimina config y ficheros
-```
+### 5.2 Descargas
 
-`ModelState` REST payload:
-- `model_id`, `backend_model_id`, `display_name`, `backend_type`
-- `status`, `load_policy`, `pin_permanent`, `preferred_gpu`, `current_gpu`, `vram_used_mb`
-- `capabilities`, `last_request_at`, `loaded_at`, `error_message`, `extra_config`
-- `disk_size_bytes` se añade en `/ocabra/models` y `/ocabra/models/{model_id}` cuando se puede estimar
+`POST /ocabra/downloads` (`DownloadCreateRequest` en
+`api/internal/downloads.py`): `source` (`huggingface|ollama|bitnet`),
+`model_ref`, `artifact?`, `register_config?` y, solo para Hugging Face, el
+modo de ficheros exactos (`allow_patterns`, `local_dir`, `revision`,
+`register`). El trabajo se encola en la lista Redis `queue:download`, su
+estado vive en `download:job:{job_id}` y cada cambio se publica en
+`download:progress` y `download:progress:{job_id}` con el `DownloadJob`
+completo (`schemas/registry.py`: `status`
+`queued|downloading|completed|failed|cancelled`, `progress_pct`,
+`speed_mb_s`, `eta_seconds`, `error`…). `GET /ocabra/downloads/{job_id}/stream`
+es el mismo flujo en SSE.
 
-`ModelMemoryEstimate` REST payload:
-- `backend_type`, `preferred_gpu`, `source`
-- `estimated_total_mb` cuando aplica
-- `estimated_weights_mb` para backends basados en pesos
-- `estimated_engine_mb_per_gpu` y `engine_present` para `tensorrt_llm`
-- `estimated_kv_cache_mb`, `estimated_max_context_length`, `maximum_concurrency` cuando el backend puede derivarlos
-- `status: "ok" | "warning" | "error"` si se ejecuta probe runtime
-- `warning`, `error`, `notes` como señales diagnósticas legibles
+### 5.3 Stats
 
-Semántica:
-- `source="heuristic"` implica cálculo rápido sin arrancar runtime.
-- `source="runtime_probe"` implica validación real con el engine; se usa sobre todo en `vllm`.
-- El endpoint no persiste cambios por sí mismo; solo evalúa la configuración propuesta.
-
-### 5.2 GPUs
-
-```
-GET /ocabra/gpus               → list[GPUState]
-GET /ocabra/gpus/{index}       → GPUState
-GET /ocabra/gpus/{index}/stats?window=5m|1h|24h → list[GPUStat]
-```
-
-### 5.3 Descargas
-
-```
-GET    /ocabra/downloads                 → list[DownloadJob]
-POST   /ocabra/downloads                 → DownloadJob
-  body: {
-    source: "huggingface"|"ollama"|"bitnet",
-    model_ref: str,
-    artifact?: str|null,
-    register_config?: dict|null
-  }
-DELETE /ocabra/downloads/{job_id}        → {"ok": true}  # cancela descarga
-GET    /ocabra/downloads/{job_id}/stream → SSE stream de progreso
-```
-
-### 5.4 Registry
-
-```
-GET /ocabra/registry/hf/search?q=str&task=str&limit=20  → list[HFModelCard]
-GET /ocabra/registry/hf/{repo_id}                        → HFModelDetail
-GET /ocabra/registry/hf/{repo_id}/variants              → list[HFModelVariant]
-GET /ocabra/registry/bitnet/search?q=str&limit=20       → list[HFModelCard]
-GET /ocabra/registry/bitnet/{repo_id}/variants          → list[HFModelVariant]
-GET /ocabra/registry/ollama/search?q=str                 → list[OllamaModelCard]
-GET /ocabra/registry/ollama/{model_name}/variants       → list[OllamaModelVariant]
-GET /ocabra/registry/local                               → list[LocalModel]
-```
-
-### 5.5 Stats
-
-```
-GET /ocabra/stats/requests?from=ISO&to=ISO&model_id=str   → RequestStats
-GET /ocabra/stats/tokens?from=ISO&to=ISO&model_id=str&allTime=bool&includeSeries=bool → TokenStats
-GET /ocabra/stats/energy?from=ISO&to=ISO                  → EnergyStats
-GET /ocabra/stats/performance?from=ISO&to=ISO&model_id=str → PerformanceStats
-GET /ocabra/stats/overview?from=ISO&to=ISO&model_id=str   → OverviewStats
-```
-
-`RequestStats`:
-- `totalRequests`, `errorRate`, `avgDurationMs`, `p50DurationMs`, `p95DurationMs`
-- `series`: `[{ timestamp, count }]`
+Rutas en `api/internal/stats.py`; agregaciones en `stats/aggregator.py`.
+Filtros habituales: `from`, `to` (ISO 8601) y `model_id`.
 
 Una respuesta streaming cancelada después de enviar sus cabeceras se registra
 como `status_code = 499` y `error = "stream_cancelled"`, aunque el estado HTTP
@@ -473,28 +340,10 @@ que alcanzó a ver el cliente fuese inicialmente 200. Los tokens parciales que
 ya hayan atravesado el middleware se conservan; si el upstream no emitió ningún
 chunk, `output_tokens` permanece `NULL`.
 
-`TokenStats`:
-- `totalInputTokens`, `totalOutputTokens`
-- `byBackend`: `[{ backendType, inputTokens, outputTokens }]`
-- `byGpu`: `[{ gpuIndex, inputTokens, outputTokens }]` (`gpuIndex = null` para requests sin GPU asociada)
-- `series`: `[{ timestamp, inputTokens, outputTokens }]`
-
-`EnergyStats`:
-- `totalKwh`, `estimatedCostEur`
-- `byGpu`: `[{ gpuIndex, totalKwh, powerDrawW }]`
-
-`PerformanceStats`:
-- `byModel`: `[{ modelId, backendType, requestKinds, totalRequests, avgLatencyMs, p95LatencyMs, requestsPerMinute, tokensPerSecond, totalInputTokens, totalOutputTokens, tokenizedRequests, errorCount, uptimePct, loadCount, avgLoadMs, p95LoadMs, lastLoadMs }]`
-
-`OverviewStats`:
-- `totalRequests`, `totalErrors`, `avgDurationMs`, `tokenizedRequests`, `totalInputTokens`, `totalOutputTokens`
-- `byBackend`: `[{ backendType, totalRequests, errorRate, avgLatencyMs, p95LatencyMs }]`
-- `byRequestKind`: `[{ requestKind, totalRequests, errorRate, avgLatencyMs, p95LatencyMs }]`
-
 #### Estadísticas de OpenAI Realtime
 
 Las conexiones `GET /v1/realtime` conservan el `UserContext` resuelto durante
-el handshake y escriben en la tabla existente `request_stats`; no se persiste
+el handshake y escriben en la tabla `request_stats`; no se persiste
 audio, texto de conversación ni credenciales.
 
 | `request_kind` | Unidad registrada | `model_id` |
@@ -507,31 +356,28 @@ audio, texto de conversación ni credenciales.
 Todas usan `endpoint_path=/v1/realtime`, guardan duración, estado/error,
 `user_id`, `group_id`, `api_key_name`, IP y user-agent. Una sesión cerrada
 normalmente usa `status_code=101`; las operaciones internas usan `200` en éxito
-y un estado 4xx/5xx representativo en error. Los logs estructurados incluyen
-`session_id`, identidad no secreta, modelo, tipo, duración y estado.
+y un estado 4xx/5xx representativo en error.
 
-### 5.6 Config
+### 5.4 Config
 
-```
-GET   /ocabra/config             → ServerConfig
-PATCH /ocabra/config             → ServerConfig
-```
+`GET /ocabra/config` y `PATCH /ocabra/config` (`api/internal/config.py`,
+`ServerConfigPatch`, `extra="forbid"`) usan claves camelCase.
 
-`ServerConfig` (campos relevantes):
-- `defaultGpuIndex`, `idleTimeoutSeconds`, `idleEvictionCheckIntervalSeconds`
-- `vramBufferMb`, `vramPressureThresholdPct`, `logLevel`
-- `energyCostEurKwh`, `modelsDir`, `downloadDir`, `maxTemperatureC`
-- `globalSchedules`: `list[EvictionSchedule]` persistida en la tabla `eviction_schedules` y reconstruida por `GET /ocabra/config`
-- `modelsDir` proviene de `MODELS_DIR` y es de solo lectura en runtime
-- `newUserGroupNames`: nombres de los grupos que se asignan al crear un usuario.
-  El valor por defecto es `["default", "Makers"]`; se ignoran nombres que ya
-  no existan y el alta nunca crea grupos implícitamente.
-- `downloadDir` y `maxTemperatureC` siguen como overrides de proceso en `request.app.state.config_overrides`
-- `globalSchedules` se traduce internamente a dos filas por ventana en `eviction_schedules`: una acción `evict_all` al inicio y una acción `reload` al final
-- `check_schedule_reloads()` recarga cualquier modelo `pin`/`warm` que un schedule `reload` apunte (sin flag de opt-in por modelo — el propio schedule ya es el opt-in; el checkbox `auto_reload` que existía antes se eliminó el 2026-10-30)
-- `GET /ocabra/config` y `PATCH /ocabra/config` usan claves camelCase; no hay fallback legacy a snake_case o `localStorage`.
+- Cada clave modificada se aplica en caliente a `settings` **y** se persiste
+  en la tabla `server_config` (`db/server_config.save_override`). Al arrancar,
+  `main.py` aplica esos overrides sobre los valores del `.env` antes de lanzar
+  ningún bucle. Consecuencia: un proceso Python suelto (sin pasar por el
+  arranque del api) ve los valores del `.env`, no los guardados.
+- `modelsDir` es de solo lectura (sale de `MODELS_DIR`); intentar cambiarlo da 400.
+- `globalSchedules` se guarda en `eviction_schedules` como dos filas por
+  ventana: `evict_all` al inicio y `reload` al final. `check_schedule_reloads()`
+  (`core/scheduler.py`) recarga los modelos `pin`/`warm` a los que apunta un
+  schedule `reload`.
+- `newUserGroupNames`: grupos que se asignan al crear un usuario (por defecto
+  `["default", "Makers"]`); los nombres que ya no existan se ignoran y el alta
+  nunca crea grupos.
 
-### 5.6.1 Autorización por grupos y API keys
+### 5.5 Autorización por grupos y API keys
 
 - La pertenencia a grupos es propiedad del usuario. Todas sus API keys heredan
   exactamente la misma ACL; `api_keys.group_id` es legado y no participa en
@@ -545,412 +391,188 @@ PATCH /ocabra/config             → ServerConfig
   concede acceso directo a esos targets ni los añade por separado a `/v1/models`
   o `/api/tags`.
 
-### 5.7 Servicios interactivos
+### 5.6 Servicios interactivos
 
-```
-GET  /ocabra/services                    → list[ServiceState]
-GET  /ocabra/services/{service_id}       → ServiceState
-POST /ocabra/services/{service_id}/refresh → ServiceState
-POST /ocabra/services/{service_id}/start   → ServiceState
-PATCH /ocabra/services/{service_id}         → ServiceState
-  body: {
-    enabled: bool
-  }
-PATCH /ocabra/services/{service_id}/runtime → ServiceState
-  body: {
-    runtime_loaded: bool,
-    active_model_ref?: str|null,
-    detail?: str|null
-  }
-POST /ocabra/services/{service_id}/unload → ServiceState
-POST /ocabra/services/{service_id}/ensure_vram → { ok: bool, gpu_indices?: int[], detail?: str }
-  body: { vram_needed_mb: int, suppress_reload_seconds?: int = 0 }
-  Evicts on-demand/warm/soft-pin inference models (nunca hard-pin,
-  pin_permanent=True) on el preferred_gpu del servicio hasta liberar
-  vram_needed_mb, reusando la misma cascada de pressure-eviction que un load
-  normal (ModelManager.ensure_vram_free — ver _get_pressure_eviction_candidates
-  para el orden de prioridad). Pensado para que servicios que gestionan su
-  propia VRAM fuera del scheduler de oCabra (Hunyuan, TRELLIS.2) lo llamen
-  justo antes de cargar su pipeline — de otro modo nunca disparan evicción
-  por sí mismos.
-  suppress_reload_seconds evita que un modelo PIN evictado se auto-recargue
-  (el watcher normal lo intenta a los ~30s) mientras el servicio todavía está
-  generando — usar un valor cercano al peor caso de duración de una
-  generación del servicio.
+Fuente: `backend/ocabra/core/service_manager.py` (`ServiceState`) y
+`api/internal/services.py`.
 
-  Además, tras evictar, este endpoint reserva la VRAM liberada vía
-  GPUManager.lock_vram (ServiceManager.reserve_gpu_vram), reutilizando la misma
-  contabilidad que ModelManager usa para sus propias cargas. Con esto
-  GPUScheduler.find_gpu_for_model deja de ver esa VRAM como libre mientras el
-  servicio genera, así que una petición de inferencia no relacionada no puede
-  aterrizar en la misma GPU a mitad de generación. La reserva se libera sola:
-  al llamar a /unload del servicio, en el siguiente health check una vez que
-  runtime_loaded pase a false, si el contenedor deja de responder, o tras
-  vram_reservation_max_age_s (20 min por defecto) como red de seguridad si
-  nunca llega a cargar ni falla limpio. RouterResolver.pick() también respeta
-  esta reserva (GPUManager.has_service_lock) — un router como "Gemma" salta
-  automáticamente al siguiente target si su GPU preferida está reservada.
+Servicios definidos: `trellis2`, `comfyui`, `a1111`, `acestep`, `unsloth`.
+`ServiceState.to_dict()` incluye identidad (`service_id`, `service_type`,
+`display_name`, `base_url`, `ui_url`, `health_path`, `unload_path`),
+política (`preferred_gpu`, `idle_unload_after_seconds`, `idle_action`
+`stop|restart`, `generation_grace_period_s`, `enabled`), estado
+(`service_alive`, `runtime_loaded`, `status`
+`unknown|idle|active|unreachable|disabled`, `active_model_ref`,
+`last_*_at`, `detail`, `extra`) y métricas (`is_generating`, `queue_depth`,
+`vram_used_mb`, `gpu_util_pct`, `cpu_pct`, `mem_used_mb`, `mem_limit_mb`).
+Cada cambio se publica en `service:events`
+(`{"event", "service_id", "status", "service"}`) y se guarda en
+`service:state:{service_id}`; el enable/disable persiste en
+`service:overrides`.
 
-  La reserva también se libera en cuanto el servicio termina su tarea actual
-  (no solo al descargar el runtime): si /runtime/status expone
-  in_flight_requests (Hunyuan, TRELLIS.2), ServiceManager lo usa como señal
-  exacta de is_generating en vez del umbral de utilización de GPU (más lento
-  e impreciso), y libera la reserva en la transición generando→idle. El
-  servicio debe volver a pedir ensure_vram antes de CADA generación, no solo
-  en la carga en frío del pipeline — si no, una segunda generación sobre un
-  pipeline ya caliente corre sin ninguna protección.
-```
+`PATCH /ocabra/services/{service_id}/runtime` (body `runtime_loaded`,
+`active_model_ref?`, `detail?`) lo llama el propio servicio para declarar si
+tiene pesos en VRAM.
 
-`service_id` iniciales:
-- `hunyuan`
-- `trellis2`
-- `comfyui`
-- `a1111`
-- `acestep`
+`POST /ocabra/services/{service_id}/ensure_vram` (body `vram_needed_mb`,
+`suppress_reload_seconds = 0`) es para servicios que gestionan su propia VRAM
+fuera del scheduler (TRELLIS.2): expulsa modelos on-demand/warm/soft-pin
+(nunca hard-pin) de la GPU preferida del servicio con la misma cascada que
+una carga normal (`ModelManager.ensure_vram_free`) y después **reserva** la
+VRAM liberada (`ServiceManager.reserve_gpu_vram` → `GPUManager.lock_vram`), de
+modo que ni el scheduler ni `RouterResolver.pick()` mandan otra carga a esa
+GPU mientras el servicio genera. `suppress_reload_seconds` impide que un PIN
+expulsado se recargue solo durante ese tiempo.
 
+La reserva se libera al llamar a `/unload`, en el siguiente health check con
+`runtime_loaded=false`, si el contenedor deja de responder, al pasar de
+generando a ocioso (cuando `/runtime/status` expone `in_flight_requests`) o
+tras `vram_reservation_max_age_s` (20 min) como red de seguridad. Por eso el
+servicio debe pedir `ensure_vram` antes de **cada** generación, no solo en la
+carga en frío.
 
-Campos relevantes de `ServiceState`:
-- `enabled: bool`
-- `status`: `"unknown" | "idle" | "active" | "unreachable" | "disabled"`
+### 5.7 Tiempo real (WebSocket)
 
-`ServiceState`:
+`WS /ocabra/ws` (`api/internal/ws.py`). Exige cookie `ocabra_session` válida
+(misma comprobación que HTTP) y mismo origen; si no, cierra con 1008.
 
-```python
-@dataclass
-class ServiceState:
-    service_id: str               # "hunyuan" | "comfyui" | "a1111" | "acestep"
-    service_type: str             # "hunyuan3d" | "comfyui" | "automatic1111" | "acestep"
-    display_name: str
-    base_url: str                 # URL interna Docker
-    ui_url: str                   # path proxied, e.g. "/comfy"
-    health_path: str
-    runtime_check_path: str | None
-    runtime_check_key: str
-    runtime_check_model_key: str | None
-    unload_path: str | None
-    unload_method: str
-    unload_payload: dict | None
-    post_unload_flush_path: str | None
-    docker_container_name: str | None
-    runtime_loaded_when_alive: bool
-    preferred_gpu: int | None
-    idle_unload_after_seconds: int
-    idle_action: str              # "stop" | "restart"
-    enabled: bool                # servicio habilitado para uso en oCabra
-    service_alive: bool           # proceso/UI accesible por healthcheck
-    runtime_loaded: bool          # hay runtime/pesos cargados en VRAM
-    status: str                   # "unknown" | "idle" | "active" | "unreachable" | "disabled"
-    active_model_ref: str | None
-    last_activity_at: datetime | None
-    last_health_check_at: datetime | None
-    last_unload_at: datetime | None
-    detail: str | None
-    extra: dict
-```
+Cada mensaje de un canal Redis se reenvía como `{"type": ..., "data": ...}`
+con `data` igual al payload publicado:
 
-### 5.8 Tiempo real (WebSocket)
+| Canal Redis | `type` | `data` |
+|-------------|--------|--------|
+| `gpu:stats` | `gpu_stats` | `list[GPUState]` |
+| `model:events` | `model_event` | `{event, model_id, canonical_model_id, new_status}` |
+| `service:events` | `service_event` | `{event, service_id, status, service}` |
+| `download:progress` | `download_progress` | `DownloadJob` |
+| `system:alerts` | `system_alert` | `{level, message}` (`level` = `info`/`warning`) |
 
-```
-WS /ocabra/ws
-```
+Además, el servidor envía `{"type": "ping"}` tras 30 s sin mensajes del
+cliente, y un cliente que manda `{"subscribe": "models_activity"}` recibe
+cada segundo un frame `models_activity` (mismo payload que
+`GET /ocabra/models/activity`) hasta que manda
+`{"unsubscribe": "models_activity"}`.
 
-Eventos emitidos por el servidor (JSON):
-```json
-{"type": "gpu_stats",    "data": [GPUState, ...]}
-{"type": "model_event",  "data": {"event": str, "model_id": str, "status": str}}
-{"type": "service_event", "data": {"event": str, "service_id": str, "status": str, "service": ServiceState}}
-{"type": "download_progress", "data": {"job_id": str, "pct": float, "speed_mb_s": float}}
-```
+### 5.8 OpenAI Files API
 
----
+Fuente: `backend/ocabra/api/openai/files.py`.
 
-## 5.8 OpenAI Files API
-
-```
-POST   /v1/files                     → FileObject
-  form: file (multipart), purpose: "batch"|"batch_output"|"user_data"|"batch_input_audio"
-  Sube un fichero al almacenamiento interno. Para batches, el fichero
-  debe ser JSONL con propósito "batch". "batch_input_audio" (extensión
-  oCabra) es para el audio que una línea de lote hacia
-  /v1/audio/transcriptions referencia por file_id — ver 5.9.
-  Nota: "batch_error" y "batch_artifact" también existen como purpose pero
-  los crea el propio BatchProcessor internamente, nunca este endpoint.
-
-GET    /v1/files                     → {object: "list", data: [FileObject]}
-  query: purpose? (filtro opcional), limit? (1-10000, default 100)
-
-GET    /v1/files/{file_id}           → FileObject
-  file_id acepta formato "file-<uuid>" o UUID directo.
-
-GET    /v1/files/{file_id}/content   → binary (application/octet-stream)
-  Descarga el contenido del fichero.
-
-DELETE /v1/files/{file_id}           → {id, object: "file", deleted: true}
-  No permite borrar ficheros en uso por un batch activo (409).
-```
-
-`FileObject`:
-```json
-{
-  "id": "file-<uuid>",
-  "object": "file",
-  "bytes": 1234,
-  "created_at": 1700000000,
-  "filename": "batch_input.jsonl",
-  "purpose": "batch",
-  "status": "uploaded",
-  "status_details": null
-}
-```
+- `purpose` válidos al subir: `batch`, `batch_output`, `user_data`,
+  `batch_input_audio` y `batch_input_image` (estos dos, extensión oCabra, son
+  los ficheros a los que apuntan las líneas de lote de
+  `/v1/audio/transcriptions` y `/v1/images/edits`, ver 5.9). `batch_error` y
+  `batch_artifact` los crea solo el `BatchProcessor`. Tope: 512 MB por fichero.
+- `GET /v1/files`: `purpose?`, `limit` (1-10000, por defecto 100).
+- `file_id` acepta `file-<uuid>` o el UUID directo.
+- `DELETE /v1/files/{file_id}` responde 409 `file_in_use` si un batch activo
+  lo usa como entrada.
 
 ### 5.9 OpenAI Batches API
 
-```
-POST   /v1/batches                   → BatchObject
-  body: {
-    input_file_id: "file-<uuid>",
-    endpoint: "/v1/chat/completions"|"/v1/embeddings"|"/v1/completions"|
-              "/v1/images/generations"|"/v1/images/edits"|
-              "/v1/audio/speech"|"/v1/audio/transcriptions"|
-              "/v1/pooling"|"/v1/score"|"/v1/rerank"|"/v1/classify"|
-              "/v1/audio/generate",
-    completion_window: "24h",
-    metadata?: dict
-  }
-  Crea un batch job. El fichero de input debe ser JSONL con purpose="batch".
-  Cada línea: {"custom_id": str, "method": "POST", "url": str, "body": dict}
+Fuente: `backend/ocabra/api/openai/batches.py` (`ALLOWED_ENDPOINTS`) y
+`backend/ocabra/core/batch_processor.py`.
 
-  endpoint="/v1/audio/transcriptions" (extensión oCabra, no estándar
-  OpenAI — el endpoint real es multipart, no cabe en una línea JSON):
-  body debe llevar {file_id: "file-<uuid>", model, language?, ...} en vez
-  de audio inline; file_id debe referenciar un fichero propio con
-  purpose="batch_input_audio" subido antes por POST /v1/files, o la
-  creación del batch se rechaza (400, code="missing_file_id"|
-  "invalid_file_id", con el número de línea). batch_processor reconstruye
-  la petición multipart real a partir de esa referencia en tiempo de
-  despacho.
+Endpoints admitidos en `endpoint`: los de `ALLOWED_ENDPOINTS` (chat,
+completions, embeddings, images generations/edits, audio speech/
+transcriptions/generate, pooling, score, rerank, classify). Cada línea del
+JSONL de entrada: `{"custom_id", "method": "POST", "url", "body"}`.
+`GET /v1/batches` pagina con `after` y `limit` (1-100, por defecto 20).
 
-  endpoint="/v1/images/edits" (extensión oCabra, no estándar OpenAI —
-  mismo motivo que transcriptions: el endpoint real es multipart, no cabe
-  en una línea JSON): body debe llevar {image_file_id: "file-<uuid>",
-  mask_file_id?, image_ref_1_file_id?, image_ref_2_file_id?,
-  image_ref_3_file_id?, model, prompt, ...} en vez de binarios inline;
-  cada *_file_id presente debe referenciar un fichero propio con
-  purpose="batch_input_image" subido antes por POST /v1/files (solo
-  image_file_id es obligatorio), o la creación del batch se rechaza (400,
-  code="missing_file_id"|"invalid_file_id", con el número de línea).
-  batch_processor reconstruye la petición multipart real a partir de esas
-  referencias en tiempo de despacho.
-
-GET    /v1/batches                   → {object: "list", data: [BatchObject]}
-  query: after? (cursor pagination), limit? (1-100, default 20)
-
-GET    /v1/batches/{batch_id}        → BatchObject
-
-POST   /v1/batches/{batch_id}/cancel → BatchObject
-  Transiciona a "cancelling" → "cancelled". No afecta batches terminales.
-```
-
-`BatchObject`:
-```json
-{
-  "id": "batch_<uuid>",
-  "object": "batch",
-  "endpoint": "/v1/chat/completions",
-  "status": "validating|in_progress|finalizing|completed|failed|cancelled|cancelling|expired",
-  "input_file_id": "file-<uuid>",
-  "output_file_id": "file-<uuid>|null",
-  "error_file_id": "file-<uuid>|null",
-  "completion_window": "24h",
-  "request_counts": {"total": N, "completed": N, "failed": N},
-  "created_at": unix_ts,
-  "in_progress_at": unix_ts|null,
-  "completed_at": unix_ts|null,
-  "expired_at": unix_ts|null,
-  "expires_at": unix_ts|null,
-  "metadata": dict|null
-}
-```
-
-Formato JSONL de salida (`output_file_id` — solo éxitos; `error_file_id` —
-solo fallos, `null` si no hubo ninguno):
-```json
-{"id": "batch_req_<uuid>", "custom_id": "req1", "response": {"status_code": 200, "request_id": "...", "body": {...}}, "error": null}
-```
-
-Respuestas no-JSON (`/v1/audio/speech` devuelve audio binario, no JSON):
-el `body` de la respuesta no lleva el audio inline — referencia un fichero
-aparte subido con `purpose="batch_artifact"`, descargable por el mismo
-`GET /v1/files/{id}/content`:
-```json
-{"id": "batch_req_<uuid>", "custom_id": "req1", "response": {"status_code": 200, "request_id": "...", "body": {"file_id": "file-<uuid>", "bytes": 94252, "content_type": "audio/wav"}}, "error": null}
-```
-`/v1/images/generations` no necesita este tratamiento — su respuesta ya es
-JSON puro (`b64_json` o `url` según `response_format`), igual que chat.
-
-Un lote cuyo `completion_window` vence pasa a `status: "expired"`
-conservando los resultados parciales ya escritos; las líneas nunca
-despachadas se registran en `error_file_id` con `error.code="batch_expired"`.
-
-Prioridad frente a tráfico interactivo: una petición interactiva puede
-cancelar una línea de lote en curso para liberar un slot/modelo (ver
-`batchPreemptMode` en `/ocabra/config`) — la línea se reintenta sola dentro
-del mismo batch, no cuenta como fallo a menos que se agoten los reintentos
-(`error.code="batch_priority_preempted"`).
-
-Configuración:
-- `OPENAI_FILES_DIR` — directorio de almacenamiento (default `/data/openai_files`)
-- `BATCH_MAX_CONCURRENCY` — peticiones concurrentes por batch (default 4)
-- `BATCH_REQUEST_TIMEOUT_SECONDS` — timeout por petición (default 600)
-- `BATCH_POLL_INTERVAL_SECONDS` — intervalo de polling del procesador (default 5)
-- `BATCH_PRIORITY_ENABLED`, `BATCH_PREEMPT_MODE` (`never`|`instant`|`conditional`),
-  `BATCH_PREEMPT_MIN_ELAPSED_S`, `BATCH_PREEMPT_GRACE_S`, `BATCH_FREE_SLOTS_PCT`,
+- `/v1/audio/transcriptions` y `/v1/images/edits` (extensión oCabra: los
+  endpoints reales son multipart y no caben en una línea JSON): el `body`
+  lleva `file_id` (transcripción) o `image_file_id` y opcionalmente
+  `mask_file_id`, `image_ref_{1,2,3}_file_id` (edición), que deben apuntar a
+  ficheros propios con `purpose` `batch_input_audio` / `batch_input_image`.
+  Si no, la creación se rechaza con 400 (`missing_file_id` |
+  `invalid_file_id`, con el número de línea). El procesador reconstruye la
+  petición multipart al despachar.
+- Salida: `output_file_id` solo éxitos, `error_file_id` solo fallos (`null`
+  si no hubo). Línea:
+  `{"id": "batch_req_<uuid>", "custom_id", "response": {"status_code", "request_id", "body"}, "error"}`.
+- Respuestas binarias (`/v1/audio/speech`, `/v1/audio/generate`): el `body`
+  no lleva el audio, sino `{"file_id", "bytes", "content_type"}` de un fichero
+  `purpose="batch_artifact"` descargable por `GET /v1/files/{id}/content`.
+- Un lote cuyo `completion_window` vence pasa a `expired` conservando lo ya
+  escrito; las líneas no despachadas van a `error_file_id` con
+  `error.code="batch_expired"`.
+- Prioridad frente a tráfico interactivo: una petición interactiva puede
+  cancelar una línea de lote en curso (ver `batchPreemptMode` en
+  `/ocabra/config`); la línea se reintenta dentro del mismo batch y solo cuenta
+  como fallo si se agotan los reintentos (`error.code="batch_priority_preempted"`).
+- Configuración (`config.py`): `OPENAI_FILES_DIR` (por defecto
+  `/data/openai_files`), `BATCH_MAX_CONCURRENCY` (4),
+  `BATCH_REQUEST_TIMEOUT_SECONDS` (960; el efectivo se mantiene por encima del
+  timeout de inferencia), `BATCH_POLL_INTERVAL_SECONDS` (5) y las de
+  prioridad `BATCH_PRIORITY_ENABLED`, `BATCH_PREEMPT_MODE`
+  (`never|instant|conditional`), `BATCH_PREEMPT_MIN_ELAPSED_S`,
+  `BATCH_PREEMPT_GRACE_S`, `BATCH_FREE_SLOTS_PCT`,
   `BATCH_RESUME_COOLDOWN_SLOTS_S`, `BATCH_RESUME_COOLDOWN_EVICTION_S`,
-  `BATCH_INTER_JOB_COOLDOWN_S` — prioridad frente a interactivo (ver panel
-  "Prioridad" en Settings)
+  `BATCH_INTER_JOB_COOLDOWN_S`.
 
 ---
 
 ## 6. Redis — Keys y canales
 
-```
-# Canales pub/sub
-gpu:stats                   → GPUState[] cada 2s
-model:events                → ModelEvent en cada cambio
-service:events              → ServiceEvent en cada cambio de servicio
-download:progress:{job_id}  → DownloadProgress cada 500ms
+Todo pasa por `backend/ocabra/redis_client.py` (`publish`, `set_key`,
+`get_key`, `lpush`/`rpop`, `subscribe`; JSON en ambos sentidos). No hay colas
+de carga/descarga de modelos en Redis: las cargas las coordina
+`ModelManager` en memoria.
 
-# Keys (state)
-model:state:{model_id}      → ModelState (JSON, TTL: none)
-service:state:{service_id}  → ServiceState (JSON, TTL: none)
-service:overrides           → overrides persistidos de enable/disable
-gpu:state:{index}           → GPUState (JSON, TTL: 5s)
-download:job:{job_id}       → DownloadJob (JSON)
+Canales pub/sub:
 
-# Queues (listas Redis)
-queue:load                  → {model_id, priority, requested_at}
-queue:unload                → {model_id, reason}
-```
+| Canal | Productor | Payload |
+|-------|-----------|---------|
+| `gpu:stats` | `core/gpu_manager.py` (cada 2 s) | `list[GPUState]` |
+| `gpu:set_power_limit` | `gpu_manager` (throttling térmico), `api/internal/gpus.py`, `db/gpu_power_settings.py` | `{gpu_index, limit_w}`; lo consume `hw-monitor` |
+| `model:events` | `core/model_manager.py` | ver §3 |
+| `service:events` | `core/service_manager.py` | ver §5.6 |
+| `download:progress`, `download:progress:{job_id}` | `api/internal/downloads.py` | `DownloadJob` |
+| `system:alerts` | `redis_client.publish_system_alert` | `{level, message}` |
+| `trtllm:compile:{job_id}` | `core/trtllm_compile_manager.py` | progreso de compilación TensorRT-LLM |
+
+Keys:
+
+| Key | Contenido |
+|-----|-----------|
+| `gpu:state:{index}` | `GPUState` (TTL 5 s) |
+| `model:state:{model_id}` | `ModelState.to_dict()` (sin TTL; `ModelManager` purga los de modelos que ya no existen) |
+| `service:state:{service_id}` | `ServiceState.to_dict()` |
+| `service:overrides` | enable/disable persistido de servicios |
+| `download:job:{job_id}` | `DownloadJob` |
+| `queue:download` | lista Redis: cola de descargas `{job_id}` |
+| `server:power`, `hw-monitor:heartbeat` | escritas por `hw-monitor` (TTL 5 s y 10 s) |
+| `jwt_revoked:{jti}` | lista de revocación de sesiones al cerrar sesión (TTL = vida restante del token). Ojo: a 2026-11-19 la escritura (`api/internal/auth.py`) y la lectura (`api/_deps_auth.py`) hacen `await get_redis()` sobre una función síncrona y fallan en silencio, así que la key no se llega a escribir |
+| `auth:login_fail:user:{username}`, `auth:login_fail:ip:{ip}` | contadores de `core/login_guard.py` |
+| `ocabra:realtime_session:{session_id}` | sesiones Realtime vivas (`core/session_registry.py`) |
+| `llama_cpp:observed_vram:*`, `llama_cpp:vram_curve:*` | VRAM medida de workers llama.cpp (`core/observed_vram.py`) |
 
 ---
 
-## 7. Esquema de base de datos — Tablas principales
+## 7. Esquema de base de datos
 
-```sql
--- Configuración de modelos
-model_configs (
-  id            UUID PRIMARY KEY,
-  model_id      TEXT UNIQUE NOT NULL,
-  display_name  TEXT,
-  backend_type  TEXT NOT NULL,
-  load_policy   TEXT NOT NULL DEFAULT 'on_demand',
-  pin_permanent BOOLEAN NOT NULL DEFAULT false,  -- solo aplica si load_policy='pin'
-  preferred_gpu INTEGER,
-  extra_config  JSONB,          -- parámetros específicos del backend
-  created_at    TIMESTAMPTZ,
-  updated_at    TIMESTAMPTZ
-)
+Fuente: los modelos SQLAlchemy de `backend/ocabra/db/` y las migraciones de
+`backend/alembic/versions/`. Este índice dice qué tabla vive dónde; las
+columnas, en el código.
 
--- Schedules de evicción
-eviction_schedules (
-  id          UUID PRIMARY KEY,
-  model_id    TEXT REFERENCES model_configs(model_id),  -- NULL = global
-  cron_expr   TEXT NOT NULL,    -- expresión cron
-  action      TEXT NOT NULL,    -- 'evict_warm' | 'evict_all' | 'reload'
-  enabled     BOOLEAN DEFAULT true
-)
-
--- Stats por request
-request_stats (
-  id              UUID PRIMARY KEY,
-  model_id        TEXT NOT NULL,
-  backend_type    TEXT,
-  request_kind    TEXT,
-  endpoint_path   TEXT,
-  status_code     INTEGER,
-  gpu_index       INTEGER,
-  started_at      TIMESTAMPTZ NOT NULL,
-  duration_ms     INTEGER,
-  input_tokens    INTEGER,
-  output_tokens   INTEGER,
-  energy_wh       FLOAT,        -- vatios-hora estimados
-  error           TEXT,
-  user_id         UUID,         -- NULL para anonymous
-  group_id        UUID,
-  api_key_name    TEXT,         -- etiqueta, nunca la key real
-  client_addr     TEXT,
-  user_agent      TEXT,
-  runtime_telemetry JSONB      -- cola/carga/TTFT/prefill/slot/admisión
-)
-
--- Stats de GPU (serie temporal, agregada por minuto)
-gpu_stats (
-  recorded_at      TIMESTAMPTZ NOT NULL,
-  gpu_index        INTEGER NOT NULL,
-  utilization_pct  FLOAT,
-  vram_used_mb     INTEGER,
-  power_draw_w     FLOAT,
-  temperature_c    FLOAT,
-  PRIMARY KEY (recorded_at, gpu_index)
-)
-
-model_load_stats (
-  id              UUID PRIMARY KEY,
-  model_id        TEXT NOT NULL,
-  backend_type    TEXT,
-  started_at      TIMESTAMPTZ NOT NULL,
-  finished_at     TIMESTAMPTZ,
-  duration_ms     INTEGER,
-  gpu_count       INTEGER,
-  gpu_indices     TEXT
-)
-
--- Config del servidor
-server_config (
-  key    TEXT PRIMARY KEY,
-  value  JSONB NOT NULL
-)
-
--- OpenAI Files API
-openai_files (
-  id              UUID PRIMARY KEY,
-  user_id         UUID NOT NULL REFERENCES users(id),
-  filename        TEXT NOT NULL,
-  bytes           BIGINT NOT NULL,
-  purpose         TEXT NOT NULL,           -- 'batch', 'batch_output', 'user_data'
-  storage_path    TEXT NOT NULL,
-  status          TEXT NOT NULL DEFAULT 'uploaded',
-  status_details  TEXT,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-)
-
--- OpenAI Batches API
-openai_batches (
-  id                  UUID PRIMARY KEY,
-  user_id             UUID NOT NULL REFERENCES users(id),
-  api_key_id          UUID REFERENCES api_keys(id),
-  endpoint            TEXT NOT NULL,
-  input_file_id       UUID NOT NULL REFERENCES openai_files(id),
-  completion_window   TEXT NOT NULL DEFAULT '24h',
-  status              TEXT NOT NULL DEFAULT 'validating',
-  output_file_id      UUID REFERENCES openai_files(id),
-  error_file_id       UUID REFERENCES openai_files(id),
-  errors              JSONB,
-  request_total       INTEGER NOT NULL DEFAULT 0,
-  request_completed   INTEGER NOT NULL DEFAULT 0,
-  request_failed      INTEGER NOT NULL DEFAULT 0,
-  batch_metadata      JSONB,
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  in_progress_at      TIMESTAMPTZ,
-  expires_at          TIMESTAMPTZ,
-  finalizing_at       TIMESTAMPTZ,
-  completed_at        TIMESTAMPTZ,
-  failed_at           TIMESTAMPTZ,
-  cancelling_at       TIMESTAMPTZ,
-  cancelled_at        TIMESTAMPTZ,
-  expired_at          TIMESTAMPTZ
-)
-```
+| Tabla | Fichero | Contenido |
+|-------|---------|-----------|
+| `models` | `db/model_config.py` | Modelo lógico (`model_key`, `default_backend`) |
+| `model_configs` | `db/model_config.py` | Despliegue por backend (`<backend>/<model_key>`), política de carga, `extra_config` |
+| `model_profiles` | `db/model_config.py` | Perfiles públicos / ocultos / routers (§8) |
+| `model_profile_aliases` | `db/model_config.py` | Alias ocultos de perfiles (y preset fijado) |
+| `profile_runtime_presets` | `db/model_config.py` | Presets de runtime por perfil (§8.9) |
+| `eviction_schedules` | `db/model_config.py` | Ventanas `evict_all` / `reload` (globales o por modelo) |
+| `openai_tts_voice_map`, `openai_image_model_map` | `db/model_config.py` | Nombres OpenAI → perfil propio (§8.10) |
+| `users`, `groups`, `user_groups`, `group_models`, `api_keys` | `db/auth.py` | Usuarios, grupos, ACL de modelos, API keys |
+| `request_stats`, `model_load_stats`, `gpu_stats`, `server_stats`, `service_generation_stats`, `tool_call_stats` | `db/stats.py` | Estadísticas (sin contenido de prompts ni respuestas) |
+| `server_config` | `db/server_config.py` | Overrides de ajustes guardados desde la UI (§5.4) |
+| `gpu_power_settings` | `db/gpu_power_settings.py` | Power caps y persistence mode, reaplicados al arrancar |
+| `openai_files`, `openai_batches` | `db/openai_batches.py` | Files y Batches API. Desde la migración 0049, `openai_batches.input_file_id` ya no es FK: borrar el fichero de entrada de un batch terminado está permitido |
+| `federation_peers`, `federation_invites`, `federation_join_requests` | `db/federation.py` | Federación |
+| `cloud_providers`, `cloud_nodes`, `cloud_model_recipes` | `db/cloud.py` | Nodos en la nube y recetas de precarga |
+| `agents`, `agent_mcp_servers` | `db/agents.py` | Agentes |
+| `mcp_servers` | `db/mcp.py` | Servidores MCP |
+| `trtllm_compile_jobs` | `db/trtllm.py` | Compilaciones TensorRT-LLM |
 
 ---
 
@@ -974,6 +596,9 @@ class ModelProfile(Base):
     load_overrides: dict      # JSONB, merge con extra_config del modelo base al cargar
     request_defaults: dict    # JSONB, inyectados como defaults en body de request
     assets: dict              # JSONB, {"voice_ref": "/data/profiles/{profile_id}/reference.wav", ...}
+    routing_targets: list | None  # solo routers: profile_id de destino
+    runtime_policy: dict | None   # política de presets (8.9; esquema en schemas/profiles.py)
+    router_context: dict | None   # solo routers
     enabled: bool             # default True
     is_default: bool          # default False, max 1 por base_model_id
     created_at: datetime
@@ -993,38 +618,36 @@ Validaciones:
 
 ### 8.2 Resolución de perfiles (ProfileRegistry → OpenAI/Ollama API)
 
-```python
-# backend/ocabra/core/profile_registry.py
+Fuente: `backend/ocabra/api/openai/_deps.py` (`resolve_profile`,
+`merge_profile_defaults`, `ensure_loaded`); el registro en memoria es
+`core/profile_registry.ProfileRegistry`.
 
-async def resolve_profile(profile_id: str) -> tuple[ModelProfile, ModelState]:
-    """
-    0. Alias oculto (model_profile_aliases) → su perfil (+ preset fijado)
-    1. Buscar profile_id en ProfileRegistry (cache + BD)
-    2. Si coincide con un id de despliegue (<backend>/<model_key>), resolver su
-       perfil default habilitado; si no hay default, el primer perfil habilitado
-       (todo despliegue tiene al menos uno: los no-default, uno oculto fijado)
-    3. Si no existe, está disabled o no tiene perfil habilitado → HTTPException 404
-    4. ensure_loaded(base_model_id, load_overrides=profile.load_overrides)
-    5. Retornar (profile, state)
-    """
+`resolve_profile(profile_id, model_manager, profile_registry, *, user=None, ...)
+-> (ModelProfile, ModelState)` resuelve en este orden:
 
-async def forward_with_profile(
-    profile: ModelProfile,
-    state: ModelState,
-    body: dict,
-) -> Any:
-    """
-    1. merged = {**profile.request_defaults, **body}  # body del cliente prevalece
-    2. Inyectar assets (voice_ref, lora_path, etc.) en merged
-    3. forward_request(state.worker_key, path, merged)
-    """
-```
+0. Alias oculto (`model_profile_aliases`) → su perfil (+ preset fijado).
+1. `profile_id` exacto en `ProfileRegistry` (debe estar habilitado).
+2. Id de despliegue (`<backend>/<model_key>`): su perfil default habilitado o,
+   si no hay, el primer perfil habilitado (todo despliegue tiene al menos uno).
+3. Si nada coincide → 404. Si el usuario no tiene acceso, también 404 (no se
+   filtra la existencia).
+
+`merge_profile_defaults(profile, body)` aplica, de menor a mayor prioridad,
+los `request_defaults` del perfil, los del router por el que entró la
+petición y el body del cliente; después inyecta los assets (`voice_ref`), que
+el cliente no puede sobrescribir.
 
 ### 8.3 Worker key (ModelManager)
 
+Fuente: `core/model_manager_helpers.compute_worker_key`.
+
 ```
-worker_key = f"{base_model_id}:{hash(sorted(load_overrides.items()))}"
+worker_key = base_model_id                                   # load_overrides vacío
+worker_key = f"{base_model_id}::{sha256(json(load_overrides, sort_keys))[:12]}"
 ```
+
+El interruptor de diarización no forma parte de la clave
+(`strip_diarization_overrides`).
 
 - `load_overrides` vacío o idéntico entre perfiles → mismo worker (compartido).
 - `load_overrides` diferente → worker separado (dedicado).
@@ -1087,49 +710,16 @@ Resolución de identificadores:
 
 ### 8.7 Endpoints REST de perfiles
 
-Base URL: `/ocabra/`
+Rutas en `api/internal/profiles.py` (CRUD, `rename`, `clone`, `assets`,
+`aliases`, `runtime-presets`); lista completa en `docs/API.md`, esquemas
+(`ProfileCreate`, `ProfileUpdate`, `ProfileOut`) en `schemas/profiles.py` y en
+el Swagger.
 
-```
-GET    /ocabra/profiles                              → list[ModelProfile]
-GET    /ocabra/profiles/{profile_id}                 → ModelProfile
-POST   /ocabra/profiles                              → ModelProfile
-  body: {
-    profile_id: str,          # slug requerido
-    profile_kind: "execution"|"router",
-    base_model_id?: str|null, # requerido únicamente para execution
-    display_name: str,
-    description?: str|null,
-    category: "llm"|"tts"|"stt"|"image"|"music",
-    load_overrides?: dict,
-    request_defaults?: dict,
-    enabled?: bool,
-    is_default?: bool
-    routing_targets?: list[str] # requerido únicamente para router
-  }
-PATCH  /ocabra/profiles/{profile_id}                 → ModelProfile
-  body: {
-    display_name?: str,
-    description?: str|null,
-    category?: str,
-    load_overrides?: dict,
-    request_defaults?: dict,
-    enabled?: bool,
-    is_default?: bool
-  }
-DELETE /ocabra/profiles/{profile_id}                 → {"ok": true}
-POST   /ocabra/profiles/{profile_id}/assets          → ModelProfile  (multipart upload)
-DELETE /ocabra/profiles/{profile_id}/assets/{asset_key} → ModelProfile
-```
+### 8.8 Caché de perfiles
 
-### 8.8 Redis — Keys y canales adicionales para perfiles
-
-```
-# Canal pub/sub
-profile:events              → {"event": "created"|"updated"|"deleted", "profile_id": str}
-
-# Key (cache)
-profile:state:{profile_id}  → ModelProfile (JSON, TTL: none)
-```
+No hay keys ni canales Redis de perfiles: `ProfileRegistry` los mantiene en
+memoria, los carga de BD al arrancar (`load_all`) y los recarga tras cada
+escritura.
 
 ### 8.9 Presets de runtime por perfil
 
@@ -1148,11 +738,13 @@ class ProfileRuntimePreset(Base):
     label: str
     context_mode: str           # "fixed" | "max"
     context_tokens: int | None  # requerido para fixed; NULL para max
-    parallelism: int            # paralelismo solicitado, >= 1
-    kv_cache_dtype: str         # "fp16" | "bf16" | "fp8" | "q8" | "q4"
+    parallelism: int            # paralelismo solicitado, >= 1 (default 2)
+    kv_cache_dtype: str         # "fp16" | "bf16" | "fp8" | "q8" | "q4" (default "q8")
     placement_policy: str       # "auto" | "preferred" | "forced"
     preferred_gpus: list[int] | None
-    execution_policy: str       # "auto" | "local" | "remote"
+    placement: dict | None      # colocación propia del preset (split, tensor split,
+                                # capas en GPU, expertos MoE en CPU); NULL = la del
+                                # modelo. Esquema: schemas.profiles.PresetPlacement
     enabled: bool
     is_default: bool
     priority: int
@@ -1189,11 +781,13 @@ runtime_policy = {
     "downgrade_grace_seconds": 600,
     "minimum_residency_seconds": 120,
     "small_requests_extend_large_ttl": False,
-    "remote_warm_threshold_seconds": 10,
+    "remote_warm_threshold_seconds": 10,      # sin efecto: se acepta por compatibilidad
     "max_context_tokens": None,               # techo validado opcional
     "max_output_tokens": None,                # límite duro de generación opcional
     "validated_context_tokens": {"normal": 98304}, # pools fijos medidos
     "validated_vram_mb": {"normal": 24000}, # pico medido + margen
+    # además: validated_by_backend, context_probe y otros; ver
+    # schemas/profiles.RuntimePolicy (extra="forbid")
 }
 ```
 
@@ -1217,7 +811,8 @@ Selección de preset para chat/completions:
    cubra el trabajo (salvo override explícito).
 3. Sin candidato cargado, usar el default si cubre la petición; si no, usar el
    menor preset habilitado suficiente.
-4. Comparar carga local con un remoto caliente cuando la política lo permita.
+4. El reparto local/remoto lo decide la estrategia de federación del modelo
+   (`core/federation_policy.py`), no esta política.
 5. Si el perfil configura ``runtime_policy.max_output_tokens`` y un
    ``max_tokens`` o ``max_completion_tokens`` explícito lo supera, responder
    HTTP 400 con
@@ -1228,28 +823,13 @@ Selección de preset para chat/completions:
 7. El escalado hacia arriba es inmediato; la vuelta al default se difiere por
    ``downgrade_grace_seconds`` y nunca interrumpe peticiones activas.
 
-**Presets ``max`` y el límite del split entre GPUs.** El preset con
-``context_mode="max"`` pide el mayor contexto que ``vram_planner`` cree que
-cabe. ``vram_planner`` evalúa UNA GPU por preset (``placement_policy=auto``
-elige la que ofrezca mayor contexto efectivo, no suma varias). Ollama corre
-hoy como dos pools segmentados por ``CUDA_VISIBLE_DEVICES``: un modelo
-cargado en el pool 3090 no puede ver la 3060 y viceversa, así que split
-real entre tarjetas no está soportado por el camino de Ollama. Para modelos
-cuyo contexto nativo (``runtime_policy.max_context_tokens``) no cabe en la
-GPU más grande disponible, el preset ``max`` queda deshabilitado hasta que
-se añada un pool compartido o soporte explícito de ``OLLAMA_SCHED_SPREAD``.
-A fecha de 2026-10-27 esto afecta a los modelos que siguen en Ollama:
-``qwen3:8b``, ``qwen3-vl:8b``, ``gemma4:12b``, ``qwen3.8:27b-abliterated``,
-``qwen3-coder:30b``, ``nemotron-3-nano:30b``. ``gemma4:26b`` y
-``qwen3.8:27b`` ya NO están afectados — ambos migraron al backend
-``llama_cpp`` nativo (self-speculative MTP, soporte de visión vía mmproj
-para gemma4), que sí soporta split real multi-GPU (``tensor_split``), así
-que su preset ``max`` reparte entre ambas tarjetas sin la limitación de
-Ollama. Ver `gpu-bench` en la máquina de desarrollo para el detalle de
-ambas migraciones.
+**Presets ``max``.** El preset con ``context_mode="max"`` pide el mayor
+contexto que el planner cree que cabe en la colocación del preset. Los
+backends llama.cpp reparten entre varias GPU (``tensor_split``); Ollama no
+tiene presets de contexto (ver el final de esta sección).
 
 **Margen de seguridad del budget KV.** ``max_context_tokens`` aplica un
-``DEFAULT_KV_SAFETY_FACTOR=0.90`` al presupuesto (``free - weights -
+``DEFAULT_KV_SAFETY_FACTOR=0.90`` (``core/vram_planner.py``) al presupuesto (``free - weights -
 overhead``) para absorber buffers no modelados (CUDA graphs,
 Flash-Attention workspace, scratch de Ollama/llama.cpp, chunked prefill).
 Sin esto el planner reportaba ``fits=True`` para 262k en 24 GB cuando
@@ -1271,9 +851,7 @@ por defecto del build fijado:
 
 El backend acepta tanto ``snake_case`` como ``camelCase`` por compatibilidad
 con la UI. Estos campos configuran ``llama-server`` al crear el runtime; no
-autorizan una mutación en caliente. Durante el spike inicial se usarán
-``cache_ram_mib=0`` y ``cache_idle_slots=False`` para que la prompt cache no
-interfiera con las pruebas de aislamiento del pool unificado.
+autorizan una mutación en caliente.
 
 **Admission control ponderado del pool KV.** La cola justa existente es la
 única autoridad de admisión delante del worker. No se crea una segunda cola
@@ -1281,12 +859,17 @@ para KV: ``FairSlotGate`` aplica atómicamente los dos límites al conceder una
 reserva:
 
 ```python
-await gate.acquire(
+async with gate.slot(
     user_key,
     is_batch=False,
     kv_tokens=required_tokens,       # prompt estimado + salida reservada
-)
+    prompt_tokens=prompt_tokens,
+) as admission:
+    ...
 ```
+
+(``core/fair_slot_gate.py``; ``WorkerPool.forward_request``/``forward_stream``
+lo usan cuando reciben ``user_key``.)
 
 - ``slots`` limita peticiones concurrentes físicas.
 - ``kv_capacity_tokens`` es el pool agregado del runtime; ``None`` desactiva
@@ -1297,15 +880,14 @@ el runtime siguen siendo físicos y no se redimensiona el pool KV. Antes de
 conceder cada lease, el mismo ``FairSlotGate`` calcula un límite efectivo a
 partir del prompt estimado:
 
-- prompt menor de 32k: hasta los cuatro slots físicos;
-- prompt de 32k o más: máximo tres peticiones activas;
-- prompt de 64k o más: máximo dos peticiones activas.
+- prompt menor de ``LLAMA_CPP_MEDIUM_PREFILL_TOKENS`` (32768): todos los slots físicos;
+- desde ese umbral: máximo ``LLAMA_CPP_MEDIUM_PREFILL_MAX_CONCURRENCY`` (3) peticiones activas;
+- desde ``LLAMA_CPP_LARGE_PREFILL_TOKENS`` (65536): máximo ``LLAMA_CPP_LARGE_PREFILL_MAX_CONCURRENCY`` (2).
 
 Mientras una petición ponderada está activa, el límite también se aplica a
 las peticiones pequeñas que lleguen después. Así un prefill grande no queda
-rodeado por tres admisiones nuevas. Los umbrales son configurables mediante
-``LLAMA_CPP_{MEDIUM,LARGE}_PREFILL_*`` y sólo se aplican a workers
-``llama_cpp``. La dimensión computacional se concede atómicamente junto con
+rodeado por tres admisiones nuevas. Los umbrales sólo se aplican a workers
+llama.cpp. La dimensión computacional se concede atómicamente junto con
 slot, KV y prioridad justa; no existe una segunda cola con orden diferente.
 
 En streaming, el gate conoce además la frontera real entre prefill y decode:
@@ -1487,16 +1069,10 @@ slot: solo reduce ese máximo lógico. Para reparto completamente flexible se
 omite el campo o se iguala a ``ctx_size``; oCabra debe controlar que las reservas
 agregadas de las peticiones admitidas no superen el pool.
 
-Endpoints internos:
-
-```
-GET    /ocabra/profiles/{profile_id}/runtime-presets
-GET    /ocabra/profiles/{profile_id}/runtime-presets/resolved
-POST   /ocabra/profiles/{profile_id}/runtime-presets
-PATCH  /ocabra/profiles/{profile_id}/runtime-presets/{preset_key}
-DELETE /ocabra/profiles/{profile_id}/runtime-presets/{preset_key}
-POST   /ocabra/profiles/{profile_id}/runtime-presets/{preset_key}/benchmark
-```
+Endpoints internos (lista completa en ``docs/API.md``):
+``/ocabra/profiles/{profile_id}/runtime-presets`` (CRUD), ``/resolved``,
+``/preview``, ``/{preset_key}/benchmark`` y ``/{preset_key}/context-probe``
+(``GET``/``POST`` y ``/apply``).
 
 ``runtime-presets/resolved`` calcula una instantánea administrativa contra la
 arquitectura, backend y VRAM total actuales. Devuelve por preset
@@ -1512,13 +1088,13 @@ petición. Para llama.cpp sin KV unificada, el runner materializa ese reparto
 como ``--ctx-size = effective_context * effective_parallelism``. Cuando el
 modelo usa ``llama_cpp.kv_unified=true``, ambos valores expresan en cambio el
 pool agregado real: ``--ctx-size = effective_context`` y los cuatro slots
-pueden direccionar todo el pool. El ``WeightedSlotGate`` impide que la suma de
+pueden direccionar todo el pool. El ``FairSlotGate`` impide que la suma de
 reservas concurrentes lo exceda. Esta distinción se persiste en el runtime como
 ``_runtime.context_is_pool=true`` y evita multiplicar accidentalmente por el
 número de slots durante la admisión o el arranque.
 
 Los perfiles adaptativos llama.cpp pueden combinar un preset default forzado a
-la RTX 3090 y otro preset extendido forzado a 3060+3090. La petición selecciona
+una GPU y otro preset extendido forzado a dos. La petición selecciona
 el menor pool que cubre ``prompt + salida reservada``; el salto a dos GPU drena
 y desaloja los runtimes que ocupen cualquiera de sus shards. El retorno al
 default ocurre únicamente tras ``minimum_residency_seconds`` y
@@ -1558,9 +1134,6 @@ Selección y observabilidad:
   reserva por defecto y del tráfico real. ``recommended_input_tokens`` es la
   parte de la ventana que queda al reservar ese presupuesto. Ambos son
   recomendaciones para planificación y nunca límites duros.
-- El heartbeat federado puede añadir ``runtime_preset``,
-  ``effective_context`` y ``parallelism`` al runtime cargado. Son campos
-  opcionales para permitir nodos con versiones distintas.
 - Las estadísticas conservan el ``profile_id`` público y atribuyen también el
   preset, runtime key y contexto efectivos cuando existan.
 
@@ -1632,27 +1205,23 @@ Resolución, en ``POST /v1/audio/speech`` y ``GET /v1/audio/voices``:
 
 ---
 
-## 9. Variables de entorno (contratos de configuración)
+## 9. Configuración (variables de entorno)
 
-```bash
-# Base de datos
-DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/ocabra
+Fuente: `backend/ocabra/config.py` (`Settings`, pydantic-settings; cada campo
+se lee de la variable de entorno del mismo nombre en mayúsculas). Las variables
+que un operador puede necesitar, con sus valores por defecto, están en
+`.env.example`.
 
-# Redis
-REDIS_URL=redis://redis:6379/0
+Invariantes entre módulos que conviene conocer:
 
-# Modelos
-MODELS_DIR=/data/models          # Carpeta raíz donde se guardan los modelos
-HF_TOKEN=                        # Token HuggingFace (opcional, para modelos privados/gated)
-
-# GPUs
-DEFAULT_GPU_INDEX=1              # GPU preferida por defecto (0=3060, 1=3090)
-WORKER_PORT_RANGE_START=18000
-WORKER_PORT_RANGE_END=19000
-
-# Energía
-ENERGY_COST_EUR_KWH=0.15        # Para estimación de coste
-
-# Servidor
-LOG_LEVEL=INFO
-```
+- `APP_VERSION` no se lee del entorno: es una constante del código (ver
+  `CLAUDE.md`).
+- Los ajustes editables desde la UI (`PATCH /ocabra/config`) se guardan en la
+  tabla `server_config` y **pisan** al `.env` en cada arranque (§5.4). Cambiar
+  el `.env` no tiene efecto sobre un ajuste que alguien guardó desde la UI.
+- `settings` se modifica en caliente: el código que copia un valor al arrancar
+  no ve los cambios posteriores; léelo de `settings` en el momento de usarlo.
+- `MODELS_DIR` es de solo lectura en runtime; `DOWNLOAD_DIR` vacío significa
+  `{MODELS_DIR}/downloads`.
+- `WORKER_PORT_RANGE_START`/`END` es el único rango de puertos de workers y
+  procesos auxiliares (ver §1 y §4).
