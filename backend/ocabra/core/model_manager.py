@@ -1466,6 +1466,51 @@ class ModelManager:
         remaining = deadline - asyncio.get_running_loop().time()
         return max(0, min(int(wanted_s), int(remaining)))
 
+    def _drain_timeout_for(self, requesting_model_id: str, candidate_id: str) -> int:
+        """Seconds to wait for a busy eviction candidate to drain.
+
+        ``pressure_eviction_drain_timeout_s``; when the duration estimator
+        knows how long its live request has left, that plus a 15 s margin
+        (Bloque 20), capped at ``max_drain_timeout_s``; always within the
+        load's one drain budget (BUG-24, ``_drain_wait_budget_s``).
+        """
+        static_timeout_s = max(1, int(settings.pressure_eviction_drain_timeout_s))
+        drain_timeout_s = static_timeout_s
+        estimator = getattr(self, "_duration_estimator", None)
+        if estimator is not None:
+            try:
+                remaining = estimator.in_flight_remaining(candidate_id, model_id=candidate_id)
+            except Exception:  # noqa: BLE001
+                remaining = None
+            if remaining is not None and remaining > 0:
+                drain_timeout_s = min(
+                    max(static_timeout_s, int(settings.max_drain_timeout_s)),
+                    int(remaining) + 15,
+                )
+        return self._drain_wait_budget_s(requesting_model_id, drain_timeout_s)
+
+    async def _wait_drained(
+        self, requesting_model_id: str, candidate_id: str, timeout_s: float
+    ) -> bool:
+        """Wait up to ``timeout_s`` for ``candidate_id``'s requests to end;
+        returns whether it is idle. The one drain wait of every eviction.
+
+        Shown on the activity card (``_eviction_wait_for``) and registered as
+        a passive wait of the arbiter's owner: a request on the candidate that
+        waits for the arbiter (vision, whisper) gives up instead of closing a
+        cycle with it.
+        """
+        self._eviction_wait_for[requesting_model_id] = candidate_id
+        try:
+            with self._arbiter.waiting_on(candidate_id):
+                for _ in range(int(timeout_s * 2)):
+                    if not self.is_busy(candidate_id):
+                        break
+                    await asyncio.sleep(0.5)
+        finally:
+            self._eviction_wait_for.pop(requesting_model_id, None)
+        return not self.is_busy(candidate_id)
+
     async def _evict_for_space(self, gpu_index: int, needed_mb: int) -> int:
         """Evict LRU models from gpu_index until needed_mb is freed.
 
@@ -1532,22 +1577,7 @@ class ModelManager:
             if freed >= needed_mb:
                 break
             if self.is_busy(candidate_id):
-                static_timeout_s = max(1, int(settings.pressure_eviction_drain_timeout_s))
-                drain_timeout_s = static_timeout_s
-                estimator = getattr(self, "_duration_estimator", None)
-                if estimator is not None:
-                    try:
-                        remaining = estimator.in_flight_remaining(
-                            candidate_id, model_id=candidate_id
-                        )
-                    except Exception:  # noqa: BLE001
-                        remaining = None
-                    if remaining is not None and remaining > 0:
-                        drain_timeout_s = min(
-                            max(static_timeout_s, int(settings.max_drain_timeout_s)),
-                            int(remaining) + 15,
-                        )
-                drain_timeout_s = self._drain_wait_budget_s(requesting_model_id, drain_timeout_s)
+                drain_timeout_s = self._drain_timeout_for(requesting_model_id, candidate_id)
                 logger.info(
                     "vram_eviction_last_resort_drain_wait",
                     requested_model_id=requesting_model_id,
@@ -1555,18 +1585,7 @@ class ModelManager:
                     gpu_index=gpu_index,
                     drain_timeout_s=drain_timeout_s,
                 )
-                self._eviction_wait_for[requesting_model_id] = candidate_id
-                try:
-                    # A request on the candidate that waits for the arbiter
-                    # (vision, whisper) gives up instead of closing a cycle.
-                    with self._arbiter.waiting_on(candidate_id):
-                        for _ in range(drain_timeout_s * 2):
-                            if not self.is_busy(candidate_id):
-                                break
-                            await asyncio.sleep(0.5)
-                finally:
-                    self._eviction_wait_for.pop(requesting_model_id, None)
-                if self.is_busy(candidate_id):
+                if not await self._wait_drained(requesting_model_id, candidate_id, drain_timeout_s):
                     logger.warning(
                         "vram_eviction_last_resort_drain_timeout_skip",
                         requested_model_id=requesting_model_id,
@@ -3455,6 +3474,52 @@ class ModelManager:
                 await self._reconcile_ollama_state()
                 physical_residents_reconciled = True
 
+            async def free_card(gpu_idx: int, needed_mb: int, label: str) -> None:
+                """Make ``needed_mb`` free on one card or raise: the cheap ways
+                (shrink, cheap evictions), the polite LRU pass, the last
+                resort, then a fresh reading and one more last-resort pass
+                against the physical deficit."""
+                available = await admission_free_vram(gpu_idx)
+                deficit = max(0, needed_mb - available)
+                if deficit and allow_pressure_eviction:
+                    await reconcile_physical_residents()
+                    if await self._relieve_gpu_cheaply(model_id, gpu_idx, needed_mb):
+                        available = await admission_free_vram(gpu_idx)
+                        deficit = max(0, needed_mb - available)
+                if not deficit:
+                    return
+                if allow_pressure_eviction:
+                    freed = await self._evict_for_space(gpu_idx, deficit)
+                    if freed < deficit:
+                        # The polite unload can take several monitor
+                        # cycles. A concurrent PIN load may finish in
+                        # that window and change its placement/status;
+                        # refresh once more before computing the true
+                        # last-resort candidate list.
+                        await reconcile_physical_residents(force=True)
+                        await self._evict_last_resort_for_space(model_id, gpu_idx, deficit - freed)
+                # Declared model VRAM is only an estimate (and can be tens of
+                # MiB below what the driver actually releases): decide from a
+                # fresh physical reading, not ``available + estimated_freed``.
+                available_after = await admission_free_vram_after_eviction(gpu_idx, needed_mb)
+                if needed_mb > available_after and allow_pressure_eviction:
+                    # Candidate VRAM estimates can be double-counted if a soft
+                    # PIN reloads while the first eviction pass is running.
+                    # Reconcile and make one final pass against the
+                    # *physical* remaining deficit.
+                    await reconcile_physical_residents(force=True)
+                    await self._evict_last_resort_for_space(
+                        model_id, gpu_idx, needed_mb - available_after
+                    )
+                    available_after = await admission_free_vram_after_eviction(gpu_idx, needed_mb)
+                if needed_mb > available_after:
+                    from ocabra.core.scheduler import InsufficientVRAMError
+
+                    raise InsufficientVRAMError(
+                        f"{label}: need {needed_mb} MB, "
+                        f"only {available_after} MB available after eviction"
+                    )
+
             if len(gpu_indices) > 1:
                 # Tensor-parallel backends shard the model across GPUs, so
                 # validate and evict against each known shard. A combined
@@ -3462,58 +3527,11 @@ class ModelManager:
                 # tensor_split allocation and the backend then OOMs.
                 if required_gpu_vram_mb:
                     for gpu_idx in gpu_indices:
-                        shard_needed = required_gpu_vram_mb.get(gpu_idx, 0)
-                        available = await admission_free_vram(gpu_idx)
-                        deficit = max(0, shard_needed - available)
-                        freed = 0
-                        if deficit and allow_pressure_eviction:
-                            await reconcile_physical_residents()
-                            if await self._relieve_gpu_cheaply(model_id, gpu_idx, shard_needed):
-                                available = await admission_free_vram(gpu_idx)
-                                deficit = max(0, shard_needed - available)
-                        if deficit and allow_pressure_eviction:
-                            freed = await self._evict_for_space(gpu_idx, deficit)
-                            if freed < deficit:
-                                # The polite unload can take several monitor
-                                # cycles. A concurrent PIN load may finish in
-                                # that window and change its placement/status;
-                                # refresh once more before computing the true
-                                # last-resort candidate list.
-                                await reconcile_physical_residents(force=True)
-                                freed += await self._evict_last_resort_for_space(
-                                    model_id, gpu_idx, deficit - freed
-                                )
-                        # Declared model VRAM is only an estimate (and can be
-                        # tens of MiB below what the driver actually releases).
-                        # The unload wait above crosses an hw-monitor refresh;
-                        # make the final decision from that fresh physical
-                        # reading instead of ``available + estimated_freed``.
-                        available_after = (
-                            await admission_free_vram_after_eviction(gpu_idx, shard_needed)
-                            if deficit
-                            else available
+                        await free_card(
+                            gpu_idx,
+                            required_gpu_vram_mb.get(gpu_idx, 0),
+                            f"GPU {gpu_idx} shard",
                         )
-                        if shard_needed > available_after and allow_pressure_eviction:
-                            # Candidate VRAM estimates can be double-counted
-                            # if a soft PIN reloads while the first eviction
-                            # pass is running. Reconcile and make one final
-                            # pass against the *physical* remaining deficit.
-                            await reconcile_physical_residents(force=True)
-                            await self._evict_last_resort_for_space(
-                                model_id,
-                                gpu_idx,
-                                shard_needed - available_after,
-                            )
-                            available_after = await admission_free_vram_after_eviction(
-                                gpu_idx, shard_needed
-                            )
-                        if shard_needed > available_after:
-                            from ocabra.core.scheduler import InsufficientVRAMError
-
-                            raise InsufficientVRAMError(
-                                f"GPU {gpu_idx} shard: need {shard_needed} MB, "
-                                f"only {available_after} MB available after eviction"
-                            )
                 else:
                     # Backends without an explicit split still use combined
                     # capacity; their own runtime controls the distribution.
@@ -3552,42 +3570,7 @@ class ModelManager:
                             )
             else:
                 for gpu_idx in gpu_indices:
-                    available = await admission_free_vram(gpu_idx)
-                    if vram_needed > available and allow_pressure_eviction:
-                        await reconcile_physical_residents()
-                        if await self._relieve_gpu_cheaply(model_id, gpu_idx, vram_needed):
-                            available = await admission_free_vram(gpu_idx)
-                    if vram_needed > available:
-                        freed = (
-                            await self._evict_for_space(gpu_idx, vram_needed - available)
-                            if allow_pressure_eviction
-                            else 0
-                        )
-                        if allow_pressure_eviction and freed < (vram_needed - available):
-                            await reconcile_physical_residents(force=True)
-                            freed += await self._evict_last_resort_for_space(
-                                model_id, gpu_idx, vram_needed - available - freed
-                            )
-                        available_after = await admission_free_vram_after_eviction(
-                            gpu_idx, vram_needed
-                        )
-                        if vram_needed > available_after and allow_pressure_eviction:
-                            await reconcile_physical_residents(force=True)
-                            await self._evict_last_resort_for_space(
-                                model_id,
-                                gpu_idx,
-                                vram_needed - available_after,
-                            )
-                            available_after = await admission_free_vram_after_eviction(
-                                gpu_idx, vram_needed
-                            )
-                        if vram_needed > available_after:
-                            from ocabra.core.scheduler import InsufficientVRAMError
-
-                            raise InsufficientVRAMError(
-                                f"GPU {gpu_idx}: need {vram_needed} MB, "
-                                f"only {available_after} MB available after eviction"
-                            )
+                    await free_card(gpu_idx, vram_needed, f"GPU {gpu_idx}")
 
         # vLLM checks against a fraction of total VRAM, not only model weights.
         if enforce_vllm_headroom and self._gpu_manager:
@@ -3763,9 +3746,6 @@ class ModelManager:
                 if gpu_pool_order == [None]:
                     restricted = sorted(allowed_set)
                 gpu_pool_order = list(restricted) or gpu_pool_order
-
-            static_drain_timeout_s = max(1, int(settings.pressure_eviction_drain_timeout_s))
-            max_drain_timeout_s = max(static_drain_timeout_s, int(settings.max_drain_timeout_s))
 
             # Capacities measured by an earlier load are stale (contexts and
             # residents changed since); this pass measures its own.
@@ -3966,22 +3946,10 @@ class ModelManager:
                                 evicting_model_id=candidate_id,
                                 cancelled=n_cancelled,
                             )
-                            self._eviction_wait_for[model_id] = candidate_id
-                            try:
-                                # A request on the candidate that waits for the arbiter
-                                # (vision, whisper) gives up instead of closing a cycle.
-                                with self._arbiter.waiting_on(candidate_id):
-                                    # Cancellation propagates fast (closes the
-                                    # upstream connection, see worker_pool.py); a
-                                    # couple of seconds is plenty of slack for it to
-                                    # actually land before we give up and move on.
-                                    for _ in range(10):
-                                        if not self.is_busy(candidate_id):
-                                            break
-                                        await asyncio.sleep(0.5)
-                            finally:
-                                self._eviction_wait_for.pop(model_id, None)
-                            if self.is_busy(candidate_id):
+                            # Cancellation propagates fast (closes the upstream
+                            # connection, see worker_pool.py); a couple of seconds
+                            # is plenty of slack for it to land before moving on.
+                            if not await self._wait_drained(model_id, candidate_id, 5):
                                 logger.warning(
                                     "pressure_eviction_batch_preempt_timeout_skip",
                                     evicting_model_id=candidate_id,
@@ -3993,38 +3961,16 @@ class ModelManager:
                             # generation, so batch waits longer before retrying.
                             batch_priority.mark_cooldown(candidate_id, kind="eviction")
                         else:
-                            drain_timeout_s = static_drain_timeout_s
-                            if estimator is not None:
-                                try:
-                                    remaining = estimator.in_flight_remaining(
-                                        candidate_id, model_id=candidate_id
-                                    )
-                                except Exception:  # noqa: BLE001
-                                    remaining = None
-                                if remaining is not None and remaining > 0:
-                                    drain_timeout_s = min(
-                                        max_drain_timeout_s,
-                                        int(remaining) + 15,
-                                    )
-                            drain_timeout_s = self._drain_wait_budget_s(model_id, drain_timeout_s)
+                            drain_timeout_s = self._drain_timeout_for(model_id, candidate_id)
                             logger.info(
                                 "pressure_eviction_drain_wait",
                                 requested_model_id=model_id,
                                 evicting_model_id=candidate_id,
                                 drain_timeout_s=drain_timeout_s,
                             )
-                            self._eviction_wait_for[model_id] = candidate_id
-                            try:
-                                # A request on the candidate that waits for the arbiter
-                                # (vision, whisper) gives up instead of closing a cycle.
-                                with self._arbiter.waiting_on(candidate_id):
-                                    for _ in range(drain_timeout_s * 2):
-                                        if not self.is_busy(candidate_id):
-                                            break
-                                        await asyncio.sleep(0.5)
-                            finally:
-                                self._eviction_wait_for.pop(model_id, None)
-                            if self.is_busy(candidate_id):
+                            if not await self._wait_drained(
+                                model_id, candidate_id, drain_timeout_s
+                            ):
                                 logger.warning(
                                     "pressure_eviction_drain_timeout_skip",
                                     evicting_model_id=candidate_id,
