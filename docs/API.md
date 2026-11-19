@@ -1,6 +1,6 @@
 # oCabra API Documentation
 
-**Version**: 0.1.0
+**Version**: la que devuelve `GET /version` (o `/health`); vive en `APP_VERSION` (`backend/ocabra/config.py`). Los cambios entre versiones están en `/docs/changelog`.
 **Base URL**: `http://<host>:8000`
 **Auth**: JWT via cookie (`access_token`) o header `Authorization: Bearer <token>`
 

@@ -4,7 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ocabra"
-version = "0.6.0"
+# Not the app version: that is APP_VERSION in ocabra/config.py (served on
+# /health and /version) together with frontend/package.json. This number is
+# fixed on purpose because the Dockerfiles install from pyproject.toml before
+# the source is copied, so it cannot be read from the code, and a third copy
+# to bump by hand is how the old "0.6.0" went stale.
+version = "0.0.0"
 description = "Multi-GPU AI model server with OpenAI and Ollama API compatibility"
 requires-python = ">=3.11"
 dependencies = [
