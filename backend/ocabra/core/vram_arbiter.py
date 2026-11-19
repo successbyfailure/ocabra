@@ -23,7 +23,7 @@ Lo que añade a un ``asyncio.Lock``:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 
 
@@ -78,6 +78,46 @@ async def acquire_lock_unless(
         # Got the lock in the same tick we gave up: hand it back.
         lock.release()
     return False if aborted else None
+
+
+async def wait_for_reading(
+    read: Callable[[], Awaitable[int | None]],
+    *,
+    target: int,
+    max_s: float,
+    poll_s: float,
+    settle_s: float | None = None,
+    initial: int | None = None,
+) -> int | None:
+    """Poll ``read()`` until it reaches ``target``; returns the last reading.
+
+    The one shape of every "wait until the VRAM is released" in the arbiter:
+    it ends as soon as the reading shows the memory (never on a fixed sleep),
+    when the reading has stopped moving for ``settle_s`` (the release is over
+    and was not enough: the caller moves on), or at ``max_s`` (bounded,
+    whatever the GPU does). ``read`` returning ``None`` (no reading) ends it.
+    ``initial`` is a reading the caller just took: used as the first one.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, float(max_s))
+    last: int | None = None
+    last_change = loop.time()
+    pending = initial
+    while True:
+        if pending is not None:
+            value, pending = pending, None
+        else:
+            value = await read()
+        if value is None or value >= target:
+            return value
+        now = loop.time()
+        if last is None or value != last:
+            last, last_change = value, now
+        elif settle_s is not None and now - last_change >= settle_s:
+            return value
+        if now >= deadline:
+            return value
+        await asyncio.sleep(poll_s)
 
 
 def _never() -> bool:

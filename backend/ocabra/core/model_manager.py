@@ -49,6 +49,7 @@ from ocabra.core.vram_arbiter import (
     LoadGateTimeoutError,
     VramArbiter,
     acquire_lock_unless,
+    wait_for_reading,
 )
 from ocabra.db.model_config import LogicalModel, ModelConfig
 from ocabra.db.stats import ModelLoadStat
@@ -64,6 +65,9 @@ logger = structlog.get_logger(__name__)
 
 # Slack when checking that the GPU's free figure shows what a shrink released.
 _GROW_MARGIN_MB = 256
+# Longest wait for an evicted worker's memory to show as free (it ends as soon
+# as the reading shows it; see vram_arbiter.wait_for_reading).
+_VRAM_RELEASE_MAX_S = 12.0
 
 
 def _to_camel_key(value: str) -> str:
@@ -3249,6 +3253,11 @@ class ModelManager:
                         else ""
                     )
                 )
+            if self._gpu_manager is not None:
+                with suppress(Exception):
+                    self._refresh_live(
+                        [int(gpu.index) for gpu in await self._gpu_manager.get_all_states()]
+                    )
             try:
                 gpu_indices = await self._assign_gpus_for_load(
                     model_id=requesting_id,
@@ -3348,6 +3357,16 @@ class ModelManager:
         if not gpu_managed:
             return []
 
+        # Decide on what the cards hold now, not on hw-monitor's last publish
+        # (~2 s behind): under the arbiter nothing of ours allocates
+        # meanwhile, and a stale figure either refused a load right after an
+        # eviction or (worse) admitted one onto memory just taken (16/11).
+        if self._gpu_manager is not None:
+            with suppress(Exception):
+                self._refresh_live(
+                    [int(gpu.index) for gpu in await self._gpu_manager.get_all_states()]
+                )
+
         if required_gpu_indices:
             gpu_indices = list(required_gpu_indices)
         elif self._gpu_scheduler:
@@ -3408,13 +3427,18 @@ class ModelManager:
                 return free
 
             async def admission_free_vram_after_eviction(gpu_index: int, required_mb: int) -> int:
-                """Wait out partial hw-monitor samples while a process exits."""
-                available_mb = await admission_free_vram(gpu_index)
-                deadline = asyncio.get_event_loop().time() + 12.0
-                while available_mb < required_mb and asyncio.get_event_loop().time() < deadline:
-                    await asyncio.sleep(0.75)
-                    available_mb = await admission_free_vram(gpu_index)
-                return available_mb
+                """Wait out partial hw-monitor samples while a process exits:
+                until the card offers ``required_mb`` (read live), bounded."""
+
+                async def read() -> int:
+                    self._refresh_live([gpu_index])
+                    return await admission_free_vram(gpu_index)
+
+                return int(
+                    await wait_for_reading(
+                        read, target=required_mb, max_s=_VRAM_RELEASE_MAX_S, poll_s=0.75
+                    )
+                )
 
             async def reconcile_physical_residents(*, force: bool = False) -> None:
                 nonlocal physical_residents_reconciled
@@ -3662,11 +3686,16 @@ class ModelManager:
                     # pressure_evict can wait out the service's generation; if
                     # that service is the one asking ensure_vram_free (waiting
                     # for this arbiter), it gives up instead of waiting for us.
+                    # Baseline before the stop: taken after it, a release
+                    # already visible made the wait below last its full bound.
+                    before = await self._get_vram_free_snapshot()
                     with self._arbiter.waiting_on(f"service:{service_id}"):
                         evicted = await self._service_manager.pressure_evict(service_id)
                     if not evicted:
                         continue
-                    await self._wait_for_vram_released(0)  # wait for VRAM to settle
+                    await self._wait_for_vram_released(
+                        0, baseline_free_mb=before[0] if before is not None else None
+                    )
                     try:
                         return await self._gpu_scheduler.find_gpu_for_model(
                             vram_needed,
@@ -4014,11 +4043,22 @@ class ModelManager:
                             if suppress_reload_seconds > 0
                             else None
                         )
+                    released_gpus = (
+                        list(candidate_state.current_gpu or []) if candidate_state else []
+                    ) or None
                     try:
+                        # Baseline before the unload: taken after it, a release
+                        # already published made the wait below last its full
+                        # bound waiting for a second rise that never comes.
+                        before = await self._get_vram_free_snapshot(released_gpus)
                         await self.unload(candidate_id, reason="pressure")
                     finally:
                         self.release_eviction_claim(candidate_id)
-                    await self._wait_for_vram_released(evicted_vram_mb)
+                    await self._wait_for_vram_released(
+                        evicted_vram_mb,
+                        baseline_free_mb=before[0] if before is not None else None,
+                        gpu_indices=released_gpus,
+                    )
                     if gpu_pool is not None:
                         await self._wait_for_free_vram(gpu_pool, vram_needed)
                     try:
@@ -4116,14 +4156,44 @@ class ModelManager:
             and _fallback_ok(model_id)
         ]
 
+    def _refresh_live(self, gpu_indices: list[int]) -> bool:
+        """Bring the polled figures of these GPUs up to NVML's reading now
+        (``GPUManager.refresh_from_live``). Returns whether any was read."""
+        refresh = getattr(self._gpu_manager, "refresh_from_live", None)
+        if not callable(refresh):
+            return False
+        read = False
+        for gpu in gpu_indices:
+            try:
+                result = refresh(int(gpu))
+            except Exception:  # noqa: BLE001 - a reading is never required
+                continue
+            if inspect.iscoroutine(result):  # an async test double: no reading
+                result.close()
+                continue
+            read = read or isinstance(result, int)
+        return read
+
     async def _get_vram_free_snapshot(
         self, gpu_indices: list[int] | None = None
     ) -> tuple[int, int] | None:
-        """Return physical free/total VRAM, optionally scoped to selected GPUs."""
+        """Return physical free/total VRAM, optionally scoped to selected GPUs.
+
+        Read live from NVML when it is available (see ``_refresh_live``), so a
+        baseline taken before an unload and the readings of the wait after it
+        come from the same, current source.
+        """
         if not self._gpu_manager:
             return None
         try:
             states = await self._gpu_manager.get_all_states()
+            wanted = [
+                int(getattr(state, "index", -1))
+                for state in states
+                if gpu_indices is None or int(getattr(state, "index", -1)) in gpu_indices
+            ]
+            if self._refresh_live(wanted):
+                states = await self._gpu_manager.get_all_states()
         except Exception:
             return None
 
@@ -4162,26 +4232,17 @@ class ModelManager:
         """
         if self._gpu_manager is None or needed_mb <= 0:
             return
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout_s
-        last_free: int | None = None
-        last_change = loop.time()
-        while True:
+
+        async def read() -> int | None:
+            self._refresh_live([gpu_index])
             try:
-                free = int(await self._gpu_manager.get_free_vram(gpu_index))
+                return int(await self._gpu_manager.get_free_vram(gpu_index))
             except Exception:  # noqa: BLE001
-                return
-            if free >= needed_mb:
-                return
-            now = loop.time()
-            if last_free is None or free != last_free:
-                last_free = free
-                last_change = now
-            elif now - last_change >= settle_s:
-                return
-            if now >= deadline:
-                return
-            await asyncio.sleep(poll_s)
+                return None
+
+        await wait_for_reading(
+            read, target=needed_mb, max_s=timeout_s, poll_s=poll_s, settle_s=settle_s
+        )
 
     async def _wait_for_vram_released(
         self,
@@ -4201,6 +4262,8 @@ class ModelManager:
         # rises (across refresh cycles), capped so a load never blocks forever.
         initial = await self._get_vram_free_snapshot(gpu_indices)
         if initial is None:
+            # No GPU readings at all: nothing to wait on, only a short pause
+            # for the process exit to land.
             await asyncio.sleep(3.0)
             return
         current_free_mb, total_vram_mb = initial
@@ -4215,12 +4278,14 @@ class ModelManager:
         if current_free_mb >= target or baseline >= total_vram_mb:
             return
 
-        deadline = asyncio.get_event_loop().time() + 12.0
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(0.75)
+        async def read() -> int | None:
             snapshot = await self._get_vram_free_snapshot(gpu_indices)
-            if snapshot is not None and snapshot[0] >= target:
-                return
+            # A missing reading keeps waiting (as before), it does not end it.
+            return snapshot[0] if snapshot is not None else -1
+
+        await wait_for_reading(
+            read, target=target, max_s=_VRAM_RELEASE_MAX_S, poll_s=0.75, initial=current_free_mb
+        )
 
     async def load(self, model_id: str, force_gpu: int | None = None) -> "ModelState":
         if model_id not in self._states:
@@ -4499,16 +4564,20 @@ class ModelManager:
         if self._gpu_manager is None or baseline_free is None:
             return
         target = baseline_free + freed_mb - _GROW_MARGIN_MB
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout_s
-        while loop.time() < deadline:
+        failed = False
+
+        async def read() -> int | None:
+            nonlocal failed
+            self._refresh_live([gpu_index])
             try:
-                if int(await self._gpu_manager.get_free_vram(gpu_index)) >= target:
-                    return
+                return int(await self._gpu_manager.get_free_vram(gpu_index))
             except Exception:  # noqa: BLE001
-                return
-            await asyncio.sleep(0.25)
-        logger.info("shrink_release_not_published", gpu_index=gpu_index, freed_mb=freed_mb)
+                failed = True
+                return None
+
+        reached = await wait_for_reading(read, target=target, max_s=timeout_s, poll_s=0.25)
+        if not failed and (reached is None or reached < target):
+            logger.info("shrink_release_not_published", gpu_index=gpu_index, freed_mb=freed_mb)
 
     async def _reload_cost_seconds(self, model_id: str) -> int:
         """What evicting a model costs its next request: its recent median load

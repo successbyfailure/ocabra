@@ -72,6 +72,9 @@ class World:
     published: dict[int, dict[int, int]] = field(default_factory=dict)
     # Seconds a change takes to reach the polled figure (hw-monitor ~2 s).
     publish_lag_s: float = 0.0
+    # Whether this process can read NVML itself (live_free_vram_mb).
+    nvml: bool = True
+    version: int = 0
     _pids: Any = field(default_factory=lambda: itertools.count(1000))
 
     def __post_init__(self) -> None:
@@ -92,9 +95,11 @@ class World:
 
     def _publish_snapshot(self, snapshot: dict[int, dict[int, int]]) -> None:
         self.published = snapshot
+        self.version += 1
 
     def publish(self) -> None:
         self.published = {gpu: dict(procs) for gpu, procs in self.live.items()}
+        self.version += 1
 
     def allocate(self, pid: int, per_gpu: dict[int, int]) -> None:
         for gpu, mb in per_gpu.items():
@@ -122,9 +127,15 @@ class FakeGPUManager(GPUManager):
         self.faults = faults
         for gpu in world.totals:
             self._locks[gpu] = {}
+        self._synced_version = -1
         self._sync()
 
     def _sync(self) -> None:
+        """Take hw-monitor's latest publish, like the real poll loop does
+        (only when there is a new one: a live refresh in between stands)."""
+        if self._synced_version == self.world.version:
+            return
+        self._synced_version = self.world.version
         for gpu, total in self.world.totals.items():
             used = sum(self.world.published[gpu].values())
             self._states[gpu] = GPUState(
@@ -157,7 +168,7 @@ class FakeGPUManager(GPUManager):
         ]
 
     def live_free_vram_mb(self, gpu_index: int) -> int | None:
-        return self.world.live_free(gpu_index)
+        return self.world.live_free(gpu_index) if self.world.nvml else None
 
     def raw_compute_pids(self, gpu_indices: list[int]) -> set[int]:
         return {pid for gpu in gpu_indices for pid in self.world.live[gpu]}

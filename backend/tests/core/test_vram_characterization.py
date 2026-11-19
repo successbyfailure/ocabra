@@ -586,11 +586,6 @@ async def test_two_loads_racing_for_the_same_card_never_overcommit_it(env):
     assert_quiescent(env)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: the post-eviction wait takes its baseline after the unload; when the "
-    "release is already published it waits the full 12 s for a second rise",
-)
 async def test_an_eviction_already_visible_is_not_waited_out_again():
     with Env(publish_lag_s=0.0) as env:
         await _three_on_the_3090(env)
@@ -625,3 +620,33 @@ async def test_a_cancelled_unload_can_be_finished_by_the_next_one(env):
     assert env.status("od") == ModelStatus.UNLOADED
     assert env.world.live[GPU_3090] == {}
     assert_quiescent(env)
+
+
+async def test_a_release_hw_monitor_has_not_published_yet_is_read_live():
+    """The poll lags (hw-monitor ~2 s, here far longer): the waits read NVML
+    themselves, so one eviction is enough and is not waited out twice. With
+    the polled figure only, the retry judged the card still full and evicted
+    the next candidate too."""
+    with Env(publish_lag_s=60.0) as env:
+        env.world.publish()
+        await _three_on_the_3090(env)
+        env.world.publish()
+        env.configure("new", 8_000, preferred_gpu=GPU_3090)
+        started = time.monotonic()
+        await env.mm.load("new")
+        assert env.backend.unloads == ["od"]
+        assert time.monotonic() - started < 3.0
+        assert_quiescent(env)
+
+
+async def test_without_nvml_the_waits_still_follow_the_poll():
+    """No live reading: the waits end when hw-monitor publishes the release."""
+    with Env(publish_lag_s=0.5) as env:
+        env.world.nvml = False
+        await _three_on_the_3090(env)
+        await asyncio.sleep(0.6)
+        env.configure("new", 8_000, preferred_gpu=GPU_3090)
+        started = time.monotonic()
+        await env.mm.load("new")
+        assert env.backend.unloads == ["od"]
+        assert time.monotonic() - started < 5.0

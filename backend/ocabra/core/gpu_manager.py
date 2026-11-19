@@ -1,7 +1,7 @@
 import asyncio
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import pynvml
@@ -249,6 +249,30 @@ class GPUManager:
             return int(pynvml.nvmlDeviceGetMemoryInfo(handle).free) // (1024 * 1024)
         except pynvml.NVMLError:
             return None
+
+    def refresh_from_live(self, gpu_index: int) -> int | None:
+        """Bring one GPU's polled free/used figures up to NVML's reading now.
+
+        For the VRAM-release waits (``vram_arbiter.wait_for_reading``): after
+        an unload the polled figure (hw-monitor, ~2 s) still shows the memory
+        taken, so a wait polling it lasted until the next publish even when
+        the process had long gone, and a decision taken meanwhile judged a
+        half-released card. NVML here is the same device read now, so it is
+        never staler than the poll; the next poll overwrites it again (with
+        an older sample at worst, which only shows less free). Processes are
+        left alone (they come from this namespace already). Returns the free
+        MB now, or ``None`` without NVML (nothing changes).
+        """
+        live = self.live_free_vram_mb(gpu_index)
+        state = self._states.get(gpu_index)
+        if live is None or state is None or state.total_vram_mb <= 0:
+            return None
+        live = max(0, min(int(live), int(state.total_vram_mb)))
+        if live != state.free_vram_mb:
+            self._states[gpu_index] = replace(
+                state, free_vram_mb=live, used_vram_mb=int(state.total_vram_mb) - live
+            )
+        return live
 
     def get_process_vram_mb(self, gpu_index: int) -> dict[int, int]:
         """VRAM per PID on one GPU, read now rather than from the last poll.
