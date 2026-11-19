@@ -49,6 +49,8 @@ from ocabra.core.vram_arbiter import (
     LoadGateTimeoutError,
     VramArbiter,
     acquire_lock_unless,
+    rank_lru_candidates,
+    rank_pressure_candidates,
     wait_for_reading,
 )
 from ocabra.db.model_config import LogicalModel, ModelConfig
@@ -1441,25 +1443,14 @@ class ModelManager:
         Only includes WARM or ON_DEMAND models (never PIN).
         Excludes models with in-flight requests.
         Excludes models held by live Realtime sessions (Bloque 20 veto).
+        Decision in ``vram_arbiter.rank_lru_candidates``.
         """
-        fallback_time = datetime.min.replace(tzinfo=UTC)
-        candidates = []
-        for model_id, state in self._states.items():
-            if state.status != ModelStatus.LOADED:
-                continue
-            if state.load_policy == LoadPolicy.PIN:
-                continue
-            if gpu_index not in (state.current_gpu or []):
-                continue
-            if self.is_busy(model_id):
-                continue
-            if self._is_reserved_by_realtime_session(model_id):
-                continue
-            candidates.append(state)
-        candidates.sort(
-            key=lambda s: s.last_request_at or s.loaded_at or fallback_time,
+        return rank_lru_candidates(
+            self._states.values(),
+            gpu_index,
+            is_busy=self.is_busy,
+            is_session_held=self._is_reserved_by_realtime_session,
         )
-        return [s.model_id for s in candidates]
 
     def _drain_wait_budget_s(self, requesting_model_id: str, wanted_s: int) -> int:
         """Seconds the load of ``requesting_model_id`` may still spend waiting
@@ -4118,65 +4109,16 @@ class ModelManager:
         that actually had room to give — pure disruption, no benefit,
         because candidate order only considered load_policy/last-used and
         never which GPU (if any) a candidate actually occupied.
+
+        Decision in ``vram_arbiter.rank_pressure_candidates``.
         """
-        policy_order = {
-            LoadPolicy.ON_DEMAND: 0,
-            LoadPolicy.WARM: 1,
-            LoadPolicy.PIN: 2,
-        }
-        fallback_time = datetime.min.replace(tzinfo=UTC)
-
-        def _on_target_gpu(state: "ModelState") -> bool:
-            if not state.current_gpu:
-                return False
-            if gpu_indices is None:
-                return True
-            return any(g in gpu_indices for g in state.current_gpu)
-
-        candidates = [
-            state
-            for state in self._states.values()
-            if state.model_id != requested_model_id
-            and state.status == ModelStatus.LOADED
-            # Hard pin only means something for PIN models; on a warm or
-            # on-demand model a leftover ``pin_permanent`` must not make it
-            # untouchable under pressure.
-            and not (state.pin_permanent and state.load_policy == LoadPolicy.PIN)
-            # Bloque 20 — a Realtime session's LLM/STT/TTS workers are
-            # invisible to pressure eviction. Ripping them out mid-turn
-            # kills the WebSocket in a way the client can't recover from.
-            and not self._is_reserved_by_realtime_session(state.model_id)
-            and _on_target_gpu(state)
-        ]
-        candidates.sort(
-            key=lambda state: (
-                policy_order.get(state.load_policy, 99),
-                state.last_request_at or state.loaded_at or fallback_time,
-            )
+        return rank_pressure_candidates(
+            self._states,
+            self._worker_pool._workers,
+            requested_model_id,
+            gpu_indices,
+            is_session_held=self._is_reserved_by_realtime_session,
         )
-        if candidates:
-            return [state.model_id for state in candidates]
-
-        # Fallback: workers the states above do not offer (a worker whose
-        # state went ERROR with its process alive, or lost its GPUs). Never a
-        # hard pin: this fallback used to return every worker on the card, so
-        # a hard pin alone on its GPU was evicted like anything else.
-        def _fallback_ok(model_id: str) -> bool:
-            state = self._states.get(model_id)
-            return state is None or not (
-                state.pin_permanent and state.load_policy == LoadPolicy.PIN
-            )
-
-        return [
-            model_id
-            for model_id, worker in self._worker_pool._workers.items()
-            if model_id != requested_model_id
-            and worker.backend_type != "ollama"
-            and not self._is_reserved_by_realtime_session(model_id)
-            and worker.gpu_indices
-            and (gpu_indices is None or any(g in gpu_indices for g in worker.gpu_indices))
-            and _fallback_ok(model_id)
-        ]
 
     def _refresh_live(self, gpu_indices: list[int]) -> bool:
         """Bring the polled figures of these GPUs up to NVML's reading now

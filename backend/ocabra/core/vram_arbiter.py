@@ -23,8 +23,9 @@ Lo que añade a un ``asyncio.Lock``:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager, suppress
+from datetime import UTC, datetime
 
 
 class LoadGateTimeoutError(TimeoutError):
@@ -118,6 +119,111 @@ async def wait_for_reading(
         if now >= deadline:
             return value
         await asyncio.sleep(poll_s)
+
+
+# ------------------------------------------------------------------ planner
+#
+# Pure decisions over a snapshot of the residents: which models an eviction
+# may take and in what order. No awaits, no side effects: the executor
+# (ModelManager, under the arbiter) applies them. States are duck-typed
+# (``ModelState``): this module must not import model_manager.
+
+_POLICY_ORDER = {"on_demand": 0, "warm": 1, "pin": 2}
+_EPOCH = datetime.min.replace(tzinfo=UTC)
+
+
+def _policy(state) -> str:
+    policy = getattr(state, "load_policy", None)
+    return str(getattr(policy, "value", policy))
+
+
+def _status(state) -> str:
+    status = getattr(state, "status", None)
+    return str(getattr(status, "value", status))
+
+
+def is_hard_pin(state) -> bool:
+    """``pin_permanent`` only means something for PIN models."""
+    return bool(getattr(state, "pin_permanent", False)) and _policy(state) == "pin"
+
+
+def _last_used(state) -> datetime:
+    return state.last_request_at or state.loaded_at or _EPOCH
+
+
+def rank_lru_candidates(
+    states: Iterable,
+    gpu_index: int,
+    *,
+    is_busy: Callable[[str], bool],
+    is_session_held: Callable[[str], bool],
+) -> list[str]:
+    """The polite eviction list for one GPU: LOADED warm/on-demand models on
+    it (never a PIN), idle, not held by a Realtime session, least recently
+    used first."""
+    candidates = [
+        state
+        for state in states
+        if _status(state) == "loaded"
+        and _policy(state) != "pin"
+        and gpu_index in (state.current_gpu or [])
+        and not is_busy(state.model_id)
+        and not is_session_held(state.model_id)
+    ]
+    candidates.sort(key=_last_used)
+    return [state.model_id for state in candidates]
+
+
+def rank_pressure_candidates(
+    states: Mapping[str, object],
+    workers: Mapping[str, object],
+    requested_model_id: str,
+    gpu_indices: list[int] | None,
+    *,
+    is_session_held: Callable[[str], bool],
+) -> list[str]:
+    """The last-resort eviction list (see
+    ``ModelManager._get_pressure_eviction_candidates`` for the reasons):
+    LOADED models on one of ``gpu_indices`` (any GPU when ``None``; never a
+    CPU-only one), on-demand < warm < soft pin, least recently used first
+    within a policy. Never the requester, a hard pin or a Realtime session's
+    worker. With none, falls back to the worker pool's GPU workers (not
+    Ollama's), still never a hard pin."""
+
+    def on_target(gpus) -> bool:
+        if not gpus:
+            return False
+        return gpu_indices is None or any(g in gpu_indices for g in gpus)
+
+    candidates = [
+        state
+        for state in states.values()
+        if state.model_id != requested_model_id
+        and _status(state) == "loaded"
+        and not is_hard_pin(state)
+        and not is_session_held(state.model_id)
+        and on_target(state.current_gpu)
+    ]
+    candidates.sort(key=lambda state: (_POLICY_ORDER.get(_policy(state), 99), _last_used(state)))
+    if candidates:
+        return [state.model_id for state in candidates]
+
+    # Fallback: workers the states above do not offer (a worker whose state
+    # went ERROR with its process alive, or lost its GPUs). Never a hard pin:
+    # this fallback used to return every worker on the card.
+    def fallback_ok(model_id: str) -> bool:
+        state = states.get(model_id)
+        return state is None or not is_hard_pin(state)
+
+    return [
+        model_id
+        for model_id, worker in workers.items()
+        if model_id != requested_model_id
+        and worker.backend_type != "ollama"
+        and not is_session_held(model_id)
+        and on_target(worker.gpu_indices)
+        and fallback_ok(model_id)
+    ]
 
 
 def _never() -> bool:
