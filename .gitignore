@@ -38,20 +38,27 @@ caddy/caddy_data/
 caddy/caddy_config/
 
 # === Modelos de IA (archivos grandes) ===
+# Los pesos viven fuera del repo (AI_MODELS_ROOT) o en data/. Formatos que
+# solo pueden ser pesos: en todo el árbol, como red de seguridad. Extensiones
+# genéricas (*.bin, *.pt) y nombres de directorio comunes (models/) solo en la
+# raíz (INF-16): en todo el árbol ignoraban frontend/src/components/models/
+# y cualquier fichero de pruebas .bin.
 *.gguf
 *.ggml
-*.bin
 *.safetensors
-*.pt
 *.pth
 *.onnx
-models/
-model_cache/
-hf_cache/
+/models/
+/model_cache/
+/hf_cache/
+/*.bin
+/*.pt
 
 # === Bases de datos locales ===
-*.sqlite3
-*.db
+/*.sqlite3
+/*.db
+/backend/*.sqlite3
+/backend/*.db
 data/
 
 # === Logs y temporales ===
@@ -73,6 +80,8 @@ Thumbs.db
 backend/alembic/versions/__pycache__/
 
 # === Secretos y certificados ===
+# En todo el árbol a propósito: una clave en el repo es peor que tener que
+# añadir una excepción para un fichero de pruebas.
 *.pem
 *.key
 *.crt
@@ -82,6 +91,3 @@ secrets/
 Hunyuan3D-2.1/
 TRELLIS.2/
 .claude/
-
-# El patrón models/ (dir de modelos IA) no debe ignorar componentes del frontend
-!frontend/src/components/models/
