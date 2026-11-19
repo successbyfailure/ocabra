@@ -1452,6 +1452,7 @@ app.add_middleware(
 # "Internal Server Error" with no traceback in the logs, which makes
 # diagnosing federation/proxy issues painful. Log the full traceback for
 # every uncaught exception so it's never silent.
+from ocabra.api._errors import error_content, error_family, request_path  # noqa: E402
 from ocabra.core.worker_pool import VisionNoRoomError  # noqa: E402
 
 
@@ -1462,19 +1463,16 @@ async def _vision_no_room_handler(request, exc):  # noqa: ANN001
     from fastapi.responses import JSONResponse
 
     logger.info("vision_no_room", path=request.url.path, error=str(exc))
-    # Same envelope as every other oCabra error (``HTTPException`` detail).
-    return JSONResponse(
-        status_code=503,
-        content={
-            "detail": {
-                "error": {
-                    "message": str(exc),
-                    "type": "server_error",
-                    "code": "vision_no_room",
-                }
-            }
-        },
-    )
+    # Same envelope as every other oCabra error (``HTTPException`` detail),
+    # plus the family's top-level ``error`` (REF-10).
+    detail = {
+        "error": {
+            "message": str(exc),
+            "type": "server_error",
+            "code": "vision_no_room",
+        }
+    }
+    return JSONResponse(status_code=503, content=error_content(request.url.path, 503, detail))
 
 
 from starlette.exceptions import HTTPException as _StarletteHTTPException  # noqa: E402
@@ -1493,6 +1491,7 @@ async def _peer_fallback_not_found_handler(request, exc):  # noqa: ANN001
     from fastapi.exception_handlers import http_exception_handler
     from fastapi.responses import JSONResponse
 
+    path = request_path(request)
     info = getattr(request.state, "federation_info", None) or {}
     if exc.status_code == 404 and info.get("fallback"):
         peer = info.get("fallback_peer") or "a federation peer"
@@ -1503,20 +1502,48 @@ async def _peer_fallback_not_found_handler(request, exc):  # noqa: ANN001
             else f"The model is only available on node '{peer}', which did not serve "
             "the request. Retry shortly."
         )  # fmt: skip
+        detail_body = {
+            "error": {
+                "message": message,
+                "type": "server_error",
+                "code": "peer_unavailable",
+            }
+        }
         return JSONResponse(
             status_code=503,
-            content={
-                "detail": {
-                    "error": {
-                        "message": message,
-                        "type": "server_error",
-                        "code": "peer_unavailable",
-                    }
-                }
-            },
+            content=error_content(path, 503, detail_body),
             headers={"Retry-After": "15"},
         )
-    return await http_exception_handler(request, exc)
+    if error_family(path) is None:
+        return await http_exception_handler(request, exc)
+    # /v1 and /api (REF-10): FastAPI's handler plus the family's ``error``.
+    from fastapi.utils import is_body_allowed_for_status_code
+    from starlette.responses import Response
+
+    headers = getattr(exc, "headers", None)
+    if not is_body_allowed_for_status_code(exc.status_code):
+        return Response(status_code=exc.status_code, headers=headers)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_content(path, exc.status_code, exc.detail),
+        headers=headers,
+    )
+
+
+from fastapi.exceptions import RequestValidationError as _RequestValidationError  # noqa: E402
+
+
+@app.exception_handler(_RequestValidationError)
+async def _request_validation_handler(request, exc):  # noqa: ANN001
+    """FastAPI's 422, plus the family's top-level ``error`` on /v1 and /api."""
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.exception_handlers import request_validation_exception_handler
+    from fastapi.responses import JSONResponse
+
+    if error_family(request.url.path) is None:
+        return await request_validation_exception_handler(request, exc)
+    detail = jsonable_encoder(exc.errors())
+    return JSONResponse(status_code=422, content=error_content(request.url.path, 422, detail))
 
 
 @app.exception_handler(Exception)
@@ -1533,18 +1560,14 @@ async def _log_unhandled_exception(request, exc):
         error_type=type(exc).__name__,
         traceback=_tb.format_exc(),
     )
-    return JSONResponse(
-        status_code=500,
-        content={
-            "detail": {
-                "error": {
-                    "message": "Internal Server Error",
-                    "type": "server_error",
-                    "code": type(exc).__name__,
-                }
-            }
-        },
-    )
+    detail = {
+        "error": {
+            "message": "Internal Server Error",
+            "type": "server_error",
+            "code": type(exc).__name__,
+        }
+    }
+    return JSONResponse(status_code=500, content=error_content(request.url.path, 500, detail))
 
 # Stream 3-A: Stats middleware for /v1/* endpoints. Records only.
 from ocabra.core.admission import AdmissionMiddleware  # noqa: E402
