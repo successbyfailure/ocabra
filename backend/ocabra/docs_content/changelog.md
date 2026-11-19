@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.118.0 — 2026-11-19
+
+### Cambiado
+
+- **Un solo orden para expulsar modelos cuando hace falta memoria.** Hasta
+  ahora había dos: el de las cargas normales (primero los modelos bajo demanda,
+  luego los que se mantienen calientes, y los fijados en último lugar) y el de
+  las cargas con GPU fija (por antigüedad de uso). Ahora todas usan el primero,
+  también el vigilante de memoria. En la práctica: una carga con GPU fija puede
+  expulsar antes un modelo bajo demanda usado hace un momento que uno caliente
+  que lleva horas sin usarse, y si ese modelo bajo demanda está atendiendo
+  peticiones, la carga espera a que terminen antes de pasar al siguiente. Los
+  modelos fijados siguen siendo los últimos, y los fijados de forma estricta y
+  las sesiones de voz en curso nunca se expulsan.
+
+---
+
 ## 0.117.0 — 2026-11-19
 
 ### Retirado
