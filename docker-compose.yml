@@ -1,3 +1,24 @@
+# Log rotation (INF-06). Docker's json-file driver keeps every line forever
+# by default: a busy api filled the disk at the pace of its logs. The api and
+# docker-agent keep more history (it's what incidents are diagnosed from).
+# Changing this recreates each container on its next `up -d`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+x-logging-api: &api-logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "10"
+
+# No memory/CPU limits on purpose (INF-06): the api runs the model workers
+# (llama.cpp, vLLM, whisper…) inside its own container, tens of GB that grow
+# with what is loaded; a limit there, or on ollama and the GPU services, is an
+# OOM kill in production. On the small services it buys little and a wrong
+# guess (Redis holds sessions and state with no persistence) costs a lot.
+
 services:
   api:
     # Default: slim image (no AI backends pre-installed). Backends are
@@ -128,6 +149,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    logging: *api-logging
     restart: unless-stopped
 
   # The only service meant to hold the Docker socket (SEG-03,
@@ -165,6 +187,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging: *api-logging
     restart: unless-stopped
 
   frontend:
@@ -173,6 +196,14 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     user: "${FRONTEND_UID:-1000}:${FRONTEND_GID:-1000}"
+    # busybox wget is in nginx:alpine; nginx answers / with index.html.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
     restart: unless-stopped
 
   postgres:
@@ -192,6 +223,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    logging: *default-logging
     restart: unless-stopped
 
   redis:
@@ -214,6 +246,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    logging: *default-logging
     restart: unless-stopped
 
   hw-monitor:
@@ -224,7 +257,9 @@ services:
     gpus: all
     environment:
       REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379/0
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://ocabra:ocabra@postgres:5432/ocabra}
+      # Default built from POSTGRES_* like the postgres service (INF-11): it
+      # had ocabra/ocabra hardcoded and ignored a custom user or database.
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-ocabra}:${POSTGRES_PASSWORD:-ocabra}@postgres:5432/${POSTGRES_DB:-ocabra}}
       NVIDIA_VISIBLE_DEVICES: all
       THERMAL_CAP_ENABLED: ${THERMAL_CAP_ENABLED:-true}
     # No bind mounts of /sys/class/{powercap,hwmon}: a privileged container
@@ -236,15 +271,25 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Alive = it refreshed its heartbeat (TTL 10 s, written every poll) in Redis.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, redis; r = redis.from_url(os.environ['REDIS_URL'], socket_timeout=3); raise SystemExit(0 if r.exists('hw-monitor:heartbeat') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
     restart: unless-stopped
 
-  # Pool único desde la migración a llama.cpp custom (2026-11-02). Antes
-  # había 4 pools (3090 dedicada, 3060 dedicada, shared np1/np2) para
+  # Un único daemon desde la migración a llama.cpp custom (2026-11-02; el
+  # 2026-11-12 pasó a ser un servidor global con ajustes en Ajustes > Ollama).
+  # Antes había 4 pools (3090 dedicada, 3060 dedicada, shared np1/np2) para
   # compensar que OLLAMA_NUM_PARALLEL es env del daemon, no ajustable por
   # request, y que un modelo grande necesitaba repartirse entre ambas GPUs.
   # llama_cpp ya soporta --parallel y tensor-split por modelo sin ese
   # problema, así que los modelos grandes/multi-GPU se migraron ahí. Ollama
-  # queda para lo aún no migrado y como fallback "-ollama" — un pool basta.
+  # queda para lo aún no migrado (como backend más de cada modelo) — un
+  # daemon basta.
   # NVIDIA_VISIBLE_DEVICES: all también evita el fallo de CDI en hosts con
   # una sola GPU (visto en phobos: pedir el índice "1" explícito rompía
   # ahí porque solo existe el índice 0).
@@ -275,7 +320,7 @@ services:
     # Paralelismo y contexto máximo (OLLAMA_NUM_PARALLEL y
     # OLLAMA_CONTEXT_LENGTH): ajustes globales de oCabra (Ajustes > Ollama),
     # que escribe este fichero y recrea el servicio. Un único daemon para
-    # todos los modelos de Ollama: los pools por GPU se retiraron 2026-11-12.
+    # todos los modelos de Ollama.
     env_file:
       - path: ./data/ollama/ollama.env
         required: false
@@ -288,6 +333,15 @@ services:
     # propósito.
     ports:
       - "${OLLAMA_BIND:-127.0.0.1}:7869:11434"
+    # La imagen no trae curl ni wget; `ollama list` pregunta al daemon
+    # (GET /api/tags, lo mismo que ya sondea openresty cada minuto).
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
     restart: unless-stopped
 
   trellis2:
@@ -344,6 +398,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 180s
+    logging: *default-logging
     restart: unless-stopped
 
   comfyui:
@@ -374,6 +429,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 120s
+    logging: *default-logging
     restart: unless-stopped
 
   a1111:
@@ -407,6 +463,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 180s
+    logging: *default-logging
     restart: unless-stopped
 
   acestep:
@@ -458,6 +515,7 @@ services:
       timeout: 10s
       start_period: 300s
       retries: 3
+    logging: *default-logging
     restart: unless-stopped
 
   unsloth-studio:
@@ -475,7 +533,8 @@ services:
       JUPYTER_PASSWORD: ${UNSLOTH_JUPYTER_PASSWORD:-ocabra}
       # HF cache vive dentro de /workspace/work (chowned a `unsloth` por el
       # entrypoint). Usa cache propio en vez del compartido — el HF cache de
-      # ocabra es root-owned y Studio corre como user no-root.
+      # ocabra es del usuario de la api (OCABRA_UID) y Studio corre con su
+      # propio usuario.
       HF_HOME: /workspace/work/hf_cache
       HUGGINGFACE_HUB_CACHE: /workspace/work/hf_cache/hub
       HF_TOKEN: ${HF_TOKEN:-}
@@ -494,6 +553,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 120s
+    logging: *default-logging
     restart: unless-stopped
 
   gateway:
@@ -514,6 +574,14 @@ services:
       - "${GATEWAY_PORT:-9000}:9000"
     depends_on:
       - api
+    # No /health of its own; listening on its port is enough to say it is up.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9000), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *default-logging
     restart: unless-stopped
 
   caddy:
@@ -529,6 +597,15 @@ services:
     depends_on:
       - api
       - frontend
+    # `admin off` in the Caddyfile and every route proxies somewhere else, so
+    # the check is that :80 accepts connections (busybox nc).
+    healthcheck:
+      test: ["CMD-SHELL", "nc -w 2 127.0.0.1 80 </dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
     restart: unless-stopped
 
 volumes:
