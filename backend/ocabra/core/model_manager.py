@@ -5216,7 +5216,7 @@ class ModelManager:
             if not initial or int(state.live_context.get("n_ctx") or 0) <= int(initial):
                 return
             logger.info("live_context_return_to_initial", model_id=model_id, context=initial)
-            await self.resize_context(model_id, context=int(initial))
+            await self.resize_context(model_id, context=int(initial), background=True)
         except Exception as exc:  # noqa: BLE001 - retried on the next idle tick
             logger.info("live_context_return_to_initial_failed", model_id=model_id, error=str(exc))
         finally:
@@ -5370,7 +5370,17 @@ class ModelManager:
             raise KeyError(f"Model '{model_id}' not configured")
         if state.live_context is None:
             return state
-        async with self._acquire_load_gate("grow_context"):
+        # A request on this worker is waiting: if the arbiter's owner is
+        # draining this very worker, give up at once (the caller answers a
+        # retryable 503 or reloads without the projector) instead of both
+        # waiting on each other until the timeouts; otherwise wait no longer
+        # than a load would wait for this request.
+        async with self._arbiter_for_request(model_id, "grow_context") as held:
+            if not held:
+                raise LoadGateTimeoutError(
+                    f"Another load is changing GPU memory; '{model_id}' cannot grow its "
+                    "context back right now"
+                )
             if state.live_context is None:
                 return state
             for gpu_idx, missing_mb in (await self._missing_vram_to_grow(state)).items():
@@ -5393,8 +5403,12 @@ class ModelManager:
         batch: int | None = None,
         restore: bool = False,
         tolerate_in_flight: int = 0,
+        background: bool = False,
     ) -> ModelState:
         """Change a loaded llama.cpp worker's context in place, keeping its weights.
+
+        Under the VRAM arbiter (see ``_arbiter_for_resize``); ``background``
+        marks idle housekeeping, which never waits behind a load.
 
         ``tolerate_in_flight`` lets the caller's own request stay counted as in
         flight (the image request that needs room for the vision projector has
@@ -5413,8 +5427,8 @@ class ModelManager:
 
         Raises:
             KeyError: unknown model.
-            RuntimeError: disabled, not loaded, backend without support, or the
-                worker stayed busy.
+            RuntimeError: disabled, not loaded, backend without support, the
+                worker stayed busy, or the VRAM arbiter was not available.
             LiveContextError: from the backend (the worker kept or restored
                 its previous context).
         """
@@ -5429,8 +5443,83 @@ class ModelManager:
         if not getattr(backend, "SUPPORTS_LIVE_CONTEXT", False):
             raise RuntimeError(f"backend '{state.backend_type}' cannot change context live")
 
-        async with self._acquire_model_load_lock(model_id):
-            if state.status != ModelStatus.LOADED:
+        async with self._arbiter_for_resize(model_id, background=background) as held:
+            if not held:
+                raise RuntimeError(
+                    f"another load or eviction is changing GPU memory; '{model_id}' "
+                    "context change not attempted, retry shortly"
+                )
+            return await self._resize_context_held(
+                state,
+                backend,
+                model_id,
+                context=context,
+                parallel=parallel,
+                ubatch=ubatch,
+                batch=batch,
+                restore=restore,
+                tolerate_in_flight=tolerate_in_flight,
+            )
+
+    @asynccontextmanager
+    async def _arbiter_for_resize(self, model_id: str, *, background: bool):
+        """The VRAM arbiter for one ``resize_context``; yields whether held.
+
+        A context change frees or takes VRAM, so outside the arbiter it raced
+        a load's admission like an unload did (BUG-23 left it out: the API
+        endpoint, the context probe and ``_return_to_initial``).
+
+        * Already held by this task (shrinks inside a load or inside
+          make_room_for_*, grow_context_back, _regrow_if_room): reentrant.
+        * This task holds some model's load lock without the arbiter: go on
+          without it, as before (waiting would invert the lock order).
+        * ``background`` (idle housekeeping): only if no load is in progress;
+          otherwise ``False`` and a later tick retries.
+        * Otherwise (API, probe): wait, bounded by
+          ``pressure_eviction_drain_timeout_s``; ``False`` when it runs out.
+        """
+        if self._holds_load_gate():
+            yield True
+            return
+        current = asyncio.current_task()
+        if current is not None and any(
+            owner is current for owner in self._load_lock_owners.values()
+        ):
+            yield True
+            return
+        async with self._arbiter.hold(
+            timeout_s=max(1, int(settings.pressure_eviction_drain_timeout_s)),
+            purpose=f"resize_context:{model_id}",
+            abort_if=(lambda: bool(self._load_in_progress)) if background else None,
+            timeout_yields_false=True,
+        ) as held:
+            yield held
+
+    async def _resize_context_held(
+        self,
+        state: ModelState,
+        backend: Any,
+        model_id: str,
+        *,
+        context: int | None,
+        parallel: int | None,
+        ubatch: int | None,
+        batch: int | None,
+        restore: bool,
+        tolerate_in_flight: int,
+    ) -> ModelState:
+        """Body of :meth:`resize_context`; the arbiter is held (or skipped by
+        the rules of ``_arbiter_for_resize``)."""
+
+        # Arbiter -> model lock is the order of everything but a load (model
+        # lock -> arbiter). A load or unload of this model holding its lock
+        # has it LOADING/UNLOADING: give up then instead of waiting on a load
+        # that may be waiting for the arbiter this task holds.
+        def _not_loaded() -> bool:
+            return state.status != ModelStatus.LOADED
+
+        async with self._acquire_model_load_lock(model_id, abort_if=_not_loaded) as locked:
+            if not locked or state.status != ModelStatus.LOADED:
                 raise RuntimeError(f"'{model_id}' is not loaded")
 
             nominal = (state.live_context or {}).get("nominal") or backend.context_options(
@@ -5444,12 +5533,16 @@ class ModelManager:
 
             loop = asyncio.get_running_loop()
             deadline = loop.time() + float(settings.llama_cpp_live_context_drain_timeout_s)
-            while self._in_flight_count(model_id) > tolerate_in_flight:
-                if loop.time() >= deadline:
-                    raise RuntimeError(
-                        f"'{model_id}' stayed busy; live context change not attempted"
-                    )
-                await asyncio.sleep(0.1)
+            # A passive wait of the arbiter's owner: a request on this worker
+            # that wants the arbiter (vision, whisper) gives up instead of
+            # waiting for this drain, which waits for it.
+            with self._arbiter.waiting_on(model_id):
+                while self._in_flight_count(model_id) > tolerate_in_flight:
+                    if loop.time() >= deadline:
+                        raise RuntimeError(
+                            f"'{model_id}' stayed busy; live context change not attempted"
+                        )
+                    await asyncio.sleep(0.1)
 
             # What each GPU held at the loaded size, measured before the first
             # change: growing back needs that much room again (grow_context_back).
