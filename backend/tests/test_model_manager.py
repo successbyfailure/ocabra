@@ -1775,7 +1775,9 @@ async def test_multi_gpu_admission_evicts_for_each_tensor_shard() -> None:
         )
 
     assert selected == [0, 1]
-    assert reconcile.await_count == 2
+    # One reconcile before the cascade: the second one refreshed the residents
+    # after the old pure-LRU pass, which no longer exists (one cascade).
+    assert reconcile.await_count == 1
     last_resort.assert_awaited_once_with("llama_cpp/dual", 0, 4_000)
 
 

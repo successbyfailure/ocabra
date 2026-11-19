@@ -49,7 +49,6 @@ from ocabra.core.vram_arbiter import (
     LoadGateTimeoutError,
     VramArbiter,
     acquire_lock_unless,
-    rank_lru_candidates,
     rank_pressure_candidates,
     wait_for_reading,
 )
@@ -1459,19 +1458,24 @@ class ModelManager:
                 pass
 
     def _get_eviction_candidates(self, gpu_index: int) -> list[str]:
-        """Return model_ids loaded on gpu_index, ordered by LRU (oldest first).
-
-        Only includes WARM or ON_DEMAND models (never PIN).
-        Excludes models with in-flight requests.
-        Excludes models held by live Realtime sessions (Bloque 20 veto).
-        Decision in ``vram_arbiter.rank_lru_candidates``.
+        """The VRAM watchdog's list for one GPU: the cascade's order
+        (``rank_pressure_candidates``: on-demand < warm, least recently used
+        first) without any PIN, and only models idle right now. Never a model
+        held by a live Realtime session (Bloque 20 veto).
         """
-        return rank_lru_candidates(
-            self._states.values(),
-            gpu_index,
-            is_busy=self.is_busy,
-            is_session_held=self._is_reserved_by_realtime_session,
-        )
+        return [
+            model_id
+            for model_id in rank_pressure_candidates(
+                self._states,
+                self._worker_pool._workers,
+                "",
+                [gpu_index],
+                is_session_held=self._is_reserved_by_realtime_session,
+                include_pins=False,
+                fallback=False,
+            )
+            if not self.is_busy(model_id)
+        ]
 
     def _drain_wait_budget_s(self, requesting_model_id: str, wanted_s: int) -> int:
         """Seconds the load of ``requesting_model_id`` may still spend waiting
@@ -1533,53 +1537,42 @@ class ModelManager:
         return not self.is_busy(candidate_id)
 
     async def _evict_for_space(self, gpu_index: int, needed_mb: int) -> int:
-        """Evict LRU models from gpu_index until needed_mb is freed.
+        """The VRAM watchdog's eviction: idle warm/on-demand models on
+        ``gpu_index`` in the cascade's order (``_get_eviction_candidates``),
+        shrinking a llama.cpp context instead when that frees enough, until
+        ``needed_mb`` is freed. Never a PIN, never waits for a busy model.
 
-        Returns MB freed. Does not evict PIN or busy models.
+        Returns MB freed.
         """
         freed = 0
         for model_id in self._get_eviction_candidates(gpu_index):
             if freed >= needed_mb:
                 break
-            state = self._states.get(model_id)
-            if not state:
-                continue
-            # Idle when listed, but a request may have arrived since.
-            if not self.claim_for_eviction(model_id):
-                continue
-            try:
-                shrunk = await self._try_shrink_for_space(model_id, gpu_index, needed_mb - freed)
-                if shrunk:
-                    freed += shrunk
-                    continue
-                # What it holds on THIS GPU, not vram_used_mb split evenly:
-                # a tensor-split worker rarely lands evenly (same mistake the
-                # load path's per-GPU lock already fixed, 2026-11-04).
-                vram_per_gpu = self._physical_mb_on_gpu(model_id, gpu_index)
-                logger.info(
-                    "vram_eviction",
-                    model_id=model_id,
-                    gpu_index=gpu_index,
-                    vram_mb=vram_per_gpu,
-                    reason="vram_pressure",
-                )
-                await self.unload(model_id, reason="vram_pressure")
-                freed += vram_per_gpu
-            finally:
-                self.release_eviction_claim(model_id)
+            got = await self._evict_one(
+                "vram_watchdog",
+                model_id,
+                gpu_index=gpu_index,
+                needed_mb=needed_mb - freed,
+                reason="vram_pressure",
+                drain=False,
+                try_shrink=True,
+                wait_release=False,
+            )
+            freed += got or 0
         return freed
 
     async def _evict_last_resort_for_space(
         self, requesting_model_id: str, gpu_index: int, needed_mb: int
     ) -> int:
-        """Fallback for ``_admit_gpu_load``'s ``required_gpu_indices`` path
-        once ``_evict_for_space`` (WARM/ON_DEMAND only) still leaves a
-        deficit on ``gpu_index`` — same last-resort candidate list
-        ``_assign_gpus_for_load`` falls back to (soft-pin included, hard-pin
-        and realtime-session-held excluded — see
-        ``_get_pressure_eviction_candidates``), skipping anything currently
-        busy only after a bounded drain wait, so an interactive request can
-        finish before a large-context transition reclaims its worker.
+        """The eviction cascade on one GPU: ``_get_pressure_eviction_candidates``
+        (on-demand < warm < soft pin; never a hard pin or a Realtime
+        session's worker) one by one through ``_evict_one`` — busy ones are
+        drained (bounded) and skipped if they stay busy, a llama.cpp context
+        is shrunk instead when that frees enough — until ``needed_mb`` is
+        freed on ``gpu_index``. The forced-placement admission
+        (``_admit_gpu_load``) and ``grow_context_back`` use it; the
+        scheduler's cascade (``_assign_gpus_for_load``) walks the same list
+        with the same step.
 
         Returns MB freed.
         """
@@ -1588,7 +1581,7 @@ class ModelManager:
             requesting_model_id, gpu_indices=[gpu_index]
         )
         logger.info(
-            "vram_eviction_last_resort_candidates",
+            "vram_eviction_candidates",
             requested_model_id=requesting_model_id,
             gpu_index=gpu_index,
             candidates=candidate_ids,
@@ -1597,66 +1590,155 @@ class ModelManager:
         for candidate_id in candidate_ids:
             if freed >= needed_mb:
                 break
-            if self.is_busy(candidate_id):
-                drain_timeout_s = self._drain_timeout_for(requesting_model_id, candidate_id)
-                logger.info(
-                    "vram_eviction_last_resort_drain_wait",
-                    requested_model_id=requesting_model_id,
-                    evicting_model_id=candidate_id,
-                    gpu_index=gpu_index,
-                    drain_timeout_s=drain_timeout_s,
-                )
-                if not await self._wait_drained(requesting_model_id, candidate_id, drain_timeout_s):
-                    logger.warning(
-                        "vram_eviction_last_resort_drain_timeout_skip",
-                        requested_model_id=requesting_model_id,
-                        evicting_model_id=candidate_id,
-                        gpu_index=gpu_index,
-                    )
-                    continue
-            state = self._states.get(candidate_id)
-            if not state:
-                continue
-            if not self.claim_for_eviction(candidate_id):
-                logger.info(
-                    "vram_eviction_last_resort_raced",
-                    requested_model_id=requesting_model_id,
-                    evicting_model_id=candidate_id,
-                    gpu_index=gpu_index,
-                )
-                continue
-            try:
-                freed += await self._last_resort_evict_claimed(
-                    candidate_id, state, gpu_index, needed_mb - freed
-                )
-            finally:
-                self.release_eviction_claim(candidate_id)
+            got = await self._evict_one(
+                requesting_model_id,
+                candidate_id,
+                gpu_index=gpu_index,
+                needed_mb=needed_mb - freed,
+                reason="vram_pressure",
+                try_shrink=True,
+            )
+            freed += got or 0
         return freed
 
-    async def _last_resort_evict_claimed(
-        self, candidate_id: str, state: ModelState, gpu_index: int, needed_mb: int
-    ) -> int:
-        """Shrink or unload a claimed candidate; returns MB freed on *gpu_index*."""
-        shrunk = await self._try_shrink_for_space(candidate_id, gpu_index, needed_mb)
-        if shrunk:
-            return shrunk
-        vram_per_gpu = self._physical_mb_on_gpu(candidate_id, gpu_index)
+    async def _evict_one(
+        self,
+        requesting_model_id: str,
+        candidate_id: str,
+        *,
+        gpu_index: int | None,
+        needed_mb: int,
+        reason: str,
+        drain: bool = True,
+        try_shrink: bool = False,
+        wait_release: bool = True,
+        suppress_reload_seconds: int = 0,
+    ) -> int | None:
+        """One step of the eviction cascade: make ``candidate_id`` give back
+        its memory. Returns the MB freed (on ``gpu_index``, or everything it
+        held when ``None``), or ``None`` when it was skipped.
+
+        1. Busy: a candidate serving only batch traffic is preempted (short
+           wait); otherwise its requests are drained for ``_drain_timeout_for``
+           (``drain=False``: skipped at once). Still busy → skipped.
+        2. Claimed (``claim_for_eviction``) so a request arriving now waits for
+           the unload instead of dying with the worker; lost the race → skipped.
+        3. ``try_shrink``: a llama.cpp context shrunk in place instead, when
+           that frees ``needed_mb`` on ``gpu_index``.
+        4. Unloaded (its PIN reload held off ``suppress_reload_seconds``), then
+           the release is waited for from a baseline taken before the unload.
+        """
+        if self.is_busy(candidate_id):
+            if not drain or not await self._drain_or_preempt(requesting_model_id, candidate_id):
+                return None
+        state = self._states.get(candidate_id)
+        if state is None:
+            return None
+        if not self.claim_for_eviction(candidate_id):
+            logger.info(
+                "pressure_eviction_raced",
+                requested_model_id=requesting_model_id,
+                evicting_model_id=candidate_id,
+                gpu_index=gpu_index,
+            )
+            return None
+        try:
+            if try_shrink and gpu_index is not None:
+                shrunk = await self._try_shrink_for_space(candidate_id, gpu_index, needed_mb)
+                if shrunk:
+                    return shrunk
+            # What it holds on THIS GPU, not vram_used_mb split evenly: a
+            # tensor-split worker rarely lands evenly (BUG-27).
+            released_mb = (
+                self._physical_mb_on_gpu(candidate_id, gpu_index)
+                if gpu_index is not None
+                else int(state.vram_used_mb)
+            )
+            logger.info(
+                "pressure_eviction_attempt",
+                requested_model_id=requesting_model_id,
+                evicting_model_id=candidate_id,
+                gpu_index=gpu_index,
+                vram_mb=released_mb,
+                reason=reason,
+            )
+            # Always set explicitly (None clears any stale suppression left
+            # over from an earlier service-triggered eviction) so a plain
+            # model-vs-model eviction never inherits a leftover hold.
+            state.reload_suppressed_until = (
+                datetime.now(UTC) + timedelta(seconds=suppress_reload_seconds)
+                if suppress_reload_seconds > 0
+                else None
+            )
+            released_gpus = (
+                [gpu_index] if gpu_index is not None else list(state.current_gpu or [])
+            ) or None
+            # Baseline before the unload: taken after it, a release already
+            # published made the wait below last its full bound.
+            before = await self._get_vram_free_snapshot(released_gpus) if wait_release else None
+            await self.unload(candidate_id, reason=reason)
+        finally:
+            self.release_eviction_claim(candidate_id)
+        if wait_release:
+            await self._wait_for_vram_released(
+                released_mb,
+                baseline_free_mb=before[0] if before is not None else None,
+                gpu_indices=released_gpus,
+            )
+        return released_mb
+
+    async def _drain_or_preempt(self, requesting_model_id: str, candidate_id: str) -> bool:
+        """Wait for a busy eviction candidate to go idle; returns whether it did.
+
+        Bloque 20 — grace dinámico: bounded by what the estimator says its
+        live request has left (+15 s) instead of a global constant, within
+        the load's one drain budget. A candidate serving ONLY batch traffic
+        (2026-10-30) has no human waiting on it: it is preempted (per
+        ``batch_preempt_mode``) and given a few seconds instead.
+        """
+        batch_priority = getattr(self, "_batch_priority", None)
+        if (
+            batch_priority is not None
+            and settings.batch_priority_enabled
+            and batch_priority.has_batch_activity(candidate_id)
+        ):
+            n_cancelled = await batch_priority.preempt_now(
+                candidate_id, estimator=getattr(self, "_duration_estimator", None)
+            )
+            logger.info(
+                "pressure_eviction_batch_preempt",
+                requested_model_id=requesting_model_id,
+                evicting_model_id=candidate_id,
+                cancelled=n_cancelled,
+            )
+            # Cancellation propagates fast (closes the upstream connection,
+            # see worker_pool.py); a couple of seconds is plenty for it to land.
+            if not await self._wait_drained(requesting_model_id, candidate_id, 5):
+                logger.warning(
+                    "pressure_eviction_batch_preempt_timeout_skip",
+                    evicting_model_id=candidate_id,
+                )
+                return False
+            # Eviction's cooldown supersedes the shorter one ``preempt_now``
+            # set for a plain slot-steal: a reload costs far more than losing
+            # one generation, so batch waits longer before retrying.
+            batch_priority.mark_cooldown(candidate_id, kind="eviction")
+            return True
+        drain_timeout_s = self._drain_timeout_for(requesting_model_id, candidate_id)
         logger.info(
-            "vram_eviction_last_resort",
-            model_id=candidate_id,
-            gpu_index=gpu_index,
-            vram_mb=vram_per_gpu,
-            reason="vram_pressure",
+            "pressure_eviction_drain_wait",
+            requested_model_id=requesting_model_id,
+            evicting_model_id=candidate_id,
+            drain_timeout_s=drain_timeout_s,
         )
-        snapshot = await self._get_vram_free_snapshot([gpu_index])
-        baseline_free_mb = snapshot[0] if snapshot is not None else None
-        await self.unload(candidate_id, reason="vram_pressure")
-        await self._wait_for_vram_released(
-            vram_per_gpu,
-            baseline_free_mb=baseline_free_mb,
-            gpu_indices=[gpu_index],
-        )
-        return vram_per_gpu
+        if not await self._wait_drained(requesting_model_id, candidate_id, drain_timeout_s):
+            logger.warning(
+                "pressure_eviction_drain_timeout_skip",
+                requested_model_id=requesting_model_id,
+                evicting_model_id=candidate_id,
+            )
+            return False
+        return True
 
     async def _vram_watchdog(self) -> None:
         """Background loop: proactively evict when VRAM exceeds threshold.
@@ -3530,15 +3612,10 @@ class ModelManager:
                 if not deficit:
                     return
                 if allow_pressure_eviction:
-                    freed = await self._evict_for_space(gpu_idx, deficit)
-                    if freed < deficit:
-                        # The polite unload can take several monitor
-                        # cycles. A concurrent PIN load may finish in
-                        # that window and change its placement/status;
-                        # refresh once more before computing the true
-                        # last-resort candidate list.
-                        await reconcile_physical_residents(force=True)
-                        await self._evict_last_resort_for_space(model_id, gpu_idx, deficit - freed)
+                    # The one cascade order (on-demand < warm < soft pin), as
+                    # the scheduler's path: the forced placement used to run a
+                    # pure-LRU pass over warm/on-demand first.
+                    await self._evict_last_resort_for_space(model_id, gpu_idx, deficit)
                 # Declared model VRAM is only an estimate (and can be tens of
                 # MiB below what the driver actually releases): decide from a
                 # fresh physical reading, not ``available + estimated_freed``.
@@ -3587,17 +3664,9 @@ class ModelManager:
                             for gpu_idx in gpu_indices:
                                 if freed_total >= deficit:
                                     break
-                                freed_total += await self._evict_for_space(
-                                    gpu_idx, deficit - freed_total
+                                freed_total += await self._evict_last_resort_for_space(
+                                    model_id, gpu_idx, deficit - freed_total
                                 )
-                            if freed_total < deficit:
-                                await reconcile_physical_residents(force=True)
-                                for gpu_idx in gpu_indices:
-                                    if freed_total >= deficit:
-                                        break
-                                    freed_total += await self._evict_last_resort_for_space(
-                                        model_id, gpu_idx, deficit - freed_total
-                                    )
                         available_after_total = sum(
                             [await admission_free_vram(gpu_idx) for gpu_idx in gpu_indices]
                         )
@@ -3953,112 +4022,21 @@ class ModelManager:
                             continue
 
                 for candidate_id in candidates:
-                    # Wait for any in-flight requests to drain before evicting.
-                    # Bloque 20 — grace dinámico: the estimator can predict how
-                    # long the candidate's live request has left, so we bound
-                    # the wait by remaining+margin instead of a global constant.
-                    # Cases:
-                    #   * No estimator or no in-flight data → static default
-                    #     (pressure_eviction_drain_timeout_s), matches pre-B20.
-                    #   * Estimator remaining=X → wait X + 15s margin, capped
-                    #     at max_drain_timeout_s so a runaway estimate never
-                    #     freezes the load path.
-                    # Session-held candidates were already filtered by
-                    # _get_pressure_eviction_candidates (Etapa 4 veto).
-                    if self.is_busy(candidate_id):
-                        estimator = getattr(self, "_duration_estimator", None)
-                        batch_priority = getattr(self, "_batch_priority", None)
-                        # 2026-10-30 — a candidate serving ONLY batch traffic has
-                        # no human waiting on it: actively preempt it (per
-                        # batch_preempt_mode) instead of passively waiting out
-                        # the full dynamic remaining+15s grace meant for
-                        # interactive-vs-interactive contention.
-                        if (
-                            batch_priority is not None
-                            and settings.batch_priority_enabled
-                            and batch_priority.has_batch_activity(candidate_id)
-                        ):
-                            n_cancelled = await batch_priority.preempt_now(
-                                candidate_id, estimator=estimator
-                            )
-                            logger.info(
-                                "pressure_eviction_batch_preempt",
-                                requested_model_id=model_id,
-                                evicting_model_id=candidate_id,
-                                cancelled=n_cancelled,
-                            )
-                            # Cancellation propagates fast (closes the upstream
-                            # connection, see worker_pool.py); a couple of seconds
-                            # is plenty of slack for it to land before moving on.
-                            if not await self._wait_drained(model_id, candidate_id, 5):
-                                logger.warning(
-                                    "pressure_eviction_batch_preempt_timeout_skip",
-                                    evicting_model_id=candidate_id,
-                                )
-                                continue
-                            # Eviction's cooldown supersedes the shorter one
-                            # ``preempt_now`` already set for a plain slot-steal
-                            # — a model reload is far costlier than losing one
-                            # generation, so batch waits longer before retrying.
-                            batch_priority.mark_cooldown(candidate_id, kind="eviction")
-                        else:
-                            drain_timeout_s = self._drain_timeout_for(model_id, candidate_id)
-                            logger.info(
-                                "pressure_eviction_drain_wait",
-                                requested_model_id=model_id,
-                                evicting_model_id=candidate_id,
-                                drain_timeout_s=drain_timeout_s,
-                            )
-                            if not await self._wait_drained(
-                                model_id, candidate_id, drain_timeout_s
-                            ):
-                                logger.warning(
-                                    "pressure_eviction_drain_timeout_skip",
-                                    evicting_model_id=candidate_id,
-                                )
-                                continue  # skip — still busy, try next candidate
-
-                    # The drain saw it idle; claim it so a request arriving
-                    # now waits for the unload instead of dying with it.
-                    if not self.claim_for_eviction(candidate_id):
-                        logger.info(
-                            "pressure_eviction_raced",
-                            requested_model_id=model_id,
-                            evicting_model_id=candidate_id,
+                    # Same step as every other cascade (drain/preempt, claim,
+                    # unload, wait for the release); the scheduler already
+                    # tried shrinking above, so no shrink here.
+                    if (
+                        await self._evict_one(
+                            model_id,
+                            candidate_id,
+                            gpu_index=None,
+                            needed_mb=vram_needed,
+                            reason="pressure",
+                            suppress_reload_seconds=suppress_reload_seconds,
                         )
+                        is None
+                    ):
                         continue
-                    logger.info(
-                        "pressure_eviction_attempt",
-                        requested_model_id=model_id,
-                        evicting_model_id=candidate_id,
-                    )
-                    candidate_state = self._states.get(candidate_id)
-                    evicted_vram_mb = candidate_state.vram_used_mb if candidate_state else 0
-                    if candidate_state:
-                        # Always set explicitly (None clears any stale suppression left
-                        # over from an earlier service-triggered eviction) so a plain
-                        # model-vs-model pressure eviction never inherits a leftover hold.
-                        candidate_state.reload_suppressed_until = (
-                            datetime.now(UTC) + timedelta(seconds=suppress_reload_seconds)
-                            if suppress_reload_seconds > 0
-                            else None
-                        )
-                    released_gpus = (
-                        list(candidate_state.current_gpu or []) if candidate_state else []
-                    ) or None
-                    try:
-                        # Baseline before the unload: taken after it, a release
-                        # already published made the wait below last its full
-                        # bound waiting for a second rise that never comes.
-                        before = await self._get_vram_free_snapshot(released_gpus)
-                        await self.unload(candidate_id, reason="pressure")
-                    finally:
-                        self.release_eviction_claim(candidate_id)
-                    await self._wait_for_vram_released(
-                        evicted_vram_mb,
-                        baseline_free_mb=before[0] if before is not None else None,
-                        gpu_indices=released_gpus,
-                    )
                     if gpu_pool is not None:
                         await self._wait_for_free_vram(gpu_pool, vram_needed)
                     try:

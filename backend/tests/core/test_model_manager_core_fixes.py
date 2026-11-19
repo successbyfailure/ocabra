@@ -368,8 +368,12 @@ async def test_eviction_counts_what_the_model_holds_on_that_gpu():
     _loaded(mm, "split", gpus=[0, 1], vram_mb=12000)
     mm._get_vram_free_snapshot = AsyncMock(return_value=None)
     mm._wait_for_vram_released = AsyncMock()
-    state = mm._states["split"]
-    assert await mm._last_resort_evict_claimed("split", state, 0, 1000) == 3000
+    assert (
+        await mm._evict_one(
+            "req", "split", gpu_index=0, needed_mb=1000, reason="vram_pressure", try_shrink=True
+        )
+        == 3000
+    )
 
 
 # ---------------------------------------------------------------- BUG-29

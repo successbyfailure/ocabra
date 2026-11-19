@@ -25,7 +25,7 @@ Lo que añade a un ``asyncio.Lock``:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import UTC, datetime
 
@@ -153,29 +153,6 @@ def _last_used(state) -> datetime:
     return state.last_request_at or state.loaded_at or _EPOCH
 
 
-def rank_lru_candidates(
-    states: Iterable,
-    gpu_index: int,
-    *,
-    is_busy: Callable[[str], bool],
-    is_session_held: Callable[[str], bool],
-) -> list[str]:
-    """The polite eviction list for one GPU: LOADED warm/on-demand models on
-    it (never a PIN), idle, not held by a Realtime session, least recently
-    used first."""
-    candidates = [
-        state
-        for state in states
-        if _status(state) == "loaded"
-        and _policy(state) != "pin"
-        and gpu_index in (state.current_gpu or [])
-        and not is_busy(state.model_id)
-        and not is_session_held(state.model_id)
-    ]
-    candidates.sort(key=_last_used)
-    return [state.model_id for state in candidates]
-
-
 def rank_pressure_candidates(
     states: Mapping[str, object],
     workers: Mapping[str, object],
@@ -183,14 +160,21 @@ def rank_pressure_candidates(
     gpu_indices: list[int] | None,
     *,
     is_session_held: Callable[[str], bool],
+    include_pins: bool = True,
+    fallback: bool = True,
 ) -> list[str]:
-    """The last-resort eviction list (see
+    """The one eviction order of every cascade (see
     ``ModelManager._get_pressure_eviction_candidates`` for the reasons):
     LOADED models on one of ``gpu_indices`` (any GPU when ``None``; never a
     CPU-only one), on-demand < warm < soft pin, least recently used first
     within a policy. Never the requester, a hard pin or a Realtime session's
     worker. With none, falls back to the worker pool's GPU workers (not
-    Ollama's), still never a hard pin."""
+    Ollama's), still never a hard pin.
+
+    ``include_pins=False`` leaves soft pins out too and ``fallback=False``
+    skips the worker-pool fallback: the VRAM watchdog's list, which never
+    takes a PIN (same order otherwise).
+    """
 
     def on_target(gpus) -> bool:
         if not gpus:
@@ -203,11 +187,12 @@ def rank_pressure_candidates(
         if state.model_id != requested_model_id
         and _status(state) == "loaded"
         and not is_hard_pin(state)
+        and (include_pins or _policy(state) != "pin")
         and not is_session_held(state.model_id)
         and on_target(state.current_gpu)
     ]
     candidates.sort(key=lambda state: (_POLICY_ORDER.get(_policy(state), 99), _last_used(state)))
-    if candidates:
+    if candidates or not fallback:
         return [state.model_id for state in candidates]
 
     # Fallback: workers the states above do not offer (a worker whose state

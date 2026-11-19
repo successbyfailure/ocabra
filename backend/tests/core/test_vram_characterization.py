@@ -236,14 +236,15 @@ async def test_peer_rules_without_evict_never_push_anything_out(env):
 # --------------------------------------------- eviction order (forced placement)
 
 
-async def test_forced_gpu_evicts_by_lru_among_warm_and_on_demand_before_any_pin(env):
-    """The forced-placement cascade is not the scheduler's: its polite pass
-    is pure LRU over warm/on-demand (warm used longer ago goes first), and
-    only then the soft pin."""
+async def test_forced_gpu_evicts_in_the_cascade_order(env):
+    """One cascade (2026-11-19, user's decision): the forced placement evicts
+    in the scheduler's order — on-demand, then warm, then soft pin — instead
+    of its old pure-LRU pass over warm/on-demand (which took the warm model,
+    used longer ago, first)."""
     await _three_on_the_3090(env)
     env.configure("new", 12_000, extra_config={"_runtime": {"gpu_indices": [GPU_3090]}})
     await env.mm.load("new")
-    assert env.backend.unloads == ["warm", "od"]
+    assert env.backend.unloads == ["od", "warm"]
     assert env.status("pin") == ModelStatus.LOADED
     assert_quiescent(env)
 
@@ -252,7 +253,36 @@ async def test_forced_gpu_reaches_the_soft_pin_as_last_resort(env):
     await _three_on_the_3090(env)
     env.configure("new", 20_000, extra_config={"_runtime": {"gpu_indices": [GPU_3090]}})
     await env.mm.load("new")
-    assert env.backend.unloads == ["warm", "od", "pin"]
+    assert env.backend.unloads == ["od", "warm", "pin"]
+
+
+async def test_forced_gpu_evicts_a_recent_on_demand_before_an_older_warm(env):
+    """Where the unification changes WHO goes, not just the order: room for
+    one model only. The old LRU pass evicted the warm model (idle longer);
+    the cascade's order evicts the on-demand one."""
+    await _full_3060(env)
+    await env.resident("od", 8_000, [GPU_3090], last_used_s_ago=10)
+    await env.resident("warm", 8_000, [GPU_3090], policy=LoadPolicy.WARM, last_used_s_ago=5_000)
+    env.configure("new", 12_000, extra_config={"_runtime": {"gpu_indices": [GPU_3090]}})
+    await env.mm.load("new")
+    assert env.backend.unloads == ["od"]
+    assert env.status("warm") == ModelStatus.LOADED
+    assert_quiescent(env)
+
+
+async def test_both_placement_paths_pick_the_same_victims():
+    """Same residents, same need: the scheduler's path and a forced
+    placement on the same card evict the same models in the same order."""
+    victims = []
+    for forced in (False, True):
+        with Env(publish_lag_s=0.2) as env:
+            await _three_on_the_3090(env)
+            extra = {"_runtime": {"gpu_indices": [GPU_3090]}} if forced else None
+            env.configure("new", 14_000, preferred_gpu=GPU_3090, extra_config=extra)
+            await env.mm.load("new")
+            assert env.mm._states["new"].current_gpu == [GPU_3090]
+            victims.append(list(env.backend.unloads))
+    assert victims[0] == victims[1] == ["od", "warm"]
 
 
 async def test_forced_gpu_skips_a_busy_model_after_the_drain(env):
@@ -264,7 +294,7 @@ async def test_forced_gpu_skips_a_busy_model_after_the_drain(env):
     assert env.backend.unloads == ["warm", "pin"]
 
 
-def test_lru_candidates_exclude_pins_busy_and_other_gpus():
+def test_watchdog_candidates_follow_the_cascade_order_without_pins_or_busy():
     with Env() as env:
         mm = env.mm
         loop = asyncio.new_event_loop()
@@ -275,7 +305,9 @@ def test_lru_candidates_exclude_pins_busy_and_other_gpus():
         finally:
             loop.close()
         mm.begin_request("busy")
-        assert mm._get_eviction_candidates(GPU_3090) == ["warm", "od"]
+        # The watchdog's list: the cascade's order (on-demand before warm,
+        # it was pure LRU: warm first), still no PIN and nothing busy.
+        assert mm._get_eviction_candidates(GPU_3090) == ["od", "warm"]
         assert mm._get_pressure_eviction_candidates("x", gpu_indices=[GPU_3090]) == [
             "busy",
             "od",
