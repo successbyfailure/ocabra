@@ -1,1278 +1,512 @@
-# oCabra API Documentation
+# oCabra — índice de la API
 
-**Version**: la que devuelve `GET /version` (o `/health`); vive en `APP_VERSION` (`backend/ocabra/config.py`). Los cambios entre versiones están en `/docs/changelog`.
-**Base URL**: `http://<host>:8000`
-**Auth**: JWT via cookie (`access_token`) o header `Authorization: Bearer <token>`
+Una línea por ruta: método, ruta, qué hace y quién puede llamarla. Los
+esquemas de petición y respuesta **no** están aquí:
+
+- **API pública** (`/v1/*`, `/api/*`, sistema): Swagger en `/docs` (y
+  `/openapi.json`), con la descripción general, los routers `recomendado-*`,
+  Batches, las cabeceras `X-Ocabra-*` y los formatos de error.
+- **Cambios entre versiones**: `/docs/changelog` (fuente
+  `backend/ocabra/docs_content/changelog.md`). **Rendimiento por modelo**:
+  `/docs/models`. Las dos también en Markdown crudo añadiendo `.md`.
+- **API interna** (`/ocabra/*`, la que usa el panel): se registra con
+  `include_in_schema=False`, así que **no sale en Swagger**. Sus esquemas son
+  los modelos Pydantic de `backend/ocabra/schemas/` y de cada módulo de
+  `backend/ocabra/api/internal/`, y cada endpoint lleva docstring.
+
+La versión servida la devuelven `GET /version` y `GET /health`; vive en
+`APP_VERSION` (`backend/ocabra/config.py`).
+
+**Mantenimiento.** `backend/tests/test_api_md.py` falla si una ruta de la
+aplicación no aparece aquí o si aquí aparece una ruta que ya no existe. La
+columna «Qué hace» es el `summary` (o la primera línea del docstring) del
+endpoint en el código.
 
 ---
 
-## Autenticacion
+## Acceso
 
-Todos los endpoints (excepto `/health`, `/ready` y `/ocabra/auth/login`) requieren autenticacion.
+Todo pasa por Caddy en el puerto 8484 del host (`/v1`, `/api`, `/ocabra`,
+`/health`, `/ready`, `/version`, `/docs`, `/metrics`; el resto es el panel).
+
+Cómo se identifica una petición (`get_current_user` en
+`backend/ocabra/api/_deps_auth.py`), por orden:
+
+1. `X-Ocabra-Internal-Token`: llamadas del propio proceso (el procesador de
+   Batches), las únicas que pueden actuar como otro usuario.
+2. `X-Gateway-Token` = `GATEWAY_SERVICE_TOKEN`: servicios acompañantes
+   (gateway, TRELLIS.2). Identidad `model_manager`, sin suplantación.
+3. Cookie `ocabra_session` (JWT del panel; se obtiene con
+   `POST /ocabra/auth/login`).
+4. `Authorization: Bearer <api key>`. Un JWT en esta cabecera se rechaza: los
+   JWT solo viajan en la cookie.
+5. Anónimo, solo si `REQUIRE_API_KEY_OPENAI` / `REQUIRE_API_KEY_OLLAMA` están
+   a `false` (afecta a `/v1` y `/api` respectivamente).
+
+Valores de la columna **Acceso**:
+
+| Valor | Significado |
+|---|---|
+| pública | Sin autenticación |
+| clave | API key o cookie (anónimo si la clave no es obligatoria); además, el modelo pedido tiene que estar en los grupos del usuario |
+| `user` | Cualquier usuario autenticado (401 si es anónimo) |
+| `model_manager` | Rol `model_manager` o superior (403 si no) |
+| `system_admin` | Solo administradores |
+| cookie de sesión / token del túnel | WebSockets que validan dentro del handler |
+
+Los roles son jerárquicos: `user` < `model_manager` < `system_admin`.
 
 ```bash
-# Login — obtener cookie de sesion
-curl -c cookies.txt -X POST /ocabra/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"user","password":"pass"}'
+# Panel / API interna: login con cookie
+curl -c cookies.txt -X POST http://localhost:8484/ocabra/auth/login \
+  -H "Content-Type: application/json" -d '{"username":"…","password":"…"}'
+curl -b cookies.txt http://localhost:8484/ocabra/models
 
-# Usar cookie en requests posteriores
-curl -b cookies.txt /ocabra/models
-
-# O usar API key en header
-curl -H "Authorization: Bearer sk-..." /v1/chat/completions
+# API pública: clave
+curl -H "Authorization: Bearer sk-…" http://localhost:8484/v1/models
 ```
 
----
+## Convenciones comunes
 
-## System
+- **Cabeceras de respuesta.** Las rutas de `/v1` que llevan a un modelo
+  devuelven `X-Ocabra-Model-Status`, `X-Ocabra-Model-Id` y, según el caso,
+  `X-Ocabra-Expected-Wait-Seconds`, `X-Ocabra-Load-Queue-Depth`,
+  `X-Ocabra-Load-Active`, `X-Ocabra-Was-Cold-Start`,
+  `X-Ocabra-Load-Duration-Ms`, `X-Ocabra-Router`, `X-Ocabra-Router-Target`,
+  `X-Ocabra-Slot-Queue-Saturated` / `-In-Flight` / `-Count` y
+  `X-Ocabra-KV-Queue-Saturated` / `-Capacity-Tokens` / `-Reserved-Tokens`.
+  Toda respuesta lleva `X-Ocabra-Privacy`. Definición de cada una:
+  `OCABRA_MODEL_HEADERS` en `backend/ocabra/api/openai/_deps.py`, que es
+  lo que publica Swagger.
+- **Cabeceras de petición.** `X-Ocabra-Node: <nodo>|local` fuerza dónde se
+  sirve con federación; `X-Ocabra-Stream-Events: true`,
+  `X-Ocabra-Allowed-Tools` y `X-Ocabra-Require-Approval` afectan a los
+  agentes (`agent/<slug>`).
+- **Streaming.** Los SSE intercalan comentarios `: {"event":
+  "ocabra.model_loading" | "ocabra.model_ready" | "ocabra.slot_queued", …}`
+  que los parsers estrictos ignoran. Un rechazo antes del primer byte llega
+  como HTTP 4xx/5xx normal; un fallo a mitad, como `data: {"error": …}`.
+- **Errores.** `/v1` y `/api` devuelven un objeto `error` (`message`, `type`,
+  `code`), casi siempre dentro de `detail` (`{"detail": {"error": {…}}}`,
+  que es como lo emite `HTTPException`); `/ocabra` devuelve
+  `{"detail": "…"}`. Las condiciones transitorias (cargando, al límite de
+  concurrencia → 429 `model_at_capacity`, circuit breaker, mantenimiento)
+  llevan `Retry-After`; las permanentes no.
 
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/health` | Health check basico |
-| GET | `/ready` | Readiness check |
-| GET | `/metrics` | Metricas Prometheus |
+## Sistema y documentación
 
----
+`/metrics` solo responde desde redes privadas: Caddy devuelve 403 a cualquier otra IP.
 
-## OpenAI Compatible API (`/v1`)
-
-API compatible con el formato OpenAI. Los clientes como `openai-python`, `litellm`, etc. funcionan directamente.
-
-El campo `model` acepta **profile_id** (recomendado) o model_id canonico (legacy).
-
-### Chat & Completions
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| POST | `/v1/chat/completions` | Chat completion (streaming o no) |
-| POST | `/v1/completions` | Text completion |
-| GET | `/v1/models` | Listar modelos/perfiles disponibles |
-| GET | `/v1/models/{model_id}` | Detalle de un modelo |
-
-#### Cabeceras `X-Ocabra-*` — contrato unificado
-
-**Todos los endpoints** de `/v1/*` que apuntan a un modelo (chat, completions,
-embeddings, pooling/score/rerank/classify, audio/transcriptions, audio/speech,
-audio/generate, images/generations, images/edits) exponen el mismo set de
-cabeceras. Los endpoints streaming las flushean **antes** de bloquear en el
-load, así el cliente ve la espera desde el primer byte; los no-streaming las
-adjuntan a la respuesta final (útil para logs y para saber si la petición
-pagó una carga en frío).
-
-| Header | Cuándo | Valor |
-|--------|--------|-------|
-| `X-Ocabra-Model-Status` | siempre | Estado del worker en el momento de emitir (`configured`, `loading`, `loaded`, `unloaded`, `error`) |
-| `X-Ocabra-Model-Id` | siempre | ID canónico del modelo resuelto (post-router) |
-| `X-Ocabra-Expected-Wait-Seconds` | cuando no `loaded` y hay histórico | Mediana de las últimas 5 cargas del modelo, en segundos |
-| `X-Ocabra-Load-Queue-Depth` | cuando hay presión | Total de cargas encoladas (activas + esperando el mutex de carga cross-backend) |
-| `X-Ocabra-Load-Active` | cuando hay presión | Nº de loads actualmente ejecutándose |
-| `X-Ocabra-Was-Cold-Start` | post-load y `pre_status != loaded` | `1` cuando la petición pagó un cold-start |
-| `X-Ocabra-Load-Duration-Ms` | junto a `Was-Cold-Start` | Tiempo real que el request esperó al load, en milisegundos |
-| `X-Ocabra-Router` | routers | `profile_id` del router al que el cliente apuntó |
-| `X-Ocabra-Router-Target` | routers | `profile_id` del target que finalmente sirvió la petición |
-| `X-Ocabra-Slot-Queue-Saturated` | no-streaming, cuando la petición esperó | `1` si al llegar la petición todos los slots de concurrencia del worker estaban ocupados |
-| `X-Ocabra-Slot-In-Flight` | junto a `Queue-Saturated` | Peticiones en vuelo en ese worker en el momento de llegar |
-| `X-Ocabra-Slot-Count` | junto a `Queue-Saturated` | Slots de concurrencia configurados para ese worker |
-
-Ademas, en respuestas SSE (`stream=true`) el servidor intercala comentarios
-oCabra-aware con el mismo shape:
-
-```
-: {"event": "ocabra.model_loading", "model_id": "...", "worker_key": "...",
-   "status": "configured", "expected_wait_seconds": 12}
-
-: {"event": "ocabra.model_ready", "model_id": "...", "worker_key": "...",
-   "load_duration_ms": 11820, "was_cold_start": true}
-
-: {"event": "ocabra.slot_queued", "model_id": "...", "in_flight": 3, "slots": 3}
-```
-
-Las líneas empiezan con `:` (comentario SSE) para no romper parsers estrictos
-tipo OpenAI SDK; los oCabra-aware pueden extraer el JSON tras el `:`.
-
-**Status code de un rechazo en streaming (2026-10-30)**: `/v1/chat/completions`
-y `/v1/completions` con `stream=true` ahora piden el primer chunk al backend
-*antes* de devolver la `StreamingResponse` — si el backend rechaza la
-petición de entrada (body inválido, modelo no soporta algo, etc.) y **nada**
-se ha mandado aún al cliente, oCabra responde con un HTTP 4xx/5xx real y
-`{"error": {...}}` en el body, igual que la vía no-streaming. Solo cuando
-headers ya se flushearon de verdad (carga en frío con `model_loading` ya
-emitido, o un fallo a mitad de la generación) el error viaja como
-`data: {"error": ...}` dentro del stream con el HTTP status ya fijado en 200
-— inevitable en ese caso, pero ya no es el comportamiento por defecto para
-un rechazo inmediato. Antes de este fix, *todo* rechazo en streaming volvía
-como 200 + error en banda, indistinguible de una respuesta vacía para un
-cliente OpenAI-estándar que mira el status antes de parsear — reportado por
-un agente externo contra `llama_cpp/gemma4-26b`.
-
-`ocabra.slot_queued` (2026-10-30) es distinto de `model_loading`: cubre la
-cola de admisión de un modelo que **ya está cargado** pero tiene todos sus
-slots de concurrencia ocupados (ver `FairSlotGate`), algo que antes no tenía
-ninguna señal — el cliente simplemente veía la conexión bloqueada. Solo se
-emite cuando la petición realmente va a esperar (`in_flight >= slots` en el
-momento de encolar); no da la posición exacta en cola (el gate alterna por
-usuario con menos servicio primero, no es FIFO estricto) pero sí avisa de
-que la espera es real y aproximadamente cuántos slots/peticiones hay delante.
-
-**POST /v1/chat/completions**
-```json
-{
-  "model": "qwen3-8b",
-  "messages": [
-    {"role": "system", "content": "You are helpful."},
-    {"role": "user", "content": "Hello"}
-  ],
-  "max_tokens": 512,
-  "temperature": 0.7,
-  "stream": false
-}
-```
-
-**Structured output (`response_format`)** — oCabra reenvía el campo verbatim
-al backend; las dos variantes OpenAI están soportadas end-to-end:
-
-| Variante | vLLM ≥0.26 | Ollama ≥0.4 | llama.cpp |
+| Método | Ruta | Qué hace | Acceso |
 |---|---|---|---|
-| `{"type": "json_object"}` (JSON libre) | ✅ nativo | ✅ nativo | ✅ grammar |
-| `{"type": "json_schema", "json_schema": {...}}` (constrained a schema) | ✅ nativo | ✅ nativo (traducido a `format: {schema}`) | ✅ grammar |
-
-Ejemplo con schema estricto:
-
-```json
-POST /v1/chat/completions
-{
-  "model": "mistral:7b",
-  "messages": [{"role": "user", "content": "Give me a fictional person"}],
-  "max_tokens": 300,
-  "response_format": {
-    "type": "json_schema",
-    "json_schema": {
-      "name": "person",
-      "strict": true,
-      "schema": {
-        "type": "object",
-        "properties": {
-          "name":    {"type": "string"},
-          "age":     {"type": "integer"},
-          "hobbies": {"type": "array", "items": {"type": "string"}}
-        },
-        "required": ["name", "age", "hobbies"],
-        "additionalProperties": false
-      }
-    }
-  }
-}
-```
-
-El decoding es **constrained real** (no "please return JSON"): se verificó
-que un schema con `enum: ["red", "blue"]` para la pregunta "¿de qué color
-es el césped?" devuelve `"blue"` en vez del "green" habitual.
-
-Caveats:
-- Modelos **thinking** (qwen3.*, qwen3.8.* con `thinking=true`) pueden gastar
-  todo el `max_tokens` en la fase de reasoning y dejar `content: ""`. Sube
-  `max_tokens` o desactiva thinking para schemas.
-- Para `strict: true` evita `anyOf`, referencias cíclicas y propiedades
-  opcionales no listadas en `required` — algunos backends los rechazan.
-
-**Control de reasoning (`reasoning_effort`)** — campo opcional del request
-que acepta `"low"`, `"medium"`, `"high"` o `"off"` (sinónimos: `none`,
-`disabled`). oCabra lo traduce al backend concreto:
-
-| Backend | Traducción |
-|---|---|
-| vLLM | `extra_body.chat_template_kwargs.reasoning_effort = <value>` |
-| Ollama ≥0.5 | `think: true` (low/medium/high) o `think: false` (off) |
-| Ollama 0.4 | aceptado y traducido, pero el upstream lo ignora de momento (ollama/ollama#15288) |
-| llama.cpp nativo (gemma4:26b, qwen3.8:27b, Chaos) | `low`/`medium`/`high` activa `chat_template_kwargs.enable_thinking=true` para esa petición y pasa el nivel; `off`/`none` lo fuerza a `false`; `default` conserva el valor de arranque |
-| Otros | silenciosamente ignorado |
-
-```json
-{"model": "qwen3.8:27b", "messages": [...], "reasoning_effort": "off"}
-```
-
-Si un perfil como Chaos arranca con thinking desactivado, omitir el campo o
-enviar `"default"` lo mantiene desactivado. Enviar `"low"`, `"medium"` o
-`"high"` lo activa solo para esa petición, sin recargar el modelo.
-
-**Tope duro de razonamiento (`reasoning_budget`)** — solo para modelos
-llama.cpp nativos (gemma4:26b, qwen3.8:27b). A diferencia de
-`reasoning_effort` (una pista que la plantilla puede ignorar),
-`reasoning_budget` es un **límite duro en tokens**: al agotarse,
-llama-server corta el razonamiento y fuerza la respuesta final —
-garantiza que `content` nunca llega vacío.
-
-**Verificado en vivo 2026-10-29 (build `b1-74bca39`) contra qwen3.8:27b**:
-`reasoning_budget: 200` → 674 caracteres de razonamiento (en vez de los
-~16.600 sin límite) y `finish_reason: "stop"` limpio, en 29s en vez de
-varios minutos. oCabra traduce `reasoning_budget` al campo real que
-espera llama-server, `reasoning_budget_tokens` — **no son el mismo
-nombre** (una primera implementación reenvió `reasoning_budget` tal cual,
-que el servidor ignoraba en silencio; el nombre correcto se confirmó
-leyendo las cadenas de `libllama-server-impl.so`). Por defecto el
-servidor no tiene límite (`-1`, sin restricción), que fue la causa del
-incidente de truncamiento 2026-10-29. Silenciosamente ignorado en otros
-backends.
-
-```json
-{"model": "gemma4:26b", "messages": [...], "reasoning_budget": 8192}
-```
-
-```json
-{"model": "gemma4:26b", "messages": [...], "reasoning_effort": "low"}
-```
-
-**Observabilidad de tokens**. El response trae los campos OpenAI estándar
-y oCabra persiste los detalles en `request_stats`:
-
-```json
-"usage": {
-  "prompt_tokens": 10,
-  "prompt_tokens_details": {"cached_tokens": 3},
-  "completion_tokens": 38,
-  "completion_tokens_details": {"reasoning_tokens": 21},
-  "total_tokens": 48
-}
-```
-
-- `cached_tokens`: subset del prompt que hizo hit en el prefix cache del
-  backend. Para Ollama (que expone `prompt_eval_cached_count` nativo) se
-  traduce automáticamente.
-- `reasoning_tokens`: subset del output gastado en reasoning. Cuando el
-  backend no lo emite (Ollama 0.40 actualmente) se aproxima contando
-  palabras de `reasoning_content` — mejor que perder la señal.
-
-Las dos columnas aparecen en `/ocabra/stats/by-agent`, `/ocabra/stats/by-user`,
-etc. para desglosar coste real vs tokens visibles.
-
-### Embeddings & Reranking
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| POST | `/v1/embeddings` | Generar embeddings |
-| POST | `/v1/rerank` | Reranking de documentos |
-| POST | `/v1/score` | Score de pares de texto |
-| POST | `/v1/pooling` | Pooling sobre un modelo |
-| POST | `/v1/classify` | Clasificacion de inputs |
-
-**POST /v1/embeddings**
-```json
-{
-  "model": "qwen3-embedding-8b",
-  "input": ["Hello world", "Goodbye world"]
-}
-```
-
-### Audio — TTS (Text-to-Speech)
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| POST | `/v1/audio/speech` | Generar audio a partir de texto |
-| GET | `/v1/audio/voices` | Listar voces disponibles para un modelo |
-
-**POST /v1/audio/speech**
-```json
-{
-  "model": "kokoro-82m",
-  "input": "Hola desde oCabra",
-  "voice": "af_heart",
-  "response_format": "wav",
-  "speed": 1.0,
-  "language": "Auto"
-}
-```
-
-Parametros opcionales para voice cloning (modelos Base):
-- `reference_audio`: string base64 del audio WAV de referencia (min 5s recomendado)
-- `reference_text`: transcripcion del audio de referencia
-
-Parametros para CustomVoice:
-- `speaker`: nombre del speaker (ryan, vivian, etc.)
-- `instruct`: instruccion de estilo ("Speak calmly and slowly")
-
-Formatos soportados: `mp3` (default), `wav`, `opus`, `flac`, `pcm`, `aac`
-
-**Streaming**. El endpoint responde con `Transfer-Encoding: chunked` para los
-formatos `mp3`, `pcm`, `opus`, `flac` y `aac`: el worker sintetiza
-frase-a-frase y oCabra reenvía cada chunk en cuanto llega, sin esperar al
-final. El cliente puede empezar a reproducir audio típicamente al
-**primer segundo** (TTFB ≈ tiempo de sintetizar la primera frase),
-independientemente de lo largo que sea el texto completo. Ejemplo (TTFB
-observado 0,9 s con chatterbox-turbo para 4 frases, mp3, duración total
-7,7 s):
-
-```python
-async with httpx.AsyncClient(timeout=90) as c:
-    async with c.stream("POST", f"{base}/v1/audio/speech",
-            headers={"Authorization": f"Bearer {key}"},
-            json={"model": "chatterbox-turbo", "input": texto,
-                  "response_format": "mp3"}) as r:
-        async for chunk in r.aiter_bytes():
-            player.feed(chunk)  # ya se oye antes de terminar la síntesis
-```
-
-El formato `wav` NO va en streaming (requiere escribir la cabecera RIFF
-con la longitud total conocida de antemano). Para streaming de audio
-sin cabecera elige `pcm`; para audio con cabecera streameable, usa `wav`
-sabiendo que el worker la escribe primero con un `data` size placeholder
-(reproductores tolerantes como ffmpeg/mpv aceptan ese formato).
-
-### Audio — STT (Speech-to-Text)
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| POST | `/v1/audio/transcriptions` | Transcribir audio a texto |
-
-**POST /v1/audio/transcriptions** (multipart/form-data)
-```
-model=whisper-base
-file=@audio.wav
-language=es           # opcional, auto-deteccion si vacio
-response_format=json  # json, verbose_json, text, srt, vtt
-temperature=0.0
-diarize=true          # opcional — extensión oCabra, no estándar OpenAI
-```
-
-`diarize` **no** forma parte de la API real de OpenAI — no soporta
-diarización en absoluto, ni este parámetro ni ningún equivalente; un
-cliente/SDK oficial no lo reconoce. Solo lo implementa el backend
-`whisper` (faster-whisper, vía pyannote) — activa el mismo pipeline
-tanto si el perfil es un `*-diarized` como si no: contra cualquier
-perfil `whisper` normal, `diarize=true` carga pyannote **de forma
-perezosa en esa primera petición** (coste de latencia único, y
-requiere `HF_TOKEN` ya accesible en el entorno del worker — si falta,
-400). Un perfil `*-diarized` no es necesario para que funcione, es una
-optimización operativa: precarga pyannote al arrancar el worker (sin
-penalizar la primera petición) y reserva ~1200 MB de VRAM extra en el
-planificador de GPU — ver `load_overrides.diarization_enabled` más
-abajo.
-
-El backend `whisper_cpp` también soporta `diarize=true` (desde
-2026-11-05), pero por un camino distinto: `whisper-server` es un
-binario nativo sin Python dentro donde cargar pyannote, así que
-oCabra lanza un sidecar aparte (`workers/diarization_worker.py`,
-reutilizando el venv del backend `whisper` — debe estar instalado) la
-primera vez que se pide diarización contra ese modelo, y lo mantiene
-vivo para peticiones siguientes. Mismo coste de latencia único que el
-camino lazy de faster-whisper, misma forma de respuesta
-(`speakers`/`diarization`/texto con prefijo `[SPEAKER_NN]`).
-
-`vibeasr` sigue sin implementar diarización (no tiene pyannote ni
-equivalente) — `diarize=true` contra un perfil vibeasr responde
-`400 diarization_not_supported` en vez de aceptarse en silencio sin
-identificar hablantes.
-
-### Audio — Music Generation
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| POST | `/v1/audio/generate` | Generar musica (ACE-Step) |
-
-### Image Generation & Editing
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| POST | `/v1/images/generations` | Generar imagen a partir de texto (`image_generation`) |
-| POST | `/v1/images/edits` | Editar imagen guiado por prompt (`image_editing`) |
-| GET | `/v1/images/files/{name}` | Servir imagen generada (respuesta `response_format=url`) |
-
-**POST /v1/images/generations**
-```json
-{
-  "model": "qwen-image-2.1",
-  "prompt": "A cat sitting on a rainbow",
-  "size": "1024x1024",
-  "n": 1,
-  "num_inference_steps": 20,
-  "guidance_scale": 4.0,
-  "response_format": "url"
-}
-```
-
-Tamaños recomendados para Qwen-Image 2.1: `1024x1024`, `1152x864`, `864x1152`,
-`1216x832`, `832x1216`, `1344x768`, `768x1344`.
-
-**POST /v1/images/edits** (multipart/form-data)
-```
-model=qwen-image-edit-plus
-prompt=change the neon text to say ELECTRIC
-image=@input.png
-image_ref_1=@ref2.png    # opcional (multi-referencia; hasta 3 refs)
-image_ref_2=@ref3.png    # opcional
-mask=@mask.png           # opcional; PNG con alfa (transparente = zona a editar)
-num_inference_steps=20
-guidance_scale=4.0
-strength=0.75
-response_format=url
-n=1
-```
-
-Códigos de error específicos:
-- `400 edit_unsupported` — el pipeline del modelo cargado no tiene variante
-  img2img (p.ej. `Flux2KleinPipeline`, `ZImagePipeline`, `QwenImage21Pipeline`).
-- `400 mask_unsupported` — enviaste una máscara pero el pipeline es
-  edit-nativo sin soporte de inpainting (p.ej. `QwenImageEditPlusPipeline`).
-- `400 model_not_capable` — el modelo tiene `image_editing=false`.
-
-Capabilities relevantes en `/v1/models/{id}`:
-- `image_generation` — soporta text-to-image (`/v1/images/generations`).
-- `image_editing` — soporta img2img o edición prompt-based (`/v1/images/edits`).
-  Un modelo puede tener uno, otro, ambos o ninguno según el pipeline del backend.
-
----
-
-## Batches API (`/v1/batches`)
-
-API compatible con el formato OpenAI Batches. **Es el método recomendado
-para cualquier carga que no sea una sesión interactiva con alguien
-esperando la respuesta** — automatizaciones, transcripciones largas,
-backfills, generación masiva de datos, agentes que lanzan ráfagas de
-peticiones sin un humano mirando la pantalla. Las peticiones síncronas
-(`/v1/chat/completions`, etc.) compiten por los mismos slots de GPU que el
-resto de usuarios; una automatización que manda miles de peticiones por
-esa vía puede saturar un modelo y degradar la latencia de quien sí está
-esperando en tiempo real. Los lotes se procesan en segundo plano sin esa
-presión — úsalos para todo lo que pueda esperar.
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| POST | `/v1/batches` | Crear un lote a partir de un fichero JSONL (`input_file_id`, subido antes via `/v1/files`) |
-| GET | `/v1/batches/{id}` | Consultar estado de un lote |
-| GET | `/v1/batches` | Listar lotes del usuario (paginado, `after`/`limit`) |
-| POST | `/v1/batches/{id}/cancel` | Cancelar un lote |
-
-Endpoints soportados dentro de un lote: `/v1/chat/completions`,
-`/v1/embeddings`, `/v1/completions`, `/v1/images/generations`,
-`/v1/images/edits`, `/v1/audio/speech`, `/v1/audio/transcriptions`,
-`/v1/pooling`, `/v1/score`, `/v1/rerank`, `/v1/classify` y
-`/v1/audio/generate` (música). `completion_window` solo admite `"24h"` por
-ahora.
-
-Esta lista no es solo prosa: `endpoint` (y `purpose` de `POST /v1/files`)
-llevan un `enum` real en el schema OpenAPI servido en `/docs`, así que
-Swagger, SDKs generados y validadores pueden descubrir y comprobar los
-valores válidos sin leer esta página. El `body` de las líneas de
-transcripción/edición de imagen también tiene schema propio
-(`TranscriptionBatchLineBody` / `ImageEditsBatchLineBody`, visibles en la
-sección "Schemas" de `/docs`), y `POST /v1/batches` valida cada línea
-contra ellos al crear el lote (tipos, campos requeridos), no solo la
-presencia del `file_id`.
-
-Para `/v1/pooling`, `/v1/score`, `/v1/rerank` y `/v1/classify` el `body` de
-cada línea es exactamente el mismo JSON que mandarías contra el endpoint
-real — no necesitan ninguna extensión, a diferencia de las transcripciones.
-`/v1/audio/generate` (música, backend ACE-Step) tampoco necesita extensión:
-el `body` es el mismo JSON de la petición normal (`model`, `prompt`,
-`lyrics?`, `audio_duration?`, ...) y, como devuelve audio binario, su salida
-se trata igual que `/v1/audio/speech` (ver "Respuestas binarias" más abajo).
-
-La API real de Batches de OpenAI no soporta ningún endpoint que requiera
-subir un binario en la propia petición (`multipart/form-data`) — no cabe en
-el modelo de "una línea JSON por petición" del JSONL de entrada. oCabra
-soporta los dos que tiene (`/v1/audio/transcriptions` e `/v1/images/edits`)
-igualmente, pero como **extensiones propias, fuera del estándar OpenAI**: la
-línea referencia un fichero pre-subido en vez de llevar el binario inline
-(ver ambas más abajo) — no es algo que un cliente/SDK oficial de OpenAI sepa
-construir sin más.
-
-Cada línea del JSONL de entrada:
-```json
-{"custom_id": "req-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "qwen3.8:27b", "messages": [...]}}
-```
-
-El fichero de salida (`output_file_id`) trae, por línea, solo las peticiones
-que tuvieron éxito:
-```json
-{"id": "batch_req_...", "custom_id": "req-1", "response": {"status_code": 200, "body": {...}}, "error": null}
-```
-
-Los fallos van a un fichero separado (`error_file_id`), mismo formato con
-`response: null` y `error` relleno — `error_file_id` solo aparece cuando hubo
-al menos un fallo, igual que en la API real de OpenAI.
-
-**Respuestas binarias (`/v1/audio/speech`, `/v1/audio/generate`)**: TTS y
-generación de música no devuelven JSON, devuelven el audio crudo — no cabe
-inline en el JSONL de salida. En su lugar, el `body` de la respuesta
-referencia un fichero nuevo (`purpose: "batch_artifact"`), descargable por
-el `GET /v1/files/{id}/content` de siempre:
-```json
-{"id": "batch_req_...", "custom_id": "req-1", "response": {"status_code": 200, "body": {"file_id": "file-...", "bytes": 94252, "content_type": "audio/wav"}}, "error": null}
-```
-`/v1/images/generations`, `/v1/pooling`, `/v1/score`, `/v1/rerank` y
-`/v1/classify` **no** necesitan este tratamiento — su respuesta ya es JSON
-puro, igual que chat.
-
-**Transcripciones en lote (`/v1/audio/transcriptions`) — extensión oCabra,
-no estándar OpenAI.** El endpoint real recibe el audio como
-`multipart/form-data`, que no cabe en una línea JSON. En su lugar:
-
-1. Sube el audio por separado con `POST /v1/files`, `purpose=batch_input_audio`.
-2. En la línea del lote, pon su `file_id` en el `body` en vez de enviar el
-   audio — el resto de campos (`model`, `language`, `response_format`,
-   `prompt`, `temperature`, `diarize`, `timestamp_granularities`, ...) son
-   los mismos que acepta el endpoint real:
-```json
-{"custom_id": "req-1", "method": "POST", "url": "/v1/audio/transcriptions", "body": {"file_id": "file-...", "model": "whisper-large-v3-turbo", "language": "es"}}
-```
-`batch_processor` reconstruye internamente la petición multipart real a
-partir de esa referencia. Si el `file_id` falta, no existe, no es tuyo, o no
-tiene `purpose=batch_input_audio`, el lote se rechaza entero en la creación
-(`POST /v1/batches` devuelve 400 con el número de línea exacto), igual que
-cualquier otro error de validación del JSONL de entrada.
-
-**Edición de imágenes en lote (`/v1/images/edits`) — extensión oCabra, no
-estándar OpenAI.** Mismo mecanismo que las transcripciones: el endpoint real
-recibe la imagen base (y opcionalmente una máscara y hasta 3 imágenes de
-referencia extra) como `multipart/form-data`. En su lugar:
-
-1. Sube cada imagen por separado con `POST /v1/files`, `purpose=batch_input_image`
-   — la base, la máscara si la usas, y cualquier referencia extra.
-2. En la línea del lote, referencia sus `file_id` en el `body` en vez de
-   enviar los binarios: `image_file_id` (requerido) y, opcionalmente,
-   `mask_file_id`, `image_ref_1_file_id`, `image_ref_2_file_id`,
-   `image_ref_3_file_id`. El resto de campos (`model`, `prompt`,
-   `response_format`, `n`, `size`, `negative_prompt`, `num_inference_steps`,
-   `guidance_scale`, `strength`, `seed`, ...) son los mismos que acepta el
-   endpoint real:
-```json
-{"custom_id": "req-1", "method": "POST", "url": "/v1/images/edits", "body": {"image_file_id": "file-...", "mask_file_id": "file-...", "model": "qwen-image-edit", "prompt": "añade un sombrero"}}
-```
-`batch_processor` reconstruye internamente la petición multipart real a
-partir de esas referencias. Igual que con el audio, cualquier `*_file_id`
-ausente (para `image_file_id`), inexistente, ajeno, o sin
-`purpose=batch_input_image` rechaza el lote entero en la creación con el
-número de línea exacto.
-
-**Campos extra (oCabra, no estándar OpenAI)**: cada batch trae además
-`total_tokens` (suma de `usage.total_tokens` de las líneas con éxito — 0
-para endpoints que no devuelven `usage`, como imágenes/audio) y `user`
-(`{"id", "username"}`, quién lo mandó). `GET /v1/batches` devuelve solo los
-lotes propios para un usuario normal, pero **todos** los lotes de **todos**
-los usuarios para `model_manager`/`system_admin` — igual que el resto de la
-UI de gestión (`/batches` en el frontend está gateada a `model_manager`+).
-
-Ciclo de estados: `validating` → `in_progress` → `finalizing` →
-`completed` (o `failed`/`cancelled`/`expired`). `request_counts` en la
-respuesta trae `total`/`completed`/`failed` y se actualiza mientras el
-lote progresa — útil para hacer polling de avance sin reprocesar nada. Un
-lote cuyo `completion_window` (24h) se agota pasa a `expired` conservando
-los resultados parciales que ya tuviera en `output_file_id`/`error_file_id`
-— las líneas que nunca llegaron a despacharse se registran en el fichero de
-errores con `error.code = "batch_expired"`.
-
-> Prioridad frente a tráfico interactivo (2026-10-30): el procesamiento de
-> lotes **sí** prioriza a las sesiones interactivas. Cuando una petición
-> interactiva necesita un slot o un modelo ocupado por trabajo de lote,
-> puede cancelar esa petición del lote (según `batchPreemptMode` en
-> `/ocabra/config`, panel "Prioridad") en vez de hacer esperar al usuario.
-> Una línea cancelada así se reintenta sola dentro del mismo lote, no se
-> cuenta como fallo — solo aparece como `error_type=batch_priority_preempted`
-> en el fichero de errores si se agotan los reintentos (p.ej. saturación
-> sostenida). Resuelve también targets de router (`profile_kind=router`)
-> para esta lógica, no solo modelos directos.
-
----
-
-## Realtime API (`/v1/realtime`)
-
-WebSocket bidireccional de voz, compatible con el protocolo Realtime de
-OpenAI. Pipeline: audio -> Whisper STT -> LLM (streaming) -> TTS -> audio.
-
-```
-WS /v1/realtime?model=<llm_id>&intent=&conversation_id=&num_speakers=
-```
-
-Auth: `Authorization: Bearer <key>` en el handshake o, desde un navegador
-(que no puede fijar headers en `new WebSocket()`), el subprotocolo
-`openai-insecure-api-key.<key>`: `new WebSocket(url, ["realtime",
-"openai-insecure-api-key." + key])`. `?api_key=` ya no se acepta (v0.109.0).
-
-Eventos de cliente: `session.update`, `input_audio_buffer.{append,commit,clear}`,
-`response.{create,cancel}`, `conversation.item.{create,truncate,delete}`.
-
-**Tools/function-calling** (2026-10-30): `tools`/`tool_choice` se configuran
-en `session.update` (o por turno, dentro de `response.create.response`) con
-el shape plano estándar de Realtime:
-```json
-{"type": "function", "name": "get_weather", "description": "...", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}
-```
-Los deltas de la llamada llegan como `response.function_call_arguments.delta`/
-`.done`; `response.done.response.output` incluye el item
-`{"type": "function_call", "call_id", "name", "arguments"}`. Para cerrar el
-ciclo: ejecuta la función y manda
-`conversation.item.create` con
-`{"type": "function_call_output", "call_id": "...", "output": "..."}`
-seguido de un nuevo `response.create`.
-
-**Mensajes de solo texto**: la única forma de meter texto en la conversación
-sin pasar por audio es `conversation.item.create` con
-`{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "..."}]}`.
-
-**Barge-in**: si el VAD detecta que el usuario empieza a hablar mientras el
-asistente sigue respondiendo, la respuesta en curso se cancela automáticamente
-(`response.done` con `status: "cancelled"`) — igual que el comportamiento por
-defecto de `server_vad` en la API real de OpenAI.
-
-**Extensiones propias de oCabra** (clientes estrictos de OpenAI las ignoran,
-no rompen el protocolo):
-- `tts_model` en `session.update` — modelo TTS a usar (acepta un profile_id
-  o un router).
-- `input_audio_routing: "auto"|"native"|"stt"` — fuerza el camino de audio de
-  entrada.
-- `reasoning_budget` (solo backends llama.cpp nativos) — tope duro de tokens
-  de razonamiento. Por defecto `300` (`REALTIME_DEFAULT_REASONING_BUDGET`,
-  override por sesión vía `session.update`) — un modelo thinking sin límite
-  es la palanca de latencia más grande en modo voz; medido en vivo:
-  capar a 200 tokens bajó un turno de qwen3.8:27b de varios minutos a ~29s.
-  Manda `reasoning_budget: null` explícito para desactivar el límite.
-- `reasoning_effort` — igual que en `/v1/chat/completions`.
-
-`conversation.item.truncate` se confirma (`conversation.item.truncated`) pero
-es un no-op — esta implementación no guarda un buffer de audio reproducible
-por item, así que no hay nada que truncar a nivel de audio.
-
----
-
-## Ollama Compatible API (`/api`)
-
-API compatible con el protocolo de Ollama. Clientes como `ollama-python` funcionan directamente.
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| POST | `/api/chat` | Chat completion |
-| POST | `/api/generate` | Text generation |
-| POST | `/api/embed` | Embeddings |
-| POST | `/api/embeddings` | Embeddings (legacy) |
-| GET | `/api/tags` | Listar modelos |
-| GET | `/api/ps` | Listar modelos cargados en memoria |
-| POST | `/api/show` | Detalle de un modelo |
-| POST | `/api/pull` | Descargar un modelo de Ollama |
-| DELETE | `/api/delete` | Eliminar un modelo |
-
-**GET /api/ps**
-
-Devuelve solo los modelos en estado `LOADED`. Cada entrada incluye los campos
-estandar Ollama (`name`, `model`, `size`, `size_vram`, `digest`, `details`,
-`expires_at`) mas un campo extra `expected_load_seconds` (mediana historica)
-util para estimar el cold-start de modelos que **no** salgan en esta lista.
-
-```json
-{
-  "models": [
-    {
-      "name": "qwen3-8b",
-      "model": "qwen3-8b",
-      "size": 5137025024,
-      "size_vram": 5368709120,
-      "digest": "sha256:...",
-      "details": {"family": "llm", "format": "safetensors", ...},
-      "expires_at": "2026-05-10T18:42:00Z",
-      "expected_load_seconds": 12
-    }
-  ]
-}
-```
-
----
-
-## oCabra Internal API (`/ocabra`)
-
-API interna para gestion del servidor. Usada por el dashboard web.
-
-### Models — Gestion de modelos
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/models` | Listar todos los modelos con estado |
-| POST | `/ocabra/models` | Registrar un modelo nuevo |
-| GET | `/ocabra/models/storage` | Uso de almacenamiento |
-| GET | `/ocabra/models/{model_id}` | Estado de un modelo |
-| PATCH | `/ocabra/models/{model_id}` | Actualizar config del modelo |
-| DELETE | `/ocabra/models/{model_id}` | Eliminar modelo y sus ficheros |
-| POST | `/ocabra/models/{model_id}/load` | Cargar modelo en GPU |
-| POST | `/ocabra/models/{model_id}/unload` | Descargar modelo de GPU |
-| POST | `/ocabra/models/{model_id}/memory-estimate` | Estimar VRAM necesaria |
-| POST | `/ocabra/models/{model_id}/maintenance` | Pausar/reanudar peticiones nuevas (503) sin afectar las ya en curso — para pruebas manuales sin tráfico real contendiendo por la GPU. En memoria, no persiste tras un restart. |
-
-**POST /ocabra/models** — Registrar modelo
-```json
-{
-  "model_id": "vllm/Qwen/Qwen3-8B",
-  "backend_type": "vllm",
-  "display_name": "Qwen3 8B",
-  "load_policy": "on_demand",
-  "auto_reload": false,
-  "preferred_gpu": 1,
-  "extra_config": {}
-}
-```
-
-**PATCH /ocabra/models/{model_id}** — Actualizar config
-```json
-{
-  "load_policy": "pin",
-  "auto_reload": true,
-  "preferred_gpu": 0,
-  "display_name": "Mi modelo custom",
-  "extra_config": {"max_model_len": 8192}
-}
-```
-
-Load policies:
-- `pin`: Siempre cargado, inmune a eviccion
-- `warm`: Cargado bajo demanda, no baja por idle
-- `on_demand`: Cargado bajo demanda, baja por idle timeout
-
-### Profiles — Perfiles de modelo
-
-Los perfiles exponen variantes de un modelo base con defaults distintos.
-Los clientes usan `profile_id` como valor de `model=` en las APIs.
-
-Un perfil es ahora de uno de dos tipos (`profile_kind`):
-
-- `execution`: ejecuta un modelo concreto. Lleva `base_model_id`, puede tener
-  `load_overrides` y define 0..N **presets de runtime** (contexto/paralelismo/
-  KV cache por preset).
-- `router`: no ejecuta nada por sí mismo. Enumera `routing_targets`
-  (profile_ids ordenados por preferencia) y delega la petición al primero
-  que esté disponible/cargado. Sin `base_model_id`, sin presets, sin
-  `load_overrides`.
-
-> **Routers `recomendado-*` de este despliegue.** `recomendado-*` no es una
-> palabra reservada del framework — es solo la convención de nombres que
-> este despliegue usa para sus routers de uso general, pensados para quien
-> no quiere fijar un `model` concreto y prefiere "el mejor disponible ahora
-> mismo" (en vez de competir por cargar/descargar modelos para su propio
-> uso). Apuntan a modelos que el servidor normalmente mantiene calientes
-> (`load_policy: pin` o `warm`), así que resuelven sin cold-start en la
-> mayoría de los casos. Ejemplos vistos en producción (consulta
-> `GET /v1/models` o `GET /ocabra/profiles/{profile_id}` para la lista y los
-> `routing_targets` reales, que pueden cambiar):
-> - `recomendado-ha-chatbots` — alta disponibilidad: el primer LLM de chat
->   disponible entre varios candidatos, sin fijar contexto.
-> - `recomendado-sota` — calidad prioritaria: el LLM de mejor calidad
->   disponible, con fallback ordenado a otros si el primero no está cargado.
-> - `recomendado-stt` — transcripción recomendada, con fallback gestionado
->   por el router en vez de fijar un modelo Whisper concreto. Sus
->   `routing_targets` incluyen, como último escalón, un modelo
->   `whisper_cpp` (CPU, sufijo `-cpu`) — el router prueba primero los
->   Whisper en GPU y solo cae a CPU si están todos ocupados, dando balanceo
->   por ocupación gratis sin tocar el scheduler.
->
-> Cualquier cliente puede usarlos igual que un `profile_id` normal en
-> `model=` — incluidos dentro de un lote de Batches (ver más abajo), donde
-> el procesador también resuelve el router en cada línea en vez de asumir
-> un único modelo fijo para todo el lote.
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/models/{model_id}/profiles` | Perfiles de un modelo |
-| POST | `/ocabra/models/{model_id}/profiles` | Crear perfil |
-| GET | `/ocabra/profiles/{profile_id}` | Detalle de perfil |
-| PATCH | `/ocabra/profiles/{profile_id}` | Actualizar perfil |
-| DELETE | `/ocabra/profiles/{profile_id}` | Eliminar perfil |
-| POST | `/ocabra/profiles/{profile_id}/assets` | Subir asset (multipart) |
-| DELETE | `/ocabra/profiles/{profile_id}/assets/{key}` | Eliminar asset |
-| GET | `/ocabra/profiles/{profile_id}/runtime-presets` | Lista presets runtime |
-| GET | `/ocabra/profiles/{profile_id}/runtime-presets/resolved` | Capacidad simulada contra la GPU actual |
-| POST | `/ocabra/profiles/{profile_id}/runtime-presets` | Crear preset |
-| PATCH | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}` | Actualizar preset |
-| DELETE | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}` | Eliminar preset |
-| POST | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}/benchmark` | Medir carga/generación |
-| POST | `/ocabra/profiles/{profile_id}/aliases` | Alias oculto hacia `(profile, preset_key)` |
-| DELETE | `/ocabra/profiles/{profile_id}/aliases/{alias_id}` | Eliminar alias |
-
-**POST /ocabra/models/{model_id}/profiles** — Crear perfil
-```json
-{
-  "profile_id": "qwen3-8b-creative",
-  "display_name": "Qwen3 8B Creative",
-  "description": "Perfil creativo con alta temperatura",
-  "category": "llm",
-  "load_overrides": {},
-  "request_defaults": {
-    "temperature": 1.2,
-    "top_p": 0.95,
-    "max_tokens": 2048
-  },
-  "enabled": true,
-  "is_default": false
-}
-```
-
-Categorias: `llm`, `tts`, `stt`, `image`, `music`
-
-Ejemplo de perfil TTS con voz fija:
-```json
-{
-  "profile_id": "kokoro-heart",
-  "display_name": "Kokoro Heart Voice",
-  "category": "tts",
-  "request_defaults": {
-    "voice": "af_heart",
-    "speed": 1.0,
-    "response_format": "mp3"
-  }
-}
-```
-
-Ejemplo de perfil STT con diarización precargada (opcional — ver nota
-sobre `diarize` más arriba; sin este perfil, `diarize=true` funciona
-igual contra un perfil whisper normal, solo con la carga perezosa de
-pyannote en la primera petición en vez de al arrancar el worker):
-```json
-{
-  "profile_id": "whisper-diarized",
-  "display_name": "Whisper con diarizacion",
-  "category": "stt",
-  "load_overrides": {
-    "diarization_enabled": true,
-    "whisper": {"diarizationEnabled": true}
-  },
-  "request_defaults": {
-    "diarize": true
-  }
-}
-```
-
-**load_overrides vs request_defaults**:
-- `load_overrides`: Afectan como se carga el modelo en GPU. Si difieren entre perfiles, se crea un worker separado (dedicado).
-- `request_defaults`: Valores inyectados en cada request. El cliente puede sobreescribirlos.
-
-#### Runtime presets
-
-Un perfil `execution` puede ofrecer varios **presets de runtime** que varían
-en contexto, paralelismo y KV cache sin crear perfiles públicos nuevos. Un
-preset es una tupla `(context_tokens|max, parallelism, kv_cache_dtype,
-placement_policy, load_policy)`. Al llegar una petición, el coordinator elige
-el preset: `prefer_loaded` reutiliza un runner ya cargado que cubra el
-contexto solicitado; si no, se selecciona el preset habilitado más pequeño
-que lo cubra. Un cambio de preset descarga el runner viejo y crea uno nuevo.
-
-Convención sugerida: `32k` / `64k` (default, `warm`) / `128k` / `max` (modo
-`contextMode="max"` → el coordinator calcula el tope que cabe en la GPU
-objetivo). Perfiles LLM típicos: cuatro presets por perfil.
-
-**Cómo se calcula "el contexto solicitado"** (`estimate_request_token_budget`
-en `runtime_coordinator.py`) — importante porque no es solo el tamaño del
-prompt:
-
-```
-contexto_solicitado = tokens_estimados_del_prompt + reserva_de_salida
-```
-
-`reserva_de_salida` es `max_completion_tokens` / `max_tokens` (OpenAI) o
-`options.num_predict` (Ollama) si el cliente los manda; **si no los manda**,
-cae a `runtime_policy.default_output_reservation_tokens` del perfil si está
-configurado, y si no a un valor fijo y global —
-`runtime_preset_default_output_reservation_tokens` (actualmente **4096
-tokens**).
-
-Perfiles con razonamiento visible (gemma4, qwen3.8, qwen3.8-abliterated)
-tienen `runtime_policy.default_output_reservation_tokens = 16384` para que
-una petición sin `max_tokens` no se trunque por una reserva pensada para
-modelos que no razonan. Para ajustarlo en un perfil:
-
-```json
-PATCH /ocabra/profiles/{profile_id}
-{"runtime_policy": {"default_output_reservation_tokens": 16384}}
-```
-
-Esto importa para modelos con razonamiento visible (gemma4, qwen3.8): el
-`reasoning_content` cuenta contra el mismo presupuesto de salida que la
-respuesta final. Una petición sin `max_tokens` que necesite razonar 20k+
-tokens antes de responder puede agotar el preset elegido (p. ej. 64k) y
-cortar con `finish_reason: "length"` y `content` vacío — **no porque el
-contexto no se "ampliara", sino porque la reserva de 4096 nunca iba a cubrir
-ese razonamiento** y el sistema no tiene forma de saber cuánto va a razonar
-un modelo antes de que ocurra. Dos formas de evitarlo desde el cliente:
-
-- Pasar `max_tokens` (o `num_predict`) con un valor generoso — sustituye
-  directamente la reserva de 4096 y empuja la selección a un preset mayor.
-- Forzar un preset explícito con `ocabra.context_preset` (ver abajo),
-  bypaseando la estimación por completo.
-- Limitar el razonamiento con `reasoning_effort` (ver sección dedicada) o
-  `reasoning_budget` (tope duro, solo llama.cpp nativo).
-
-**Esto puede seguir pasando aunque ajustes lo anterior** — ninguna
-estimación por adelantado es infalible (un modelo puede razonar más de lo
-previsto en un caso puntual). `finish_reason: "length"` es parte del
-contrato estándar de OpenAI y **el cliente debe comprobarlo siempre**, no
-asumir que `content` viene relleno. Concretamente para modelos con
-razonamiento visible: `finish_reason == "length"` con `content` vacío (no
-con un párrafo cortado a mitad de frase) significa específicamente que el
-presupuesto se agotó **durante el razonamiento**, antes de escribir nada
-de la respuesta final — distinto del truncamiento clásico donde `content`
-sí tiene texto, solo que incompleto. Un cliente robusto debe: comprobar
-`finish_reason`, y si es `"length"` con `content` vacío, reintentar con
-`max_tokens` mayor y/o `reasoning_effort` más bajo, no mostrar una
-respuesta vacía al usuario final sin más.
-
-**POST `/ocabra/profiles/{profile_id}/runtime-presets`**:
-
-```json
-{
-  "preset_key": "128k",
-  "label": "128K",
-  "context_mode": "fixed",
-  "context_tokens": 131072,
-  "parallelism": 2,
-  "kv_cache_dtype": "q8",
-  "placement_policy": "auto",
-  "load_policy": "on_demand",
-  "enabled": true,
-  "is_default": false,
-  "priority": 30
-}
-```
-
-Request del cliente puede forzar un preset concreto mediante extensión
-`ocabra.context_preset`:
-
-```json
-POST /v1/chat/completions
-{
-  "model": "gemma4:26b",
-  "messages": [...],
-  "ocabra": {"context_preset": "128k"}
-}
-```
-
-Si el preset indicado no existe o está deshabilitado se responde HTTP 400 con
-`ContextCapacityError`.
-
-#### Aliases ocultos
-
-Los `-ctx*` y variantes legacy (`gemma4:26b-ctx160k`, `qwen3.8:27b-ctx160k`,
-…) viven como **alias ocultos** apuntando a `(profile, preset_key)`. Un alias
-con `hidden=true` se resuelve en todas las APIs (chat, embeddings, …) pero no
-aparece en `/v1/models` ni en el panel. Es el camino de compatibilidad para
-clientes legacy; los nuevos deben usar `profile_id` + `ocabra.context_preset`.
-
-#### Contexto nativo vs servido
-
-`BackendCapabilities` del modelo (visible en `/ocabra/models/{id}`) expone:
-
-- `context_length`: ventana **efectiva** que el backend servirá hoy
-  (`min(num_ctx_del_modelfile_o_OLLAMA_CONTEXT_LENGTH, nativo)`). Es lo que
-  los clientes OpenAI deben respetar para no provocar truncamiento silencioso.
-- `native_context_length`: ventana nativa del modelo (p. ej. 262144 en
-  gemma4:26b). Opcional, cero significa "desconocido". Sirve para el panel y
-  para que los presets `max` sepan hasta dónde pueden escalar.
-- `ocabra.capabilities.max_output_tokens`: límite duro de salida independiente
-  de la ventana total. Solo aparece si el perfil o el backend configuran uno;
-  si `max_tokens` o `max_completion_tokens` lo supera, la API responde HTTP
-  400, `param` identifica el campo y `code=max_tokens_exceeded`. No se infiere
-  de `context_length` ni se recorta silenciosamente.
-- `ocabra.capabilities.recommended_output_tokens`: presupuesto recomendado a
-  partir de la reserva del perfil y el máximo observado. Es orientación para
-  clientes, no una restricción del modelo.
-- `ocabra.capabilities.recommended_input_tokens`: ventana restante después de
-  reservar `recommended_output_tokens`; ayuda a clientes que necesitan un
-  presupuesto conservador de prompt sin confundirlo con un máximo duro.
-
-Cuando el límite explícito es válido pero `prompt + salida` supera la ventana,
-el error sigue siendo `context_length_exceeded`, porque en ese caso el problema
-sí es la suma de contexto de la petición.
-
-### Status — Estado del servidor
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/status` | Foto compacta de carga: cola, cargas activas y workers residentes |
-
-Endpoint pensado para banners y widgets que quieran renderizar "N cargando /
-Q en cola" sin sondear `/ocabra/models` completo. Requiere solo rol `user`.
-
-```json
-{
-  "loads": {
-    "queue_depth": 2,
-    "waiting": 1,
-    "active": 1,
-    "in_progress": ["diffusers/qwen-image-2.1"],
-    "waiting_for_service_gpu": [
-      {"modelId": "diffusers/qwen-image-2.1", "blockedBy": "hunyuan3d"}
-    ]
-  },
-  "workers": {
-    "loaded_count": 2,
-    "loaded_ids": ["ollama/gemma4:26b-ctx160k", "whisper/openai/whisper-base"],
-    "in_flight_requests": 3
-  }
-}
-```
-
-Semántica:
-- `loads.active` — número de `backend.load()` en ejecución (serializados por
-  un mutex global; nunca > 1 con la config actual).
-- `loads.waiting` — peticiones esperando ese mutex.
-- `loads.queue_depth` — `waiting + active`.
-- `loads.in_progress` — model_ids canónicos de los loads activos.
-- `loads.waiting_for_service_gpu` — peticiones que abortaron por VRAM ocupada
-  por un servicio externo (Hunyuan, TRELLIS.2…) y están reintentando en
-  bucle hasta que libere. Cada entrada tiene `modelId` y `blockedBy`.
-- `workers.in_flight_requests` — suma de requests en vuelo por modelo,
-  útil para saber si algo se está sirviendo aunque no haya loads activos.
-
-Poll recomendado: cada 4-5 s.
-
-### GPUs — Estado de GPUs
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/gpus` | Listar todas las GPUs |
-| GET | `/ocabra/gpus/{index}` | Estado de una GPU |
-| GET | `/ocabra/gpus/{index}/stats` | Historico de stats de GPU |
-
-Respuesta de `/ocabra/gpus`:
-```json
-[
-  {
-    "index": 0,
-    "name": "NVIDIA GeForce RTX 3060",
-    "total_vram_mb": 12288,
-    "free_vram_mb": 11867,
-    "used_vram_mb": 421,
-    "utilization_pct": 0.0,
-    "temperature_c": 45.0,
-    "power_draw_w": 12.5,
-    "power_limit_w": 170.0,
-    "locked_vram_mb": 0,
-    "processes": []
-  }
-]
-```
-
-### Downloads — Descargas de modelos
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/downloads` | Listar descargas |
-| POST | `/ocabra/downloads` | Iniciar descarga |
-| DELETE | `/ocabra/downloads` | Limpiar historial |
-| GET | `/ocabra/downloads/{job_id}` | Estado de descarga |
-| DELETE | `/ocabra/downloads/{job_id}` | Cancelar descarga |
-| GET | `/ocabra/downloads/{job_id}/stream` | SSE de progreso |
-
-**POST /ocabra/downloads** — Iniciar descarga
-```json
-{
-  "source": "huggingface",
-  "model_ref": "Qwen/Qwen3-8B",
-  "artifact": null,
-  "register_config": {
-    "backend_type": "vllm",
-    "load_policy": "on_demand"
-  }
-}
-```
-
-Sources: `huggingface`, `ollama`, `bitnet`
-
-### Registry — Busqueda de modelos
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/registry/hf` | Buscar en HuggingFace |
-| GET | `/ocabra/registry/hf/search?q=qwen&task=text-generation` | Busqueda HF |
-| GET | `/ocabra/registry/hf/{repo_id}` | Detalle de modelo HF |
-| GET | `/ocabra/registry/hf/{repo_id}/variants` | Variantes (GGUF, AWQ, etc.) |
-| GET | `/ocabra/registry/ollama/search?q=llama` | Buscar en Ollama |
-| GET | `/ocabra/registry/ollama/{model}/variants` | Tags de Ollama |
-| GET | `/ocabra/registry/bitnet/search?q=falcon` | Buscar modelos BitNet |
-| GET | `/ocabra/registry/bitnet/{repo_id}/variants` | Variantes BitNet |
-| GET | `/ocabra/registry/local` | Modelos descargados localmente |
-
-### Services — Servicios interactivos
-
-Servicios externos con UI propia (ComfyUI, A1111, Hunyuan3D, ACE-Step).
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/services` | Listar servicios |
-| GET | `/ocabra/services/{id}` | Estado de servicio |
-| PATCH | `/ocabra/services/{id}` | Habilitar/deshabilitar |
-| POST | `/ocabra/services/{id}/refresh` | Refrescar estado |
-| POST | `/ocabra/services/{id}/start` | Iniciar servicio |
-| POST | `/ocabra/services/{id}/unload` | Descargar runtime |
-| PATCH | `/ocabra/services/{id}/runtime` | Actualizar estado runtime |
-| POST | `/ocabra/services/{id}/touch` | Marcar actividad |
-| GET | `/ocabra/services/{id}/generations` | Historial de generaciones |
-
-### Stats — Estadisticas
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/stats/overview` | Resumen general |
-| GET | `/ocabra/stats/requests` | Estadisticas de requests |
-| GET | `/ocabra/stats/tokens` | Estadisticas de tokens |
-| GET | `/ocabra/stats/energy` | Consumo energetico |
-| GET | `/ocabra/stats/performance` | Rendimiento por modelo |
-| GET | `/ocabra/stats/recent` | Log de requests recientes |
-| GET | `/ocabra/stats/by-user` | Stats por usuario |
-| GET | `/ocabra/stats/by-group` | Stats por grupo |
-| GET | `/ocabra/stats/my` | Mis stats |
-| GET | `/ocabra/stats/my-group` | Stats de mi grupo |
-| GET | `/ocabra/stats/batch-vs-interactive` | Volumen, errores, tokens y coste separados entre trafico de Batches API y llamadas directas, mas una serie diaria |
-| GET | `/ocabra/stats/batch-priority-status` | Snapshot en vivo del coordinador de prioridad: preempciones totales, cooldowns activos por worker, eventos recientes |
-
-Query params comunes: `from` (ISO), `to` (ISO), `model_id`
-
-### Config — Configuracion del servidor
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/config` | Config actual |
-| PATCH | `/ocabra/config` | Actualizar config |
-
-Config keys principales (camelCase en REST):
-- `defaultGpuIndex`, `idleTimeoutSeconds`, `vramBufferMb`
-- `vramPressureThresholdPct`, `logLevel`
-- `energyCostEurKwh`, `maxTemperatureC`
-- `vllmGpuMemoryUtilization`, `vllmMaxNumSeqs`, `vllmEnforceeager`
-- `sglangMemFractionStatic`, `llamaCppGpuLayers`, `bitnetCtxSize`
-- `globalSchedules`: array de schedules de eviccion cron
-- `requireApiKeyOpenai`, `requireApiKeyOllama`
-
-### Auth — Autenticacion y usuarios
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| POST | `/ocabra/auth/login` | Login |
-| POST | `/ocabra/auth/logout` | Logout |
-| GET | `/ocabra/auth/me` | Usuario actual |
-| PUT | `/ocabra/auth/password` | Cambiar password |
-| GET | `/ocabra/auth/keys` | Listar API keys propias |
-| POST | `/ocabra/auth/keys` | Crear API key |
-| DELETE | `/ocabra/auth/keys/{key_id}` | Revocar API key |
-
-### Users — Gestion de usuarios (admin)
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/users` | Listar usuarios |
-| POST | `/ocabra/users` | Crear usuario |
-| GET | `/ocabra/users/{id}` | Detalle usuario |
-| PATCH | `/ocabra/users/{id}` | Actualizar usuario |
-| DELETE | `/ocabra/users/{id}` | Eliminar usuario |
-| POST | `/ocabra/users/{id}/reset-password` | Reset password |
-| GET | `/ocabra/users/{id}/keys` | API keys del usuario |
-| POST | `/ocabra/users/{id}/keys` | Crear API key para usuario |
-| DELETE | `/ocabra/users/{id}/keys/{key_id}` | Revocar API key |
-
-Roles: `system_admin`, `model_manager`, `user`
-
-### Groups — Grupos de acceso
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/groups` | Listar grupos |
-| POST | `/ocabra/groups` | Crear grupo |
-| PATCH | `/ocabra/groups/{id}` | Actualizar grupo |
-| DELETE | `/ocabra/groups/{id}` | Eliminar grupo |
-| GET | `/ocabra/groups/{id}/members` | Miembros del grupo |
-| POST | `/ocabra/groups/{id}/members` | Anadir miembro |
-| DELETE | `/ocabra/groups/{id}/members/{user_id}` | Quitar miembro |
-| GET | `/ocabra/groups/{id}/models` | Modelos accesibles |
-| POST | `/ocabra/groups/{id}/models` | Dar acceso a modelo |
-| DELETE | `/ocabra/groups/{id}/models/{model_id}` | Quitar acceso |
-
-### TensorRT-LLM — Compilacion de engines
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/trtllm/compile` | Listar jobs de compilacion |
-| POST | `/ocabra/trtllm/compile` | Iniciar compilacion |
-| DELETE | `/ocabra/trtllm/compile/{job_id}` | Cancelar compilacion |
-| GET | `/ocabra/trtllm/compile/{job_id}/stream` | SSE de progreso |
-| DELETE | `/ocabra/trtllm/engines/{name}` | Eliminar engine compilado |
-| GET | `/ocabra/trtllm/estimate` | Estimar VRAM del engine |
-
-### Host — Info del servidor
-
-| Method | Endpoint | Descripcion |
-|--------|----------|-------------|
-| GET | `/ocabra/host/stats` | CPU, RAM, disco, uptime |
-
----
-
-## WebSocket
-
-```
-WS /ocabra/ws
-```
-
-Eventos emitidos (JSON):
-```json
-{"type": "gpu_stats",        "data": [GPUState, ...]}
-{"type": "model_event",      "data": {"event": "status_changed", "model_id": "...", "status": "..."}}
-{"type": "service_event",    "data": {"event": "...", "service_id": "...", "status": "..."}}
-{"type": "download_progress","data": {"job_id": "...", "pct": 0.5, "speed_mb_s": 120.0}}
-{"type": "system_alert",     "data": {"level": "error", "message": "..."}}
-```
-
----
-
-## Backends soportados
-
-| Backend | Tipo | Modelos | GPU |
-|---------|------|---------|-----|
-| **vllm** | LLM, Embeddings | HuggingFace transformers | Si |
-| **sglang** | LLM, Embeddings | HuggingFace transformers | Si |
-| **llama_cpp** | LLM, Embeddings | GGUF | CPU/GPU |
-| **bitnet** | LLM | BitNet GGUF (1.58-bit) | CPU |
-| **ollama** | LLM, Embeddings | Ollama registry | Externo |
-| **tensorrt_llm** | LLM | TRT-LLM engines | Si |
-| **whisper** | STT | faster-whisper, Whisper | Si |
-| **whisper_cpp** | STT | whisper.cpp (GGML, CPU) | No |
-| **vibeasr** | STT | VibeVoice-ASR-BitNet (ternario) | No |
-| **tts** | TTS | Kokoro, Bark, Qwen3-TTS | Si |
-| **chatterbox** | TTS | Chatterbox (voice clone) | Si |
-| **voxtral** | TTS | Voxtral (vllm-omni) | Si |
-| **diffusers** | Image | Stable Diffusion, FLUX | Si |
-| **acestep** | Music | ACE-Step | Si |
-
----
-
-## Codigos de error
-
-| HTTP | Significado |
-|------|-------------|
-| 400 | Request invalido (parametros faltantes, JSON malformado) |
-| 401 | No autenticado |
-| 403 | Sin permisos (rol insuficiente o modelo no accesible) |
-| 404 | Modelo/perfil/recurso no encontrado |
-| 422 | Validacion fallida (Pydantic) |
-| 429 | Worker al limite de concurrencia (`model_at_capacity`) |
-| 500 | Error interno del servidor |
-| 503 | Modelo no cargado / worker no disponible / registro aun no listo |
-
-**`Retry-After`**: las condiciones transitorias (worker cargando o aun no
-disponible, registro interno no listo tras el arranque, circuit breaker,
-modo mantenimiento, `model_at_capacity`) incluyen un header `Retry-After`
-(segundos) indicando cuanto esperar antes de reintentar. Las condiciones
-permanentes/de configuracion (router sin destino valido, federacion
-desactivada, o un modelo que quedo en estado `error` tras un intento de
-recarga) **no** lo incluyen — reintentar no las resuelve, hace falta
-corregir la configuracion o que alguien revise el worker.
-
-Formato de error OpenAI-compatible (`/v1/*`):
-```json
-{
-  "error": {
-    "message": "Model 'xxx' not found",
-    "type": "invalid_request_error",
-    "param": "model",
-    "code": "model_not_found"
-  }
-}
-```
-
-Formato de error interno (`/ocabra/*`):
-```json
-{
-  "detail": "Model 'xxx' not found"
-}
-```
+| GET | `/openapi.json` | Esquema OpenAPI de la API pública | pública |
+| GET | `/docs` | Swagger UI | pública |
+| GET | `/docs/oauth2-redirect` | Redirección OAuth2 de Swagger UI | pública |
+| GET | `/redoc` | ReDoc | pública |
+| GET | `/health` | Quick liveness check. Always returns 200 if the process is running | pública |
+| GET | `/version` | Version of the running server, for clients that probe `/version` | pública |
+| GET | `/ready` | Readiness check. Returns 200 only when all dependencies are healthy | pública |
+| GET | `/docs/{pagina}.md` | Devuelve la fuente en Markdown de una página de documentación | pública |
+| GET | `/docs/{pagina}` | Renderiza una página de documentación en prosa como HTML | pública |
+| GET | `/metrics` | Prometheus metrics | pública |
+
+## OpenAI — modelos, texto y embeddings (`/v1`)
+
+`model` acepta un `profile_id` (recomendado), un router `recomendado-*`, un agente `agent/<slug>` o, mientras `LEGACY_MODEL_ID_FALLBACK` siga activo, un model_id canónico.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/v1/models` | List models | clave |
+| GET | `/v1/models/{model_id:path}` | Retrieve a model | clave |
+| POST | `/v1/chat/completions` | Create chat completion | clave |
+| POST | `/v1/completions` | Create text completion | clave |
+| POST | `/v1/embeddings` | Create embeddings | clave |
+| POST | `/v1/pooling` | Run pooling on a model | clave |
+| POST | `/v1/score` | Score text pairs | clave |
+| POST | `/v1/rerank` | Rerank documents for a query | clave |
+| POST | `/v1/classify` | Classify inputs with a classification model | clave |
+
+## OpenAI — imagen y audio (`/v1`)
+
+`/v1/images/files/{name}` es pública a propósito: es la URL que devuelve `response_format=url`, con nombre aleatorio y caducidad (`IMAGE_URL_TTL_SECONDS`).
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| POST | `/v1/images/generations` | Create image | clave |
+| POST | `/v1/images/edits` | Edit image | clave |
+| GET | `/v1/images/files/{name}` | Retrieve a generated image | pública |
+| POST | `/v1/audio/transcriptions` | Transcribe audio | clave |
+| GET | `/v1/audio/voices` | List TTS voices for a model | clave |
+| POST | `/v1/audio/speech` | Generate speech | clave |
+| POST | `/v1/audio/generate` | Generate music | clave |
+
+## OpenAI — Realtime (`/v1/realtime`)
+
+WebSocket con el protocolo de eventos de OpenAI Realtime. La clave va en `Authorization: Bearer` o en el subprotocolo que usa OpenAI.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| WS | `/v1/realtime` | OpenAI Realtime API WebSocket endpoint | clave |
+
+## OpenAI — Files y Batches (`/v1`)
+
+Desactivados en modo de privacidad `zero_data`. Qué endpoints admite un lote: tabla de Batches en `/docs` (`ALLOWED_ENDPOINTS` en `api/openai/batches.py`).
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| POST | `/v1/files` | Upload a file | clave |
+| GET | `/v1/files` | List uploaded files | clave |
+| GET | `/v1/files/{file_id}` | Retrieve file metadata | clave |
+| GET | `/v1/files/{file_id}/content` | Download file content | clave |
+| DELETE | `/v1/files/{file_id}` | Delete a file | clave |
+| POST | `/v1/batches` | Create a batch | clave |
+| GET | `/v1/batches/{batch_id}` | Retrieve a batch | clave |
+| GET | `/v1/batches` | List batches | clave |
+| POST | `/v1/batches/{batch_id}/cancel` | Cancel a batch | clave |
+
+## Ollama (`/api`)
+
+Formato de Ollama sobre cualquier backend de oCabra, no solo sobre el daemon Ollama.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/api/tags` | List models | clave |
+| GET | `/api/ps` | List running models | clave |
+| POST | `/api/show` | Show model details | clave |
+| POST | `/api/pull` | Pull a model | clave · `model_manager` |
+| POST | `/api/generate` | Generate completion | clave |
+| POST | `/api/chat` | Create chat completion | clave |
+| POST | `/api/embeddings` | Create embeddings (legacy) | clave |
+| POST | `/api/embed` | Create embeddings | clave |
+| DELETE | `/api/delete` | Delete a model | clave · `model_manager` |
+| GET | `/api/version` | Server version (Ollama-compatible) | pública |
+
+## Autenticación, usuarios y grupos
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| POST | `/ocabra/auth/login` | Login | pública |
+| POST | `/ocabra/auth/logout` | Logout | pública |
+| GET | `/ocabra/auth/me` | Get current user | `user` |
+| PUT | `/ocabra/auth/password` | Change own password | `user` |
+| GET | `/ocabra/auth/keys` | List own API keys | `user` |
+| POST | `/ocabra/auth/keys` | Create API key | `user` |
+| DELETE | `/ocabra/auth/keys/revoked` | Delete own revoked API keys | `user` |
+| DELETE | `/ocabra/auth/keys/{key_id}` | Revoke API key | `user` |
+| GET | `/ocabra/users` | List all users | `system_admin` |
+| POST | `/ocabra/users` | Create a new user | `system_admin` |
+| GET | `/ocabra/users/{user_id}` | Get a user by ID | `system_admin` |
+| PATCH | `/ocabra/users/{user_id}` | Update a user's role, active status, or email | `system_admin` |
+| DELETE | `/ocabra/users/{user_id}` | Delete a user | `system_admin` |
+| POST | `/ocabra/users/{user_id}/reset-password` | Reset a user's password | `system_admin` |
+| GET | `/ocabra/users/{user_id}/keys` | List all API keys for a user (without the raw key value) | `system_admin` |
+| GET | `/ocabra/api-keys` | List every API key across all users, with owner info | `system_admin` |
+| DELETE | `/ocabra/api-keys/revoked` | Permanently delete every revoked API key across all users | `system_admin` |
+| POST | `/ocabra/api-keys/reassign` | Reassign one or more API keys to a different owner (bulk action) | `system_admin` |
+| DELETE | `/ocabra/users/{user_id}/keys/{key_id}` | Revoke a specific API key belonging to a user | `system_admin` |
+| POST | `/ocabra/users/{user_id}/keys` | Create an API key for a specific user (admin only) | `system_admin` |
+| GET | `/ocabra/groups` | List all groups with member and model counts | `system_admin` |
+| POST | `/ocabra/groups` | Create a new group | `system_admin` |
+| PATCH | `/ocabra/groups/{group_id}` | Update a group's name or description | `system_admin` |
+| DELETE | `/ocabra/groups/{group_id}` | Delete a group | `system_admin` |
+| GET | `/ocabra/groups/{group_id}/models` | List all model IDs assigned to a group | `system_admin` |
+| POST | `/ocabra/groups/{group_id}/models` | Add a model to a group | `system_admin` |
+| DELETE | `/ocabra/groups/{group_id}/models/{model_id:path}` | Remove a model from a group | `system_admin` |
+| GET | `/ocabra/groups/{group_id}/members` | List all members of a group | `system_admin` |
+| POST | `/ocabra/groups/{group_id}/members` | Add a user to a group | `system_admin` |
+| DELETE | `/ocabra/groups/{group_id}/members/{user_id}` | Remove a user from a group | `system_admin` |
+
+## Modelos
+
+`{model_id:path}` admite `/` (ids como `llama_cpp/gemma4-26b`). `POST …/context` cambia en caliente el contexto de un worker llama.cpp (solo el fork `llamacpp_mks`, con `LLAMA_CPP_LIVE_CONTEXT_ENABLED`). Los modelos lógicos agrupan un mismo fichero servido por varios backends.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/models` | List all models | `user` |
+| GET | `/ocabra/models/storage` | Get models storage usage | `user` |
+| GET | `/ocabra/models/activity` | Per-model in-flight activity | `user` |
+| GET | `/ocabra/models/ollama-runtime` | Ollama runtime placement | `user` |
+| GET | `/ocabra/models/{model_id:path}/status` | Model load status | `user` |
+| GET | `/ocabra/models/{model_id:path}/capacity` | Model VRAM capacity plan | `user` |
+| GET | `/ocabra/models/{model_id:path}/speculative-candidates` | List speculative-decoding draft candidates | `user` |
+| GET | `/ocabra/models/{model_id:path}/insights` | Measured behaviour of a model, for the model editor | `user` |
+| GET | `/ocabra/models/{model_id:path}/config-schema` | Editable options of a model's backend | `user` |
+| GET | `/ocabra/models/{model_id:path}` | Get model state | `user` |
+| POST | `/ocabra/models` | Register a new model | `model_manager` |
+| POST | `/ocabra/models/{model_id:path}/load` | Load model onto GPU | `user` |
+| POST | `/ocabra/models/{model_id:path}/smoke-test` | Load a model and send it one minimal request | `model_manager` |
+| POST | `/ocabra/models/{model_id:path}/unload` | Unload model from GPU | `model_manager` |
+| POST | `/ocabra/models/{model_id:path}/cancel-load` | Cancel an in-progress model load | `model_manager` |
+| POST | `/ocabra/models/{model_id:path}/downsize` | Restore a multi-GPU runtime to its one-GPU default | `model_manager` |
+| POST | `/ocabra/models/{model_id:path}/context` | Change a loaded llama.cpp worker's context in place | `model_manager` |
+| POST | `/ocabra/models/{model_id:path}/maintenance` | Pause or resume new requests for a model | `model_manager` |
+| PATCH | `/ocabra/models/{model_id:path}` | Update model configuration | `model_manager` |
+| POST | `/ocabra/models/{model_id:path}/preview` | Preview a draft configuration without saving or loading | `user` |
+| POST | `/ocabra/models/{model_id:path}/auto-setup` | Plan (and optionally write) runtime presets for the chosen devices | `model_manager` |
+| POST | `/ocabra/models/{model_id:path}/memory-estimate` | Estimate model memory requirements | `user` |
+| POST | `/ocabra/models/refresh-tokenizer-fingerprints` | Backfill llama.cpp tokenizer fingerprints | `model_manager` |
+| DELETE | `/ocabra/models/{model_id:path}` | Delete a model | `model_manager` |
+| POST | `/ocabra/models/{model_id:path}/update` | Re-pull a single installed model | `model_manager` |
+| POST | `/ocabra/models/refresh-metadata` | Refresh registry metadata for installed models | `model_manager` |
+| POST | `/ocabra/models/update-all` | Re-pull every updatable model | `model_manager` |
+| GET | `/ocabra/logical-models` | List logical models | `model_manager` |
+| GET | `/ocabra/logical-models/{model_key:path}/compatibility` | Backends that can serve a model's file | `model_manager` |
+| POST | `/ocabra/logical-models/{model_key:path}/deployments` | Add a deployment (backend) to a model | `model_manager` |
+| DELETE | `/ocabra/logical-models/{model_key:path}/deployments/{backend}` | Remove a deployment from a model | `model_manager` |
+| GET | `/ocabra/logical-models/{model_key:path}` | Get a logical model | `model_manager` |
+| PATCH | `/ocabra/logical-models/{model_key:path}` | Update a logical model (default backend, display name) | `model_manager` |
+
+## Perfiles, presets y alias de compatibilidad
+
+Los presets (`runtime-presets`) son la escalera de contexto/colocación de un perfil. Los mapas de compatibilidad traducen nombres de OpenAI (`tts-1` + voz, `gpt-image-1`) a perfiles propios.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/models/{model_id:path}/profiles` | List profiles for a model | `user` |
+| GET | `/ocabra/profiles` | List all profiles | `user` |
+| POST | `/ocabra/models/{model_id:path}/profiles` | Create a profile for a model | `model_manager` |
+| GET | `/ocabra/profiles/{profile_id}/runtime-presets` | List profile runtime presets | `user` |
+| GET | `/ocabra/profiles/{profile_id}/runtime-presets/resolved` | Resolve profile runtime preset capacities | `user` |
+| POST | `/ocabra/profiles/{profile_id}/runtime-presets/preview` | Preview a draft runtime preset's capacity | `user` |
+| POST | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}/context-probe` | Measure the largest context a runtime preset fits | `model_manager` |
+| GET | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}/context-probe` | Progress and result of the last context probe of a preset | `model_manager` |
+| POST | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}/context-probe/apply` | Apply the last context probe to the preset | `model_manager` |
+| POST | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}/benchmark` | Measure one runtime preset | `model_manager` |
+| POST | `/ocabra/profiles/{profile_id}/runtime-presets` | Create profile runtime preset | `model_manager` |
+| PATCH | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}` | Update profile runtime preset | `model_manager` |
+| DELETE | `/ocabra/profiles/{profile_id}/runtime-presets/{preset_key}` | Delete profile runtime preset | `model_manager` |
+| POST | `/ocabra/profiles/{profile_id}/aliases` | Create hidden profile alias | `model_manager` |
+| DELETE | `/ocabra/profiles/{profile_id}/aliases/{alias_id:path}` | Delete profile alias | `model_manager` |
+| POST | `/ocabra/profiles` | Create a router profile | `model_manager` |
+| GET | `/ocabra/profiles/{profile_id}` | Get profile detail | `user` |
+| PATCH | `/ocabra/profiles/{profile_id}` | Update a profile | `model_manager` |
+| POST | `/ocabra/profiles/{profile_id}/rename` | Rename a profile | `model_manager` |
+| POST | `/ocabra/profiles/{profile_id}/clone` | Clone a profile | `model_manager` |
+| DELETE | `/ocabra/profiles/{profile_id}` | Delete a profile | `model_manager` |
+| POST | `/ocabra/profiles/{profile_id}/assets` | Upload an asset to a profile | `model_manager` |
+| DELETE | `/ocabra/profiles/{profile_id}/assets/{asset_key}` | Delete a profile asset | `model_manager` |
+| GET | `/ocabra/openai-tts-voice-map` | List OpenAI TTS voice-name compatibility pins | `model_manager` |
+| PUT | `/ocabra/openai-tts-voice-map/{openai_model}/{voice_name}` | Pin an OpenAI (model, voice) pair to one of oCabra's own profiles | `model_manager` |
+| DELETE | `/ocabra/openai-tts-voice-map/{openai_model}/{voice_name}` | Remove an OpenAI TTS voice-name compatibility pin | `model_manager` |
+| GET | `/ocabra/openai-image-model-map` | List OpenAI image model-name compatibility pins | `model_manager` |
+| PUT | `/ocabra/openai-image-model-map/{openai_model}` | Pin an OpenAI image model name to one of oCabra's own profiles | `model_manager` |
+| DELETE | `/ocabra/openai-image-model-map/{openai_model}` | Remove an OpenAI image model-name compatibility pin | `model_manager` |
+
+## Registro y descargas
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/registry/hf` | Search HuggingFace models | `model_manager` |
+| GET | `/ocabra/registry/hf/search` | Search HuggingFace models | `model_manager` |
+| GET | `/ocabra/registry/hf/{repo_id:path}/variants` | List HuggingFace model variants | `model_manager` |
+| GET | `/ocabra/registry/hf/{repo_id:path}` | Get HuggingFace model detail | `model_manager` |
+| GET | `/ocabra/registry/bitnet` | Search BitNet models | `model_manager` |
+| GET | `/ocabra/registry/bitnet/search` | Search BitNet models | `model_manager` |
+| GET | `/ocabra/registry/bitnet/{repo_id:path}/variants` | List BitNet model variants | `model_manager` |
+| GET | `/ocabra/registry/ollama` | Search Ollama models | `model_manager` |
+| GET | `/ocabra/registry/ollama/search` | Search Ollama models | `model_manager` |
+| GET | `/ocabra/registry/ollama/{model_name}/variants` | List Ollama model variants | `model_manager` |
+| GET | `/ocabra/registry/local` | List local models | `model_manager` |
+| POST | `/ocabra/registry/local/register` | Register an already-downloaded model under a chosen backend | `model_manager` |
+| GET | `/ocabra/downloads` | List download jobs | `user` |
+| POST | `/ocabra/downloads` | Enqueue a download | `model_manager` |
+| GET | `/ocabra/downloads/{job_id}` | Get download job | `model_manager` |
+| DELETE | `/ocabra/downloads` | Clear download history | `model_manager` |
+| DELETE | `/ocabra/downloads/{job_id}` | Cancel a download | `model_manager` |
+| GET | `/ocabra/downloads/{job_id}/stream` | Stream download progress | `model_manager` |
+
+## Backends
+
+Instalación por backend en `/data/backends`, desde el registro OCI o desde fuente; `GET …/install` es el mismo flujo como SSE para `EventSource`.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/backends` | List modular backends | `model_manager` |
+| GET | `/ocabra/backends/{backend_type}` | Get backend state | `model_manager` |
+| POST | `/ocabra/backends/{backend_type}/install` | Install a backend | `model_manager` |
+| GET | `/ocabra/backends/{backend_type}/install` | Install a backend (GET alias for EventSource) | `model_manager` |
+| POST | `/ocabra/backends/{backend_type}/uninstall` | Uninstall a backend | `model_manager` |
+| GET | `/ocabra/backends/{backend_type}/logs` | Fetch install logs | `model_manager` |
+| GET | `/ocabra/backends/{backend_type}/published` | Prebuilt image on offer for a backend | `model_manager` |
+| POST | `/ocabra/trtllm/compile` | Submit TRT-LLM compilation job | `model_manager` |
+| GET | `/ocabra/trtllm/compile` | List TRT-LLM compilation jobs | `model_manager` |
+| GET | `/ocabra/trtllm/compile/{job_id}/stream` | Stream compilation progress | `model_manager` |
+| DELETE | `/ocabra/trtllm/compile/{job_id}` | Cancel compilation job | `model_manager` |
+| DELETE | `/ocabra/trtllm/engines/{engine_name}` | Delete TRT-LLM engine | `model_manager` |
+| GET | `/ocabra/trtllm/estimate` | Estimate TRT-LLM VRAM requirements | `user` |
+
+## Daemon Ollama
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/ollama/version` | Get Ollama daemon version | `model_manager` |
+| GET | `/ocabra/ollama/server/update` | Get Ollama server update status | `model_manager` |
+| POST | `/ocabra/ollama/server/update` | Update the Ollama daemon container | `system_admin` |
+| GET | `/ocabra/ollama/server/settings` | Global settings of the shared Ollama server | `user` |
+| POST | `/ocabra/ollama/server/apply-settings` | Apply the global Ollama settings (recreates the daemon) | `system_admin` |
+
+## Servicios interactivos
+
+TRELLIS.2, ComfyUI, A1111, ACE-Step y Unsloth Studio. Los propios servicios llaman a `touch`, `runtime` y `ensure_vram` con `GATEWAY_SERVICE_TOKEN`.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/services` | List all services | `user` |
+| GET | `/ocabra/services/{service_id}` | Get service state | `model_manager` |
+| PATCH | `/ocabra/services/{service_id}` | Enable or disable a service | `model_manager` |
+| POST | `/ocabra/services/{service_id}/refresh` | Refresh service state | `model_manager` |
+| PATCH | `/ocabra/services/{service_id}/runtime` | Update service runtime state | `model_manager` |
+| POST | `/ocabra/services/{service_id}/touch` | Touch service activity | `model_manager` |
+| POST | `/ocabra/services/{service_id}/start` | Start a service | `model_manager` |
+| GET | `/ocabra/services/{service_id}/generations` | List service generations | `model_manager` |
+| POST | `/ocabra/services/{service_id}/ensure_vram` | Ensure free VRAM on a service's preferred GPU | `model_manager` |
+| POST | `/ocabra/services/{service_id}/unload` | Unload service runtime | `model_manager` |
+
+## GPUs, host, estado, sesiones y vídeo
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/gpus` | List all GPUs | `user` |
+| GET | `/ocabra/gpus/{index}` | Get GPU state | `user` |
+| GET | `/ocabra/gpus/{index}/stats` | Get GPU historical stats | `user` |
+| GET | `/ocabra/gpus/{index}/power-limits` | Get GPU power limit constraints | `user` |
+| PATCH | `/ocabra/gpus/{index}/power` | Set GPU power limit and persistence mode | `system_admin` |
+| GET | `/ocabra/status` | Server load snapshot | `user` |
+| GET | `/ocabra/host/stats` | Return host CPU and RAM stats. Cached for 2 seconds | `user` |
+| POST | `/ocabra/estimate` | Estimate how long an inference request will take | `user` |
+| GET | `/ocabra/sessions` | List live Realtime sessions | `system_admin` |
+| POST | `/ocabra/sessions/{session_id}/kill` | Force-close a Realtime session | `system_admin` |
+| POST | `/ocabra/video/upscale` | Upscale a video segment | `user` |
+
+## Estadísticas
+
+Las rutas `my*` devuelven solo lo del propio usuario; las agregadas por usuario, grupo o clave exigen `model_manager`.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/stats/requests` | Request statistics | `user` |
+| GET | `/ocabra/stats/gpu` | GPU usage statistics | `user` |
+| GET | `/ocabra/stats/energy` | Energy statistics | `user` |
+| GET | `/ocabra/stats/performance` | Performance statistics | `model_manager` |
+| GET | `/ocabra/stats/tokens` | Token statistics | `user` |
+| GET | `/ocabra/stats/overview` | Overview statistics | `model_manager` |
+| GET | `/ocabra/stats/recent` | Recent requests log | `user` |
+| POST | `/ocabra/stats/requests/{request_id}/cancel` | Cancel an in-flight request | `user` |
+| GET | `/ocabra/stats/my-recent` | Own recent requests log | `user` |
+| GET | `/ocabra/stats/by-user` | Stats aggregated by user | `model_manager` |
+| GET | `/ocabra/stats/by-group` | Stats aggregated by group | `model_manager` |
+| GET | `/ocabra/stats/batch-vs-interactive` | Batches API vs. direct request volume | `model_manager` |
+| GET | `/ocabra/stats/batch-priority-status` | Batch preemption/cooldown live status | `model_manager` |
+| GET | `/ocabra/stats/my` | Own user stats | `user` |
+| GET | `/ocabra/stats/my-group` | Own group stats | `user` |
+| GET | `/ocabra/stats/by-api-key` | Stats aggregated by API key | `model_manager` |
+| GET | `/ocabra/stats/user/{identifier}/detail` | Detailed stats for a user | `model_manager` |
+| GET | `/ocabra/stats/federation` | Federation statistics | `model_manager` |
+| GET | `/ocabra/stats/routing` | Router redirect distribution | `user` |
+| GET | `/ocabra/stats/server-power` | Current server power readings | `user` |
+| GET | `/ocabra/stats/by-agent` | Agent-aggregated statistics | `user` |
+| GET | `/ocabra/stats/tool-calls` | Recent tool_call_stats rows | `user` |
+
+## Agentes y MCP
+
+Un agente se usa como modelo `agent/<slug>` en `/v1/chat/completions`.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/agents` | List agents accessible to the caller | `user` |
+| POST | `/ocabra/agents` | Create an agent | `model_manager` |
+| GET | `/ocabra/agents/{slug}` | Retrieve an agent | `user` |
+| PATCH | `/ocabra/agents/{slug}` | Update an agent | `model_manager` |
+| DELETE | `/ocabra/agents/{slug}` | Delete an agent | `model_manager` |
+| POST | `/ocabra/agents/{slug}/test` | Dry-run an agent | `model_manager` |
+| GET | `/ocabra/mcp-servers` | List MCP servers | `model_manager` |
+| POST | `/ocabra/mcp-servers` | Register a new MCP server | `model_manager` |
+| GET | `/ocabra/mcp-servers/{server_id}` | Retrieve an MCP server | `model_manager` |
+| PATCH | `/ocabra/mcp-servers/{server_id}` | Update an MCP server | `model_manager` |
+| DELETE | `/ocabra/mcp-servers/{server_id}` | Delete an MCP server | `model_manager` |
+| POST | `/ocabra/mcp-servers/{server_id}/refresh` | Refresh tools/list for an MCP server | `model_manager` |
+| GET | `/ocabra/mcp-servers/{server_id}/tools` | List cached tools for an MCP server | `model_manager` |
+| POST | `/ocabra/mcp-servers/{server_id}/test` | Test connectivity to an MCP server | `model_manager` |
+| POST | `/ocabra/mcp-servers/test-config` | Test a candidate MCP server config without persisting it | `model_manager` |
+
+## Configuración y actualización
+
+`PATCH /ocabra/config` guarda en `server_config`, que se aplica en cada arranque y pisa `.env`.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/config` | Get server configuration | `system_admin` |
+| PATCH | `/ocabra/config` | Patch server configuration | `system_admin` |
+| GET | `/ocabra/system/update` | Version, newest release and update policy | `system_admin` |
+| POST | `/ocabra/system/update/check` | Look for a new release now | `system_admin` |
+| POST | `/ocabra/system/update/apply` | Update this node to a release | `system_admin` |
+| PATCH | `/ocabra/system/update/policy` | Set this node's update policy | `system_admin` |
+
+## Federación
+
+`join-requests` (POST y su `status`) son públicas para que un nodo sin cuenta pueda pedir unirse; la aceptación es siempre manual o con invitación. `…/proxy/{path}` reenvía el panel de un peer.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/federation/heartbeat` | Federation heartbeat | `user` |
+| GET | `/ocabra/federation/peers` | List federation peers | `user` |
+| POST | `/ocabra/federation/peers` | Add federation peer | `system_admin` |
+| PATCH | `/ocabra/federation/peers/{peer_id}` | Update federation peer | `system_admin` |
+| POST | `/ocabra/federation/peers/{peer_id}/rotate-token` | Rotate tunnel token | `system_admin` |
+| WS | `/ocabra/federation/tunnel` | Reverse tunnel endpoint: a tunnel-mode peer dials in and serves our requests | token del túnel |
+| DELETE | `/ocabra/federation/peers/{peer_id}` | Remove federation peer | `system_admin` |
+| POST | `/ocabra/federation/peers/{peer_id}/test` | Test peer connection | `system_admin` |
+| POST | `/ocabra/federation/peers/{peer_id}/models/{model_id:path}/load` | Remote model load | `system_admin` |
+| POST | `/ocabra/federation/peers/{peer_id}/models/{model_id:path}/unload` | Remote model unload | `system_admin` |
+| POST | `/ocabra/federation/peers/{peer_id}/downloads` | Remote model download | `system_admin` |
+| GET | `/ocabra/federation/peers/{peer_id}/downloads/{job_id}` | Remote download status | `system_admin` |
+| GET | `/ocabra/federation/peers/{peer_id}/gpus` | Remote GPU monitoring | `system_admin` |
+| GET | `/ocabra/federation/node` | This node's federation identity | `system_admin` |
+| POST | `/ocabra/federation/join-requests` | Ask to join this node's federation | pública |
+| GET | `/ocabra/federation/join-requests/{request_id}/status` | Join request status (for the requesting node) | pública |
+| GET | `/ocabra/federation/join-requests` | List join requests | `system_admin` |
+| POST | `/ocabra/federation/join-requests/{request_id}/accept` | Accept a join request | `system_admin` |
+| POST | `/ocabra/federation/join-requests/{request_id}/deny` | Deny a join request | `system_admin` |
+| GET | `/ocabra/federation/invites` | List invites | `system_admin` |
+| POST | `/ocabra/federation/invites` | Create invite | `system_admin` |
+| DELETE | `/ocabra/federation/invites/{invite_id}` | Revoke invite | `system_admin` |
+| POST | `/ocabra/federation/join` | Join another node's federation | `system_admin` |
+| POST | `/ocabra/federation/peers/{peer_id}/join-check` | Re-check a pending join request | `system_admin` |
+| GET, POST, PUT, PATCH, DELETE | `/ocabra/federation/peers/{peer_id}/proxy/{path:path}` | Remote panel proxy | `system_admin` |
+| GET | `/ocabra/federation/rules` | Node rules for peers in rules mode | `system_admin` |
+| PUT | `/ocabra/federation/rules` | Set node rules for peers in rules mode | `system_admin` |
+| GET | `/ocabra/federation/peers/{peer_id}/rules-usage` | What a peer in rules mode has used | `system_admin` |
+| GET | `/ocabra/federation/strategies` | Per-model federation strategies | `model_manager` |
+| PUT | `/ocabra/federation/strategies` | Set a model's federation strategy | `model_manager` |
+
+## Nube (RunPod)
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/cloud/runpod` | RunPod configuration | `system_admin` |
+| PUT | `/ocabra/cloud/runpod` | Update RunPod configuration | `system_admin` |
+| GET | `/ocabra/cloud/runpod/gpu-types` | RunPod GPU catalog | `system_admin` |
+| GET | `/ocabra/cloud/nodes` | Cloud nodes | `system_admin` |
+| POST | `/ocabra/cloud/nodes` | Launch a cloud node | `system_admin` |
+| DELETE | `/ocabra/cloud/nodes/{node_id}` | Terminate a cloud node | `system_admin` |
+| POST | `/ocabra/cloud/nodes/{node_id}/update-image` | Restart a cloud node on another ocabra-node image | `system_admin` |
+| POST | `/ocabra/cloud/orphans/{pod_id}/terminate` | Terminate an orphan pod | `system_admin` |
+| GET | `/ocabra/cloud/replicable-models` | Models a cloud node can carry | `system_admin` |
+| POST | `/ocabra/cloud/nodes/{node_id}/models` | Add models to a running cloud node | `system_admin` |
+| GET | `/ocabra/cloud/recipes` | Models captured from earlier cloud nodes | `system_admin` |
+| POST | `/ocabra/cloud/recipes` | Add a model for cloud nodes from Hugging Face or Ollama | `system_admin` |
+| PATCH | `/ocabra/cloud/recipes/{recipe_id}` | Change a model recipe | `system_admin` |
+| DELETE | `/ocabra/cloud/recipes/{recipe_id}` | Forget a model recipe | `system_admin` |
+| GET | `/ocabra/cloud/volumes` | Network volumes | `system_admin` |
+| GET | `/ocabra/cloud/datacenters` | Data centers for volumes | `system_admin` |
+| POST | `/ocabra/cloud/volumes` | Create a network volume | `system_admin` |
+| PATCH | `/ocabra/cloud/volumes/{volume_id}` | Grow a network volume | `system_admin` |
+| DELETE | `/ocabra/cloud/volumes/{volume_id}` | Delete a network volume | `system_admin` |
+
+## Eventos en tiempo real
+
+WebSocket del panel: exige la cookie `ocabra_session` y mismo origen. Tipos de evento: `docs/CONTRACTS.md` §5.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| WS | `/ocabra/ws` | Real-time event stream over WebSocket | cookie de sesión |
