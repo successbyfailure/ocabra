@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
-from starlette.websockets import WebSocketState
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from ocabra.core.background_tasks import spawn
 from ocabra.core.vad import SimpleVAD, VadEvent
@@ -94,6 +94,18 @@ _PARTIAL_STAGNANT_MAX = 100
 # any client message before probing/giving up. 300 s is comfortable for a
 # human conversation; a healthy client sends audio chunks every ~20 ms.
 _RECEIVE_IDLE_TIMEOUT_S = 300.0
+# WebSocket close code sent when an administrator ends the session
+# (``POST /ocabra/sessions/{id}/kill``). 4000-4999 is the application range.
+_ADMIN_CLOSE_CODE = 4001
+# Upper bound for each best-effort step of ``close()`` (error event, close
+# frame) so a half-dead socket cannot hold the admin request.
+_CLOSE_STEP_TIMEOUT_S = 2.0
+
+
+class RealtimeSessionClosed(WebSocketDisconnect):
+    """Raised out of ``RealtimeSession.run()`` when the server closed the
+    session itself (admin kill). Subclasses ``WebSocketDisconnect`` so the
+    endpoint treats it as an ordinary disconnect: same teardown, same stats."""
 
 
 def _common_prefix(a: list[str], b: list[str]) -> list[str]:
@@ -439,6 +451,11 @@ class RealtimeSession:
         # sets it right after construction.
         self._session_registry: Any | None = None
         self._cancel_event = asyncio.Event()
+        # Set by ``close()`` once the socket has been shut; the receive loop
+        # races it against the next client message so ``run()`` returns at
+        # once instead of waiting for a client that may never answer.
+        self._closed_event = asyncio.Event()
+        self._close_reason: str | None = None
         self._response_task: asyncio.Task[None] | None = None
         self._background_load_task: asyncio.Task[None] | None = None
         self._llm_ready = asyncio.Event()
@@ -498,6 +515,7 @@ class RealtimeSession:
                 workers_held=workers,
                 user_id=user_id,
                 api_key_name=api_key_name,
+                closer=self.close,
             )
         except Exception as exc:  # noqa: BLE001 — must not break Realtime
             logger.warning(
@@ -505,6 +523,80 @@ class RealtimeSession:
                 session_id=self._session_id,
                 error=str(exc),
             )
+
+    async def close(self, reason: str = "admin_kill") -> None:
+        """End the session from the server side (admin kill). Idempotent.
+
+        Same teardown a client disconnect gets: cancel the in-flight response
+        and the partial-transcription loop, tell the client why, close the
+        WebSocket and wake the receive loop so ``run()`` raises
+        ``RealtimeSessionClosed``. Its ``finally`` unregisters the workers and
+        the endpoint's ``finally`` cancels any background model load, exactly
+        as when the client hangs up.
+        """
+        if self._close_reason is not None:
+            return
+        self._close_reason = reason
+        logger.info("realtime_session_closing", session_id=self._session_id, reason=reason)
+        try:
+            await self._cancel_current_response()
+            await self._stop_partial()
+            if self.ws.client_state == WebSocketState.CONNECTED:
+                with suppress(Exception):
+                    await asyncio.wait_for(
+                        self._send_event(
+                            "error",
+                            error={
+                                "type": "server_error",
+                                "code": "session_closed",
+                                "message": "The session was closed by an administrator.",
+                            },
+                        ),
+                        timeout=_CLOSE_STEP_TIMEOUT_S,
+                    )
+                with suppress(Exception):
+                    await asyncio.wait_for(
+                        self.ws.close(code=_ADMIN_CLOSE_CODE, reason="session closed"),
+                        timeout=_CLOSE_STEP_TIMEOUT_S,
+                    )
+        finally:
+            self._closed_event.set()
+
+    async def _receive_client_text(self) -> str:
+        """Next client message, or raise when the session ends without one.
+
+        Raises ``RealtimeSessionClosed`` once ``close()`` ran and
+        ``RuntimeError("WebSocket idle timeout")`` after
+        ``_RECEIVE_IDLE_TIMEOUT_S`` without messages — a half-closed TCP leaves
+        ``receive_text()`` blocked forever, and the caller's ``finally`` must
+        still release the workers.
+        """
+        if self._closed_event.is_set():
+            raise RealtimeSessionClosed(code=_ADMIN_CLOSE_CODE, reason=self._close_reason)
+        receive = asyncio.ensure_future(self.ws.receive_text())
+        closed = asyncio.ensure_future(self._closed_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {receive, closed},
+                timeout=_RECEIVE_IDLE_TIMEOUT_S,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (receive, closed):
+                if not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await task
+        if receive in done and not self._closed_event.is_set():
+            return receive.result()
+        if self._closed_event.is_set():
+            raise RealtimeSessionClosed(code=_ADMIN_CLOSE_CODE, reason=self._close_reason)
+        logger.info(
+            "realtime_session_idle_timeout",
+            session_id=self._session_id,
+            timeout_s=_RECEIVE_IDLE_TIMEOUT_S,
+        )
+        raise RuntimeError("WebSocket idle timeout")
 
     async def _heartbeat_session(self) -> None:
         """Refresh the session's last_activity in the registry. Called from
@@ -691,23 +783,9 @@ class RealtimeSession:
                 self._stt_ready.set()
             try:
                 while True:
-                    # Idle timeout — a half-closed TCP (client crashed, network
-                    # dropped) leaves ``receive_text()`` blocked forever and
-                    # background tasks pegging the whisper worker on a stale
-                    # buffer. Treat ``asyncio.TimeoutError`` here as a
-                    # disconnect so the outer finally clean-up runs.
-                    try:
-                        raw = await asyncio.wait_for(
-                            self.ws.receive_text(),
-                            timeout=_RECEIVE_IDLE_TIMEOUT_S,
-                        )
-                    except TimeoutError as exc:
-                        logger.info(
-                            "realtime_session_idle_timeout",
-                            session_id=self._session_id,
-                            timeout_s=_RECEIVE_IDLE_TIMEOUT_S,
-                        )
-                        raise RuntimeError("WebSocket idle timeout") from exc
+                    # Idle timeout / admin close — see _receive_client_text:
+                    # both end the loop so the outer finally clean-up runs.
+                    raw = await self._receive_client_text()
                     try:
                         message = json.loads(raw)
                     except json.JSONDecodeError:
@@ -763,19 +841,8 @@ class RealtimeSession:
 
         try:
             while True:
-                # Idle timeout — see transcription-only path above.
-                try:
-                    raw = await asyncio.wait_for(
-                        self.ws.receive_text(),
-                        timeout=_RECEIVE_IDLE_TIMEOUT_S,
-                    )
-                except TimeoutError as exc:
-                    logger.info(
-                        "realtime_session_idle_timeout",
-                        session_id=self._session_id,
-                        timeout_s=_RECEIVE_IDLE_TIMEOUT_S,
-                    )
-                    raise RuntimeError("WebSocket idle timeout") from exc
+                # Idle timeout / admin close — see _receive_client_text.
+                raw = await self._receive_client_text()
                 try:
                     message = json.loads(raw)
                 except json.JSONDecodeError:

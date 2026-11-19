@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -97,6 +98,12 @@ class SessionInfo:
 
 _REDIS_KEY_PREFIX = "ocabra:realtime_session:"
 
+# How long ``close()`` waits for a session's own teardown (cancel the response,
+# send the close frame) before giving up and just dropping the registry entry.
+_CLOSE_TIMEOUT_S = 10.0
+
+SessionCloser = Callable[[str], Awaitable[None]]
+
 
 class SessionRegistry:
     """Live registry of Realtime sessions and the workers they hold."""
@@ -107,6 +114,11 @@ class SessionRegistry:
         # by multiple sessions concurrently (e.g. two admins running Realtime
         # against the same LLM); the set grows/shrinks as sessions attach.
         self._by_worker: dict[str, set[str]] = {}
+        # Live sessions owned by THIS process register a closer: the callable
+        # that actually tears the WebSocket down (``RealtimeSession.close``).
+        # Entries rehydrated from Redis have none — their socket lived in a
+        # previous process and is already gone.
+        self._closers: dict[str, SessionCloser] = {}
         self._lock = asyncio.Lock()
         self._sweep_task: asyncio.Task | None = None
 
@@ -147,9 +159,7 @@ class SessionRegistry:
 
     def sessions_holding(self, worker_key: str) -> list[SessionInfo]:
         return [
-            self._by_id[sid]
-            for sid in self._by_worker.get(worker_key, set())
-            if sid in self._by_id
+            self._by_id[sid] for sid in self._by_worker.get(worker_key, set()) if sid in self._by_id
         ]
 
     def list_sessions(self) -> list[SessionInfo]:
@@ -167,10 +177,18 @@ class SessionRegistry:
         *,
         user_id: uuid.UUID | None = None,
         api_key_name: str | None = None,
+        closer: SessionCloser | None = None,
     ) -> SessionInfo:
         """Called by ``RealtimeSession`` at WebSocket accept time. Persists
-        to Redis so a restart can rehydrate."""
+        to Redis so a restart can rehydrate.
+
+        ``closer`` is what ``close()`` awaits to really end the session (close
+        the WebSocket, cancel its tasks); without one an admin kill can only
+        drop the registry entry.
+        """
         async with self._lock:
+            if closer is not None:
+                self._closers[session_id] = closer
             existing = self._by_id.get(session_id)
             info = SessionInfo(
                 session_id=session_id,
@@ -205,6 +223,7 @@ class SessionRegistry:
         """Called on WebSocket close or auto-sweep. Idempotent."""
         async with self._lock:
             info = self._by_id.pop(session_id, None)
+            self._closers.pop(session_id, None)
             if info is not None:
                 for worker_key in info.workers_held:
                     holders = self._by_worker.get(worker_key)
@@ -220,6 +239,36 @@ class SessionRegistry:
                 reason=reason,
                 duration_s=(datetime.now(UTC) - info.started_at).total_seconds(),
             )
+
+    async def close(self, session_id: str, *, reason: str = "admin_kill") -> bool:
+        """Really end a session: run its closer, then drop the entry.
+
+        The closer goes through the session's normal teardown (cancel the
+        in-flight response, close the WebSocket, let ``run()`` exit so its
+        ``finally`` unregisters and the endpoint cancels background loads),
+        so the workers are released exactly as on a client disconnect.
+
+        Returns ``True`` when a live connection was closed, ``False`` when the
+        session had no closer in this process (rehydrated from Redis, or the
+        closer failed / timed out) and only the registry entry was dropped.
+        """
+        closer = self._closers.get(session_id)
+        closed = False
+        if closer is not None:
+            try:
+                await asyncio.wait_for(closer(reason), timeout=_CLOSE_TIMEOUT_S)
+                closed = True
+            except Exception as exc:  # noqa: BLE001 — still drop the entry below
+                logger.warning(
+                    "session_close_failed",
+                    session_id=session_id,
+                    reason=reason,
+                    error=str(exc) or type(exc).__name__,
+                )
+        # Idempotent: the session's own teardown has normally unregistered
+        # already; this covers closer-less entries and a stuck teardown.
+        await self.unregister(session_id, reason=reason)
+        return closed
 
     # ── Background sweeper ───────────────────────────────────
 
@@ -257,11 +306,7 @@ class SessionRegistry:
 
     async def _sweep_once(self) -> None:
         max_idle = int(settings.session_max_idle_s)
-        stale = [
-            sid
-            for sid, info in list(self._by_id.items())
-            if info.is_zombie(max_idle)
-        ]
+        stale = [sid for sid, info in list(self._by_id.items()) if info.is_zombie(max_idle)]
         for sid in stale:
             await self.unregister(sid, reason="zombie_auto_kill")
 

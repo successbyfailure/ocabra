@@ -6,8 +6,9 @@ Backs the "Sessions" admin page in the UI. Two operations:
 
     GET  /ocabra/sessions          — enumerate active sessions with
                                      workers_held, durations, activity.
-    POST /ocabra/sessions/{id}/kill — force-close a session (e.g. WebSocket
-                                      zombie the auto-sweeper hasn't hit yet).
+    POST /ocabra/sessions/{id}/kill — force-close a session: cancels its
+                                      response, closes the WebSocket and
+                                      releases its workers.
 
 Both restricted to ``system_admin`` because seeing / disconnecting other
 users' Realtime sessions is a privileged operation.
@@ -43,12 +44,13 @@ class SessionInfoOut(BaseModel):
 class KillResponse(BaseModel):
     session_id: str
     killed: bool
+    # True when a live WebSocket in this process was actually closed; False
+    # when only the registry entry existed (e.g. rehydrated after a restart).
+    connection_closed: bool = False
 
 
 def _get_registry(request: Request) -> SessionRegistry:
-    registry: SessionRegistry | None = getattr(
-        request.app.state, "session_registry", None
-    )
+    registry: SessionRegistry | None = getattr(request.app.state, "session_registry", None)
     if registry is None:
         raise HTTPException(
             status_code=503,
@@ -111,10 +113,12 @@ async def list_sessions(
     response_model=KillResponse,
     summary="Force-close a Realtime session",
     description=(
-        "Unregisters the session from the registry, releasing its workers "
-        "for evict/routing decisions. Does NOT close the underlying "
-        "WebSocket — the client sees a normal disconnect when their next "
-        "chunk finds no session state on the server side."
+        "Ends the session: cancels the response in progress, sends the "
+        "client an ``error`` event (code ``session_closed``), closes the "
+        "WebSocket with code 4001 and releases its workers for "
+        "evict/routing decisions, through the same teardown as a client "
+        "disconnect. ``connection_closed`` is false when only a registry "
+        "entry was left (e.g. restored from Redis after a restart)."
     ),
     responses={404: {"description": "Session not found"}},
 )
@@ -123,16 +127,18 @@ async def kill_session(
     request: Request,
     _user: UserContext = Depends(require_role("system_admin")),
 ) -> KillResponse:
-    """Unregister a Realtime session, releasing its workers for eviction.
+    """Close a Realtime session and release its workers.
 
-    Requires the ``system_admin`` role. Only the registry entry is removed: the
-    WebSocket itself is not closed by this call.
+    Requires the ``system_admin`` role. Runs the session's own teardown (cancel
+    the in-flight response, close the WebSocket, unregister the workers); if the
+    session has no live connection in this process, only the registry entry is
+    removed.
 
     Args:
         session_id: Session id from ``GET /sessions``.
 
     Returns:
-        ``KillResponse`` (``session_id``, ``killed=True``).
+        ``KillResponse`` (``session_id``, ``killed=True``, ``connection_closed``).
 
     Raises:
         HTTPException 404: unknown session.
@@ -141,5 +147,5 @@ async def kill_session(
     registry = _get_registry(request)
     if registry.get(session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
-    await registry.unregister(session_id, reason="admin_kill")
-    return KillResponse(session_id=session_id, killed=True)
+    connection_closed = await registry.close(session_id, reason="admin_kill")
+    return KillResponse(session_id=session_id, killed=True, connection_closed=connection_closed)
