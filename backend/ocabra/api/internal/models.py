@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from ocabra.api._deps_auth import UserContext, require_role
+from ocabra.api._deps_auth import ROLE_HIERARCHY, UserContext, require_role
 from ocabra.config import settings
 from ocabra.core import config_schema, fs_scan_cache
 from ocabra.core import vram_planner as vp
@@ -2369,6 +2369,7 @@ async def estimate_model_memory(
         The estimate payload (per-GPU MB, totals, notes).
 
     Raises:
+        HTTPException 403: ``run_probe`` without the ``model_manager`` role.
         HTTPException 404: unknown model, or not granted to the caller.
     """
     mm = request.app.state.model_manager
@@ -2377,6 +2378,9 @@ async def estimate_model_memory(
         user, model_id, getattr(request.app.state, "profile_registry", None)
     ):
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    if body.run_probe and ROLE_HIERARCHY.get(user.role, -1) < ROLE_HIERARCHY["model_manager"]:
+        # The probe starts a vLLM process on a GPU: same bar as loading.
+        raise HTTPException(status_code=403, detail="run_probe requires the model_manager role")
 
     extra_config = (
         body.extra_config if isinstance(body.extra_config, dict) else state.extra_config or {}

@@ -16,6 +16,59 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.121.0 — 2026-11-19
+
+### Cambiado
+
+- **Errores con el formato de cada API (y `detail` obsoleto).** Hasta ahora
+  los errores de `/v1/*` llegaban como `{"detail": {"error": {...}}}` (y a
+  veces `{"detail": "texto"}`), un formato que los SDK de OpenAI no leen:
+  veías un error genérico sin el mensaje ni el código reales. Ahora todas las
+  respuestas de error de `/v1/*` llevan además, en el nivel superior, el objeto
+  `error` de OpenAI `{"message", "type", "param", "code"}`, también en los
+  errores de validación (422, con el campo afectado en `param`). Las de `/api/*`
+  (compatibilidad Ollama) llevan `{"error": "texto"}`, que es lo que esperan
+  los clientes de Ollama. Los códigos de estado y las cabeceras (`Retry-After`
+  incluida) no cambian. **Acción (obsoleto):** `detail` se mantiene de momento
+  con el mismo contenido para no romper a nadie, pero se retirará en una
+  versión futura. Si tu cliente lee `detail`, pásate a `error`
+  (`error.message` / `error.code` en `/v1`, `error` en `/api`). `/ocabra/*` no
+  cambia.
+- **Estimaciones con el ACL de modelos.** `POST /ocabra/estimate` y
+  `POST /ocabra/models/{id}/memory-estimate` responden 404 para modelos que no
+  tienes concedidos, como ya hacía `GET /models`. `run_probe=true` en
+  `memory-estimate` (arranca un proceso vLLM) y `GET /ocabra/trtllm/estimate`
+  piden ahora el rol `model_manager`.
+- **Reescalado de vídeo.** `POST /ocabra/video/upscale` rechaza con 413 los
+  segmentos de más de 512 MB (configurable con `VIDEO_UPSCALE_MAX_UPLOAD_MB`).
+  La respuesta solo lleva las cabeceras de estadísticas `x-ocabra-*`
+  documentadas.
+- **Modelos locales en carpeta.** `POST /ocabra/registry/local/register`
+  acepta carpetas de modelo (safetensors de HF, diffusers…) para vllm, sglang,
+  tensorrt_llm, diffusers, mage, upscaler y flashvsr. **Acción:** `model_ref`
+  tiene que ser la ruta de la carpeta bajo MODELS_DIR, o `org/name` para las
+  carpetas en `huggingface/org--name`.
+
+### Arreglos
+
+- **Matar una sesión Realtime la cierra de verdad.**
+  `POST /ocabra/sessions/{id}/kill` solo la quitaba de la lista: el cliente
+  seguía conectado y la respuesta en curso seguía generando. Ahora el cliente
+  recibe un evento `error` con `code: "session_closed"`, el WebSocket se cierra
+  con el código 4001 y la respuesta añade `connection_closed`.
+- **Descargas.** `GET /ocabra/downloads/{id}/stream` termina solo cuando la
+  descarga acaba (completada, fallida o cancelada) y su primer evento es el
+  estado actual. `GET /ocabra/downloads/{id}` y su stream funcionan con el rol
+  `user`, como la lista: antes daban 403 y el panel de descargas de los
+  usuarios sin rol de gestor reintentaba en bucle.
+- **Ollama.** Dos POST seguidos a `/ocabra/ollama/server/update` (o
+  `apply-settings`) ya no lanzan la operación dos veces: el segundo recibe 409.
+- **Agentes.** Borrar un agente lo quita de los subagentes de los demás. Antes
+  un agente creado después con el mismo nombre se les colgaba solo. La
+  respuesta añade `detached_from`.
+- **Servicios.** `GET /ocabra/services/{id}/generations` da 404 para un
+  servicio que no existe, en vez de `[]`.
+
 ## 0.120.0 — 2026-11-19
 
 ### Nuevo

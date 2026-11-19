@@ -121,3 +121,20 @@ async def test_trtllm_estimate_needs_model_manager() -> None:
     ) as client:
         resp = await client.get("/ocabra/trtllm/estimate", params={"model_id": "vllm/x/y"})
     assert resp.status_code == 403
+
+
+async def test_memory_estimate_probe_needs_model_manager(monkeypatch) -> None:
+    # run_probe starts a vLLM process on a GPU: a plain user may estimate,
+    # not probe.
+    built = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(models_api, "_build_model_memory_estimate", built)
+    url = "/ocabra/models/llama_cpp/secret/memory-estimate"
+    manager = UserContext(
+        user_id="m", username="m", role="model_manager", accessible_model_ids={"secret:8b"}
+    )
+
+    denied = await _post(_app(_user("secret:8b")), url, {"run_probe": True})
+    allowed = await _post(_app(manager), url, {"run_probe": True})
+
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
