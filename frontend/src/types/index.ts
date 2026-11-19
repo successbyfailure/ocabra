@@ -593,6 +593,8 @@ export interface ServerConfig {
   idleEvictionCheckIntervalSeconds: number;
   modelLoadWaitTimeoutSeconds: number;
   pressureEvictionDrainTimeoutSeconds: number;
+  evictionFollowupGraceSeconds: number;
+  evictionFollowupMaxChainSeconds: number;
   pinReloadPollIntervalSeconds: number;
   vramBufferMb: number;
   vramPressureThresholdPct: number;

@@ -185,6 +185,8 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
   const [idleEvictionCheckIntervalSeconds, setIdleEvictionCheckIntervalSeconds] = useState(config.idleEvictionCheckIntervalSeconds)
   const [modelLoadWaitTimeoutSeconds, setModelLoadWaitTimeoutSeconds] = useState(config.modelLoadWaitTimeoutSeconds)
   const [pressureEvictionDrainTimeoutSeconds, setPressureEvictionDrainTimeoutSeconds] = useState(config.pressureEvictionDrainTimeoutSeconds)
+  const [evictionFollowupGraceSeconds, setEvictionFollowupGraceSeconds] = useState(config.evictionFollowupGraceSeconds)
+  const [evictionFollowupMaxChainSeconds, setEvictionFollowupMaxChainSeconds] = useState(config.evictionFollowupMaxChainSeconds)
   const [pinReloadPollIntervalSeconds, setPinReloadPollIntervalSeconds] = useState(config.pinReloadPollIntervalSeconds)
   const [vramBufferMb, setVramBufferMb] = useState(config.vramBufferMb)
   const [vramPressureThresholdPct, setVramPressureThresholdPct] = useState(config.vramPressureThresholdPct)
@@ -200,6 +202,8 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
     setIdleEvictionCheckIntervalSeconds(config.idleEvictionCheckIntervalSeconds)
     setModelLoadWaitTimeoutSeconds(config.modelLoadWaitTimeoutSeconds)
     setPressureEvictionDrainTimeoutSeconds(config.pressureEvictionDrainTimeoutSeconds)
+    setEvictionFollowupGraceSeconds(config.evictionFollowupGraceSeconds)
+    setEvictionFollowupMaxChainSeconds(config.evictionFollowupMaxChainSeconds)
     setPinReloadPollIntervalSeconds(config.pinReloadPollIntervalSeconds)
     setVramBufferMb(config.vramBufferMb)
     setVramPressureThresholdPct(config.vramPressureThresholdPct)
@@ -216,6 +220,8 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
     config.maxInflightPerModel,
     config.modelLoadWaitTimeoutSeconds,
     config.pressureEvictionDrainTimeoutSeconds,
+    config.evictionFollowupGraceSeconds,
+    config.evictionFollowupMaxChainSeconds,
     config.pinReloadPollIntervalSeconds,
     config.vramBufferMb,
     config.vramPressureThresholdPct,
@@ -232,6 +238,8 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
         idleEvictionCheckIntervalSeconds,
         modelLoadWaitTimeoutSeconds,
         pressureEvictionDrainTimeoutSeconds,
+        evictionFollowupGraceSeconds,
+        evictionFollowupMaxChainSeconds,
         pinReloadPollIntervalSeconds,
         vramBufferMb,
         vramPressureThresholdPct,
@@ -307,6 +315,37 @@ export function GPUSettings({ gpus, config, onSave }: GPUSettingsProps) {
             onChange={(event) => setPressureEvictionDrainTimeoutSeconds(Number(event.target.value))}
             className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
           />
+        </label>
+        <label className="text-sm text-muted-foreground">
+          Gracia antes de desalojar (s)
+          <input
+            type="number"
+            min={0}
+            max={60}
+            step={0.5}
+            value={evictionFollowupGraceSeconds}
+            onChange={(event) => setEvictionFollowupGraceSeconds(Number(event.target.value))}
+            className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
+          />
+          <span className="mt-1 block text-xs text-muted-foreground/80">
+            Si otro modelo espera la GPU, el cargado aguarda este tiempo tras su última petición por si llega la siguiente
+            (los agentes encadenan peticiones). 0 = desalojar en cuanto queda libre.
+          </span>
+        </label>
+        <label className="text-sm text-muted-foreground">
+          Máximo encadenando (s)
+          <input
+            type="number"
+            min={0}
+            max={3600}
+            value={evictionFollowupMaxChainSeconds}
+            onChange={(event) => setEvictionFollowupMaxChainSeconds(Number(event.target.value))}
+            className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2"
+          />
+          <span className="mt-1 block text-xs text-muted-foreground/80">
+            Tope de esa gracia desde que otro modelo pide la GPU: pasado, se desaloja aunque siga llegando trabajo, para que
+            un cliente que no para no deje al otro sin turno.
+          </span>
         </label>
         <label className="text-sm text-muted-foreground">
           Reintento de recarga de modelos PIN (s)

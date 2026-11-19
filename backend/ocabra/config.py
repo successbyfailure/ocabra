@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.119.0"
+APP_VERSION = "0.120.0"
 
 
 class Settings(BaseSettings):
@@ -621,6 +621,13 @@ class Settings(BaseSettings):
     tokenize_timeout_s: float = 5.0
     # Max seconds to wait for in-flight requests to drain before pressure-evicting a model.
     pressure_eviction_drain_timeout_s: int = 60
+    # Before evicting a model another one is waiting for, keep it this long
+    # after its last request ends in case its client sends the next one
+    # (agents chain them 0.1-0.6 s apart). 0 disables it.
+    eviction_followup_grace_s: float = 4.0
+    # ...but only for this long since the eviction started: a client that
+    # never stops would otherwise keep the GPU from the waiting model.
+    eviction_followup_max_chain_s: float = 60.0
 
     # Interactive generation services
     comfyui_base_url: str = "http://comfyui:8188"

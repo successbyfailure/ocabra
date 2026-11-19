@@ -35,7 +35,7 @@ async def test_request_arriving_mid_eviction_sees_the_claim():
     _add_loaded_model(mm, "victim", vram_mb=8000)
     seen_during: list[bool] = []
 
-    async def slow_shrink(model_id, gpu_index, needed):
+    async def slow_shrink(model_id, gpu_index, needed, **_kwargs):
         mm.try_begin_request("victim", 4)  # a request arrives now
         seen_during.append(mm.is_eviction_claimed("victim"))
         return 0

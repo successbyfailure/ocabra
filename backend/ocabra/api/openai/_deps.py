@@ -229,11 +229,21 @@ async def _wait_for_eviction_claim(
 
     if not claimed():
         return state
-    deadline = asyncio.get_running_loop().time() + _ensure_load_timeout_s()
-    while asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(0.1)
-        if not claimed():
-            break
+    # Admitted (in flight) but not on the worker: a context change made under
+    # the claim must not wait for this request (see begin_claim_wait).
+    begin = getattr(model_manager, "begin_claim_wait", None)
+    end = getattr(model_manager, "end_claim_wait", None)
+    if callable(begin):
+        begin(model_id)
+    try:
+        deadline = asyncio.get_running_loop().time() + _ensure_load_timeout_s()
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.1)
+            if not claimed():
+                break
+    finally:
+        if callable(end):
+            end(model_id)
     if claimed():
         raise _openai_error(
             f"Model '{model_id}' is being unloaded; retry shortly.",

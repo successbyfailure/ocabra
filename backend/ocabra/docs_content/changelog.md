@@ -16,6 +16,33 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.120.0 — 2026-11-19
+
+### Cambiado
+
+- **Un modelo que comparte GPU con otro ya no se desaloja entre dos peticiones
+  seguidas de un mismo cliente.** Cuando un modelo espera la GPU que ocupa
+  otro, el cargado aguarda ahora hasta **4 s** tras su última petición por si
+  llega la siguiente, y la atiende. Lo hace como mucho durante **60 s**
+  desde que el otro la pidió; pasado ese tiempo cede la GPU aunque siga
+  llegando trabajo. Antes se desalojaba en cuanto quedaba libre: dos agentes
+  que encadenaban peticiones a modelos distintos de la misma tarjeta
+  provocaron 12 cargas en 10 minutos, y cada petición siguiente esperaba
+  1-2 minutos una recarga para hacer un segundo de trabajo. Los dos tiempos
+  se ajustan en Ajustes → GPU (gracia 0 = el comportamiento anterior).
+
+### Arreglos
+
+- **La petición que llegaba justo cuando su modelo iba a desalojarse se
+  quedaba 30 s parada y luego esperaba a que el modelo se recargara.** El
+  servidor intentaba antes encoger el contexto del modelo y, al deshacerlo,
+  esperaba a que terminase esa petición, que a su vez esperaba al desalojo.
+  Ya no espera a las peticiones aparcadas, no deshace el encogimiento de un
+  modelo que va a descargarse y no vuelve a intentarlo cuando ya midió que no
+  libera bastante memoria.
+
+---
+
 ## 0.119.0 — 2026-11-19
 
 ### Corregido

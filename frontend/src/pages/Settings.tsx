@@ -30,6 +30,8 @@ const EMPTY_CONFIG: ServerConfig = {
   idleEvictionCheckIntervalSeconds: 15,
   modelLoadWaitTimeoutSeconds: 720,
   pressureEvictionDrainTimeoutSeconds: 60,
+  evictionFollowupGraceSeconds: 4,
+  evictionFollowupMaxChainSeconds: 60,
   pinReloadPollIntervalSeconds: 120,
   vramBufferMb: 512,
   vramPressureThresholdPct: 85,

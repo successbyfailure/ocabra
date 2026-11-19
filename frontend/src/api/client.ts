@@ -1409,6 +1409,8 @@ function toServerConfig(raw: unknown): ServerConfig {
         data.pressure_eviction_drain_timeout_seconds ??
         60,
     ),
+    evictionFollowupGraceSeconds: Number(data.evictionFollowupGraceSeconds ?? 4),
+    evictionFollowupMaxChainSeconds: Number(data.evictionFollowupMaxChainSeconds ?? 60),
     pinReloadPollIntervalSeconds: Number(
       data.pinReloadPollIntervalSeconds ??
         data.pin_reload_poll_interval_seconds ??

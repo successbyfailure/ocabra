@@ -422,6 +422,15 @@ class ModelManager:
         # admitted afterwards wait for the unload instead of reaching a worker
         # that is about to be killed.
         self._eviction_claims: set[str] = set()
+        # Requests admitted on a claimed model that wait in ``ensure_loaded``
+        # for the unload (``begin_claim_wait``): in flight but not on the
+        # worker. A context change made under the claim must not wait for
+        # them, or both wait for each other until the drain timeout (30 s per
+        # cycle in the gemma4/ornith ping-pong of 2026-11-19).
+        self._claim_waiters: dict[str, int] = {}
+        # model_id -> time.monotonic() when its last request ended; the
+        # follow-up grace (``_followup_grace``) counts from there.
+        self._went_idle_at: dict[str, float] = {}
         self._active_requests: dict[str, ActiveRequest] = {}  # request_id -> ActiveRequest
         # model_id -> blocking service_id, for requests parked in
         # _wait_for_service_gpu_and_retry_load (see _deps.py). Surfaced via
@@ -1144,6 +1153,7 @@ class ModelManager:
         # the model truly went idle. Overlapping requests share one timer
         # (the estimator can't tell them apart yet).
         if went_idle:
+            self._went_idle_at[model_id] = time.monotonic()
             self.mark_request_end(model_id)
 
     def _in_flight_count(self, model_id: str) -> int:
@@ -1175,6 +1185,28 @@ class ModelManager:
     def release_eviction_claim(self, model_id: str) -> None:
         with self._in_flight_lock:
             self._eviction_claims.discard(model_id)
+
+    def begin_claim_wait(self, model_id: str) -> None:
+        """A request admitted on ``model_id`` waits for its eviction claim."""
+        with self._in_flight_lock:
+            self._claim_waiters[model_id] = self._claim_waiters.get(model_id, 0) + 1
+
+    def end_claim_wait(self, model_id: str) -> None:
+        with self._in_flight_lock:
+            left = self._claim_waiters.get(model_id, 0) - 1
+            if left > 0:
+                self._claim_waiters[model_id] = left
+            else:
+                self._claim_waiters.pop(model_id, None)
+
+    def _on_worker_count(self, model_id: str) -> int:
+        """Requests in flight that are really on the worker: those waiting
+        for an eviction claim are not (they wait for the unload)."""
+        with self._in_flight_lock:
+            return max(
+                0,
+                int(self._in_flight.get(model_id, 0)) - int(self._claim_waiters.get(model_id, 0)),
+            )
 
     def is_eviction_claimed(self, model_id: str) -> bool:
         with self._in_flight_lock:
@@ -1628,9 +1660,17 @@ class ModelManager:
         4. Unloaded (its PIN reload held off ``suppress_reload_seconds``), then
            the release is waited for from a baseline taken before the unload.
         """
-        if self.is_busy(candidate_id):
-            if not drain or not await self._drain_or_preempt(requesting_model_id, candidate_id):
-                return None
+        chain_deadline = time.monotonic() + max(0.0, float(settings.eviction_followup_max_chain_s))
+        while True:
+            if self.is_busy(candidate_id):
+                if not drain or not await self._drain_or_preempt(
+                    requesting_model_id, candidate_id
+                ):
+                    return None
+            if not drain or not await self._followup_grace(
+                requesting_model_id, candidate_id, chain_deadline
+            ):
+                break
         state = self._states.get(candidate_id)
         if state is None:
             return None
@@ -1644,7 +1684,12 @@ class ModelManager:
             return None
         try:
             if try_shrink and gpu_index is not None:
-                shrunk = await self._try_shrink_for_space(candidate_id, gpu_index, needed_mb)
+                # Claimed: if shrinking falls short the model is unloaded right
+                # after, so growing its context back first is wasted (and used
+                # to wait for the requests parked on the claim).
+                shrunk = await self._try_shrink_for_space(
+                    candidate_id, gpu_index, needed_mb, restore_on_failure=False
+                )
                 if shrunk:
                     return shrunk
             # What it holds on THIS GPU, not vram_used_mb split evenly: a
@@ -1686,6 +1731,53 @@ class ModelManager:
                 gpu_indices=released_gpus,
             )
         return released_mb
+
+    async def _followup_grace(
+        self, requesting_model_id: str, candidate_id: str, chain_deadline: float
+    ) -> bool:
+        """Hold an idle eviction candidate a moment for its client's next request.
+
+        Agents chain requests: the next one comes 0.1-0.6 s after the previous
+        ends. Evicting right away made gemma4:26b and ornith-1.5:35b swap the
+        3090 twelve times in ten minutes (2026-11-19) — each of those follow-ups
+        then waited one or two minutes for a reload to do one second of work.
+        Over seven days 68-80 % of the follow-ups arrived within 3 s.
+
+        Waits up to ``eviction_followup_grace_s`` counted from when the
+        candidate went idle; returns True when a request arrived (the caller
+        drains it and asks again). No grace once ``chain_deadline``
+        (``eviction_followup_max_chain_s`` after the eviction started) has
+        passed, so a client that never stops cannot keep the GPU from the
+        model waiting for it.
+        """
+        grace = float(settings.eviction_followup_grace_s)
+        if grace <= 0:
+            return False
+        now = time.monotonic()
+        if now >= chain_deadline:
+            return False
+        idle_since = self._went_idle_at.get(candidate_id)
+        if idle_since is None:
+            return False
+        window = min(grace - (now - idle_since), chain_deadline - now)
+        if window <= 0:
+            return False
+        self._eviction_wait_for[requesting_model_id] = candidate_id
+        try:
+            deadline = now + window
+            while time.monotonic() < deadline:
+                if self.is_busy(candidate_id):
+                    logger.info(
+                        "pressure_eviction_followup_served",
+                        requested_model_id=requesting_model_id,
+                        evicting_model_id=candidate_id,
+                        chain_left_s=round(chain_deadline - time.monotonic(), 1),
+                    )
+                    return True
+                await asyncio.sleep(0.05)
+        finally:
+            self._eviction_wait_for.pop(requesting_model_id, None)
+        return self.is_busy(candidate_id)
 
     async def _drain_or_preempt(self, requesting_model_id: str, candidate_id: str) -> bool:
         """Wait for a busy eviction candidate to go idle; returns whether it did.
@@ -4379,7 +4471,13 @@ class ModelManager:
         return backends.get(backend_type) if isinstance(backends, dict) else None
 
     async def _try_shrink_for_space(
-        self, model_id: str, gpu_index: int, needed_mb: int, *, tolerate_in_flight: int = 0
+        self,
+        model_id: str,
+        gpu_index: int,
+        needed_mb: int,
+        *,
+        tolerate_in_flight: int = 0,
+        restore_on_failure: bool = True,
     ) -> int:
         """Shrink an idle llama.cpp worker's context to free ``needed_mb`` on a GPU.
 
@@ -4389,14 +4487,30 @@ class ModelManager:
         freed 1.8 GB on the 3060 and 4.2 GB on the 3090 going 262k -> 128k).
         Returns the MB freed when that was enough, so the caller keeps the model
         loaded instead of evicting it. Otherwise puts the context back where it
-        was and returns 0, and the caller evicts as before.
+        was (``restore_on_failure``; an eviction that follows does not need it)
+        and returns 0, and the caller evicts as before.
+
+        Not attempted when an earlier try already measured that shrinking to
+        the floor frees less than ``needed_mb`` on this GPU
+        (``_shrink_capacity``): gemma4:26b and ornith were shrunk and grown back
+        on every turn of their ping-pong to free 2.7 of the 22 GB needed.
         """
         if not settings.llama_cpp_shrink_before_evict or needed_mb <= 0:
             return 0
         if (
             not self._can_change_context_live(model_id)
-            or self._in_flight_count(model_id) > tolerate_in_flight
+            or self._on_worker_count(model_id) > tolerate_in_flight
         ):
+            return 0
+        known = self._shrink_capacity.get((model_id, gpu_index))
+        if known is not None and known < needed_mb:
+            logger.info(
+                "shrink_for_space_skipped_known_capacity",
+                model_id=model_id,
+                gpu_index=gpu_index,
+                needed_mb=needed_mb,
+                capacity_mb=known,
+            )
             return 0
         state = self._states[model_id]
         if gpu_index not in (state.current_gpu or []):
@@ -4457,7 +4571,7 @@ class ModelManager:
             )
             return freed
 
-        if ctx != original_ctx:
+        if ctx != original_ctx and restore_on_failure:
             try:
                 if original_ctx == nominal.get("n_ctx"):
                     await self.resize_context(
@@ -5600,7 +5714,7 @@ class ModelManager:
             # that wants the arbiter (vision, whisper) gives up instead of
             # waiting for this drain, which waits for it.
             with self._arbiter.waiting_on(model_id):
-                while self._in_flight_count(model_id) > tolerate_in_flight:
+                while self._on_worker_count(model_id) > tolerate_in_flight:
                     if loop.time() >= deadline:
                         raise RuntimeError(
                             f"'{model_id}' stayed busy; live context change not attempted"

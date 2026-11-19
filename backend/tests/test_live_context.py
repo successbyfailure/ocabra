@@ -373,7 +373,9 @@ async def test_evict_for_space_still_unloads_when_shrinking_is_not_enough(monkey
     await mm._evict_for_space(0, 20000)
 
     mm.unload.assert_awaited_once_with(state.model_id, reason="vram_pressure")
-    assert ctx["n"] == 262144
+    # Not grown back first: it is unloaded right after, and growing back used
+    # to wait for the requests parked on the eviction claim (2026-11-19).
+    assert ctx["n"] == 131072
 
 
 @pytest.mark.asyncio
@@ -889,3 +891,44 @@ def test_a_probe_from_before_the_pin_follows_the_projector_card(monkeypatch):
     state.extra_config["_runtime"]["context_probe_vision_mb"] = {"0": 1138, "1": 0}
     backend.vision_projector_gpu = MagicMock(return_value=1)
     assert mm._vision_cost_estimate(state, "/nonexistent") == {1: 1138}
+
+
+# ── Ping-pong gemma4/ornith (2026-11-19) ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_shrink_is_not_retried_when_its_capacity_is_known_short(monkeypatch) -> None:
+    """Every turn of the ping-pong shrank the context and grew it back to free
+    2.7 of the 22 GB needed: once measured, it is not tried again."""
+    mm, state, backend, ctx, _ = _elastic_manager(monkeypatch)
+    assert await mm._try_shrink_for_space(state.model_id, 1, 21000) == 0
+    calls = backend.reconfigure_context.await_count
+
+    assert await mm._try_shrink_for_space(state.model_id, 1, 21000) == 0
+    assert backend.reconfigure_context.await_count == calls
+    # A request it can cover is still tried.
+    assert await mm._try_shrink_for_space(state.model_id, 1, 2500) == 3000
+
+
+@pytest.mark.asyncio
+async def test_shrink_before_an_eviction_does_not_grow_back(monkeypatch) -> None:
+    mm, state, backend, ctx, _ = _elastic_manager(monkeypatch)
+    assert (
+        await mm._try_shrink_for_space(state.model_id, 1, 21000, restore_on_failure=False) == 0
+    )
+    sizes = [call.kwargs["n_ctx"] for call in backend.reconfigure_context.await_args_list]
+    assert sizes == [131072]  # shrunk once, not put back: it is unloaded next
+
+
+@pytest.mark.asyncio
+async def test_requests_waiting_for_the_claim_do_not_block_a_context_change(monkeypatch) -> None:
+    """The follow-up request was admitted (in flight) and waited for the
+    eviction claim; the context change waited for it to finish: 30 s each."""
+    mm, state, backend, ctx, _ = _elastic_manager(monkeypatch)
+    mm._in_flight[state.model_id] = 1
+    mm.begin_claim_wait(state.model_id)
+    try:
+        assert await mm._try_shrink_for_space(state.model_id, 1, 2500) == 3000
+    finally:
+        mm.end_claim_wait(state.model_id)
+    assert mm._on_worker_count(state.model_id) == 1

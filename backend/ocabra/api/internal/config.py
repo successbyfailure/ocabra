@@ -47,6 +47,12 @@ class ServerConfigPatch(BaseModel):
     pressure_eviction_drain_timeout_seconds: int | None = Field(
         default=None, alias="pressureEvictionDrainTimeoutSeconds"
     )
+    eviction_followup_grace_seconds: float | None = Field(
+        default=None, ge=0, le=60, alias="evictionFollowupGraceSeconds"
+    )
+    eviction_followup_max_chain_seconds: float | None = Field(
+        default=None, ge=0, le=3600, alias="evictionFollowupMaxChainSeconds"
+    )
     pin_reload_poll_interval_seconds: int | None = Field(
         default=None, alias="pinReloadPollIntervalSeconds"
     )
@@ -334,6 +340,8 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "idleEvictionCheckIntervalSeconds": settings.idle_eviction_check_interval_seconds,
         "modelLoadWaitTimeoutSeconds": settings.model_load_wait_timeout_s,
         "pressureEvictionDrainTimeoutSeconds": settings.pressure_eviction_drain_timeout_s,
+        "evictionFollowupGraceSeconds": settings.eviction_followup_grace_s,
+        "evictionFollowupMaxChainSeconds": settings.eviction_followup_max_chain_s,
         "pinReloadPollIntervalSeconds": settings.pin_reload_poll_interval_s,
         "vramBufferMb": settings.vram_buffer_mb,
         "vramPressureThresholdPct": settings.vram_pressure_threshold_pct,
@@ -507,6 +515,14 @@ async def patch_config(
         await _persist(
             "pressure_eviction_drain_timeout_s", settings.pressure_eviction_drain_timeout_s
         )
+    if "eviction_followup_grace_seconds" in payload:
+        settings.eviction_followup_grace_s = float(payload["eviction_followup_grace_seconds"])
+        await _persist("eviction_followup_grace_s", settings.eviction_followup_grace_s)
+    if "eviction_followup_max_chain_seconds" in payload:
+        settings.eviction_followup_max_chain_s = float(
+            payload["eviction_followup_max_chain_seconds"]
+        )
+        await _persist("eviction_followup_max_chain_s", settings.eviction_followup_max_chain_s)
     if "pin_reload_poll_interval_seconds" in payload:
         settings.pin_reload_poll_interval_s = int(payload["pin_reload_poll_interval_seconds"])
         await _persist("pin_reload_poll_interval_s", settings.pin_reload_poll_interval_s)
