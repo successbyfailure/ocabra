@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.121.1 — 2026-11-19
+
+### Arreglos
+
+- **Transcripciones largas: el primer segmento llega mucho antes.** Con audios
+  de más de una hora, `/v1/audio/transcriptions` pasaba 3-4 minutos sin
+  devolver nada antes de empezar a transcribir (1 h 35 min: ~225 s). Ahora son
+  ~30 s, la transcripción es idéntica y la transcripción completa tarda menos
+  de la mitad. Además, el avance que da el servidor (`audio.totalSeconds` en
+  `/ocabra/models/activity`) muestra la duración del audio desde el primer
+  momento, también mientras prepara.
+
+---
+
 ## 0.121.0 — 2026-11-19
 
 ### Cambiado
