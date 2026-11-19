@@ -16,6 +16,17 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.122.1 — 2026-11-19
+
+### Arreglos
+
+- **Los benchmarks ya pueden clonar repositorios privados de GitHub.**
+  `BENCHMARK_GIT_TOKEN` se envía con el esquema HTTP que entiende el transporte
+  Git HTTPS. Antes se enviaba como Bearer y GitHub rechazaba el clon aunque el
+  token tuviera acceso al repositorio.
+
+---
+
 ## 0.122.0 — 2026-11-19
 
 ### Nuevo

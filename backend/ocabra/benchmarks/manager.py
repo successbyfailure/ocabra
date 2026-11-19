@@ -10,6 +10,7 @@ and repeated from a fresh checkout.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -41,6 +42,12 @@ _SERVICE_USERNAME = "__ocabra_benchmark__"
 _SERVICE_KEY_NAME = "ocabra-benchmark"
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def git_authorization_header(token: str) -> str:
+    """Build GitHub's HTTPS Git authentication header without changing the URL."""
+    credentials = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return f"Authorization: Basic {credentials}"
 
 
 @dataclass(frozen=True)
@@ -447,7 +454,7 @@ class BenchmarkManager:
                 {
                     "GIT_CONFIG_COUNT": "1",
                     "GIT_CONFIG_KEY_0": "http.extraHeader",
-                    "GIT_CONFIG_VALUE_0": (f"Authorization: Bearer {settings.benchmark_git_token}"),
+                    "GIT_CONFIG_VALUE_0": git_authorization_header(settings.benchmark_git_token),
                 }
             )
         clone = await asyncio.create_subprocess_exec(

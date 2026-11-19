@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import uuid
 from pathlib import Path
@@ -10,7 +11,20 @@ from pydantic import ValidationError
 
 from ocabra.api.internal.benchmarks import BenchmarkRunCreate
 from ocabra.benchmarks.catalog import APPS, catalog_payload
-from ocabra.benchmarks.manager import BenchmarkIdentity, BenchmarkManager, external_active_requests
+from ocabra.benchmarks.manager import (
+    BenchmarkIdentity,
+    BenchmarkManager,
+    external_active_requests,
+    git_authorization_header,
+)
+
+
+def test_github_token_uses_basic_header_for_git_https() -> None:
+    header = git_authorization_header("github-token")
+
+    scheme, encoded = header.split(" ", 2)[1:]
+    assert scheme == "Basic"
+    assert base64.b64decode(encoded).decode() == "x-access-token:github-token"
 
 
 def test_catalog_matches_cli_manifests() -> None:
