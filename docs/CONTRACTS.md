@@ -54,14 +54,14 @@ Ganchos opcionales con implementación por defecto:
   (`WORKER_PORT_RANGE_START`–`WORKER_PORT_RANGE_END`).
 - `supported_modalities()` y los métodos multimodales (`generate_text`,
   `stream_text`, `generate_embeddings`, `generate_image`, `transcribe`,
-  `synthesize_speech`, `rerank`, `upscale_video`), que por defecto lanzan
+  `synthesize_speech`, `rerank`, `upscale_video`, `upscale_image`), que por defecto lanzan
   `NotImplementedError`.
 
 `BackendCapabilities` es un dataclass de flags booleanos (`chat`,
 `completion`, `tools`, `vision`, `embeddings`, `pooling`, `rerank`,
 `classification`, `score`, `reasoning`, `image_generation`, `image_editing`,
 `audio_transcription`, `tts`, `music_generation`, `audio_input`,
-`video_input`, `audio_output`, `video_upscaling`, `streaming`) más campos
+`video_input`, `audio_output`, `video_upscaling`, `image_upscaling`, `streaming`) más campos
 numéricos donde `0` significa "desconocido": `context_length` (ventana
 efectiva que servirá el backend), `native_context_length`,
 `max_output_tokens`, `parallel_slots`, `context_per_request`, y el booleano
@@ -121,6 +121,25 @@ no existe endpoint OpenAI estándar para esto.
 
 Capacidad: `video_upscaling`. No confundir con `video_input`, que significa
 aceptar partes `video_url` dentro de un chat.
+
+### 1.3 Escalado de fotos (`image_upscaling`)
+
+Solo el backend `upscaler` implementa
+`upscale_image(model_id, image, *, filename, content_type, **kwargs)`, que
+devuelve `(bytes de la imagen, content-type, cabeceras x-ocabra-*)`. Los
+`kwargs` (`scale`, `target_width`, `target_height`, `output_format`,
+`quality`) van al worker como query de `POST /upscale/image` (multipart
+`file`). El worker decodifica con Pillow (orientación EXIF aplicada), pasa la
+red por teselas de `UPSCALER_IMAGE_TILE` px (512) con `UPSCALER_IMAGE_TILE_PAD`
+(32) de contexto, reintenta con teselas a la mitad si no hay VRAM (hasta 64,
+luego 507), reescala el alfa aparte con Lanczos y solo reduce la salida del
+modelo, nunca la amplía. Límite de entrada `UPSCALER_IMAGE_MAX_PIXELS`
+(3840×2160, 413 si se pasa).
+
+Expuesto en `POST /v1/images/upscale` (`api/openai/image_upscale.py`), con la
+resolución de modelos, routers, federación, admisión y estadísticas
+(`request_kind=image_upscale`) de las demás rutas de imagen. FlashVSR no tiene
+`image_upscaling`: es temporal y solo escala vídeo.
 
 ---
 

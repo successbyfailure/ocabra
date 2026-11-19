@@ -260,6 +260,9 @@ def classify_request_kind(path: str) -> str:
         "/v1/embeddings": "embedding",
         "/v1/images/generations": "image_generation",
         "/v1/images/edits": "image_generation",
+        # Not "image_generation": no prompt, no steps, and its cost is the
+        # pixels of the photo, so its stats must not mix with diffusion's.
+        "/v1/images/upscale": "image_upscale",
         "/v1/audio/transcriptions": "audio_transcription",
         "/v1/audio/speech": "tts",
         "/v1/rerank": "rerank",

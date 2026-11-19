@@ -1018,6 +1018,7 @@ Consulta `GET /v1/models` para ver los modelos disponibles.
 | **Speech-to-Text** | `/v1/audio/transcriptions` | whisper (faster-whisper, Whisper) |
 | **Generacion de imagenes** | `/v1/images/generations` | diffusers |
 | **Edicion de imagenes** | `/v1/images/edits` | diffusers |
+| **Escalado de fotos** | `/v1/images/upscale` (multipart; devuelve la imagen o `b64_json`) | upscaler (Real-ESRGAN, UltraSharp, Remacri…) |
 | **Generacion de musica** | `/v1/audio/generate` | acestep |
 | **Reranking** | `/v1/rerank` | vllm |
 | **Scoring de pares** | `/v1/score` | vllm |

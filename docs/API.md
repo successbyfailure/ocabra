@@ -134,6 +134,7 @@ curl -H "Authorization: Bearer sk-…" http://localhost:8484/v1/models
 |---|---|---|---|
 | POST | `/v1/images/generations` | Create image | clave |
 | POST | `/v1/images/edits` | Edit image | clave |
+| POST | `/v1/images/upscale` | Upscale an image | clave |
 | GET | `/v1/images/files/{name}` | Retrieve a generated image | pública |
 | POST | `/v1/audio/transcriptions` | Transcribe audio | clave |
 | GET | `/v1/audio/voices` | List TTS voices for a model | clave |

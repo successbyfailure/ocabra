@@ -56,6 +56,10 @@ class UpscalerBackend(BackendInterface):
                 # licencia permisiva; reimplementar transformers a mano es
                 # arriesgarse a errores sutiles que degradan la salida.
                 "spandrel>=0.4",
+                # Decodifica/codifica las fotos de /v1/images/upscale. Ya llega
+                # como dependencia de torchvision (vía spandrel); se declara
+                # para no depender de esa cadena.
+                "pillow",
             ],
             pip_extra_index_urls=[
                 "https://download.pytorch.org/whl/cu124",
@@ -66,7 +70,7 @@ class UpscalerBackend(BackendInterface):
             estimated_size_mb=3000,
             display_name="Upscaler (Real-ESRGAN Compact)",
             description=(
-                "Escalado y restauración de vídeo 4x con Real-ESRGAN Compact. "
+                "Escalado y restauración de vídeo y fotos 4x con Real-ESRGAN Compact. "
                 "Rápido y de VRAM mínima: apto para vídeos completos."
             ),
             tags=["Video", "GPU", "CUDA"],
@@ -173,7 +177,7 @@ class UpscalerBackend(BackendInterface):
         return await self._health_check_port(worker.port)
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
-        return BackendCapabilities(video_upscaling=True, streaming=False)
+        return BackendCapabilities(video_upscaling=True, image_upscaling=True, streaming=False)
 
     async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         return _VRAM_ESTIMATE_MB
@@ -214,6 +218,38 @@ class UpscalerBackend(BackendInterface):
                 if k.lower().startswith("x-ocabra-")
             }
             return response.content, stats
+
+    async def upscale_image(
+        self,
+        model_id: str,
+        image: bytes,
+        *,
+        filename: str = "image",
+        content_type: str = "application/octet-stream",
+        **kwargs: Any,
+    ) -> tuple[bytes, str, dict[str, str]]:
+        """Devuelve (bytes de la imagen, content-type, cabeceras de estadísticas).
+
+        Los ``kwargs`` (scale, target_width, target_height, output_format,
+        quality) van al worker como query, igual que en ``upscale_video``.
+        """
+        worker = self._workers.get(model_id)
+        if worker is None:
+            raise KeyError(f"No worker found for model '{model_id}'")
+        params = {k: str(v) for k, v in kwargs.items() if v is not None}
+        url = f"http://127.0.0.1:{worker.port}/upscale/image"
+        # Una foto de 4K por RRDBNet son segundos, no minutos, pero el primer
+        # uso tras cargar compila kernels: margen holgado sin llegar al de vídeo.
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            response = await client.post(
+                url, params=params, files={"file": (filename, image, content_type)}
+            )
+            response.raise_for_status()
+            stats = {
+                k: v for k, v in response.headers.items() if k.lower().startswith("x-ocabra-")
+            }
+            media_type = response.headers.get("content-type", "image/png")
+            return response.content, media_type, stats
 
     async def _wait_until_healthy(
         self, *, port: int, process: asyncio.subprocess.Process, timeout_s: int

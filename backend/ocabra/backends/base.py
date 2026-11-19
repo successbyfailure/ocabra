@@ -116,6 +116,10 @@ class BackendCapabilities:
     # Distinct from ``video_input``, which is about consuming video *inside*
     # chat: a model can restore video without being able to talk about it.
     video_upscaling: bool = False
+    # Single-image super-resolution (/v1/images/upscale). Separate from
+    # ``video_upscaling`` because not every video model can take a still:
+    # FlashVSR is temporal and only has a video path.
+    image_upscaling: bool = False
     streaming: bool = False
     context_length: int = 0
     # Native context length the model was trained/configured for, independent
@@ -322,3 +326,13 @@ class BackendInterface(ABC):
         scheduler stays free to evict the model in between.
         """
         raise NotImplementedError(f"{type(self).__name__} does not support video upscaling")
+
+    async def upscale_image(
+        self, model_id: str, image: bytes, **kwargs: Any
+    ) -> tuple[bytes, str, dict[str, str]]:
+        """Upscale one still image (``/v1/images/upscale``).
+
+        Returns ``(image bytes, content type, x-ocabra-* stats headers)``. Only
+        backends that advertise ``image_upscaling`` implement it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support image upscaling")

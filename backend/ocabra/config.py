@@ -821,7 +821,7 @@ class Settings(BaseSettings):
     openai_image_max_part_size_mb: int = Field(
         default=25,
         ge=1,
-        description="Max size in MB for image/mask uploads at /v1/images/edits.",
+        description="Max size in MB for image uploads at /v1/images/edits and /v1/images/upscale.",
     )
     # Seconds before a generated image file is garbage-collected. OpenAI's URLs
     # are valid for 60 min; mirror that by default.

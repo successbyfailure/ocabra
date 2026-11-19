@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Worker de escalado de vídeo (Real-ESRGAN Compact / SRVGGNetCompact).
+"""Worker de escalado de vídeo y fotos (Real-ESRGAN Compact / SRVGGNetCompact).
 
-Recibe un segmento de vídeo sin audio y devuelve el segmento escalado. No
-guarda estado entre peticiones, así que el planificador puede expulsar el
+Recibe un segmento de vídeo sin audio (``/upscale``) o una foto
+(``/upscale/image``) y devuelve el resultado escalado. No guarda estado entre
+peticiones, así que el planificador puede expulsar el
 modelo entre segmentos sin romper nada.
 
 Nota de rendimiento: el modelo va sobrado (~90 fps a 1080p en una RTX 3090) y
@@ -501,6 +502,240 @@ def upscale_sync(
     }
 
 
+# ── Fotos: la misma red, sin códec de vídeo ─────────────────────────────
+
+# Lado de la tesela (en píxeles de entrada). La ruta de vídeo no tesela porque
+# sus fotogramas son pequeños (≤1080p); una foto de móvil de 12 MP pasada entera
+# por RRDBNet pide varios GiB de activaciones y tumba la tarjeta compartida.
+IMAGE_TILE = int(os.getenv("UPSCALER_IMAGE_TILE", "512"))
+# Margen de contexto alrededor de cada tesela. Se recorta de la salida, así que
+# no hay mezcla: sin margen se ven costuras en los bordes de cada trozo porque
+# la red no "ve" lo que hay al otro lado.
+IMAGE_TILE_PAD = int(os.getenv("UPSCALER_IMAGE_TILE_PAD", "32"))
+# Píxeles de entrada máximos. La salida se ensambla en RAM a la escala nativa
+# del modelo (16x los píxeles con un 4x): 4K de entrada ya son ~400 MB.
+IMAGE_MAX_PIXELS = int(os.getenv("UPSCALER_IMAGE_MAX_PIXELS", str(3840 * 2160)))
+# Límites de dimensión de los propios formatos.
+_FORMAT_MAX_SIDE = {"png": 2**31 - 1, "jpeg": 65_535, "webp": 16_383}
+_FORMAT_MEDIA_TYPE = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
+_FORMAT_ALIASES = {"jpg": "jpeg"}
+
+
+class ImageRequestError(ValueError):
+    """Petición de foto inválida: se responde con ``status_code`` y el mensaje."""
+
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def normalize_output_format(value: str | None) -> str:
+    fmt = (value or "png").strip().lower()
+    fmt = _FORMAT_ALIASES.get(fmt, fmt)
+    if fmt not in _FORMAT_MEDIA_TYPE:
+        raise ImageRequestError(f"output_format '{value}' no soportado; usa png, jpeg o webp.")
+    return fmt
+
+
+def plan_delivered_size(
+    width: int,
+    height: int,
+    model_scale: int,
+    *,
+    scale: float | None = None,
+    target_width: int | None = None,
+    target_height: int | None = None,
+) -> tuple[int, int]:
+    """Tamaño que se entrega, con el mismo criterio que la ruta de vídeo.
+
+    El modelo siempre produce ``model_scale`` x; lo que pide el cliente solo
+    puede *reducir* esa salida (``scale`` menor que la nativa o una caja
+    ``target_width``/``target_height``), nunca ampliarla: estirar por encima de
+    lo que dio el modelo sería un escalado falso que finge una resolución que
+    no existe. Se conserva la proporción y gana la restricción más pequeña.
+    """
+    out_w, out_h = width * model_scale, height * model_scale
+    factor = 1.0
+    if scale is not None:
+        factor = min(factor, scale / model_scale)
+    if target_width:
+        factor = min(factor, target_width / out_w)
+    if target_height:
+        factor = min(factor, target_height / out_h)
+    if factor >= 1.0:
+        return out_w, out_h
+    return max(1, round(out_w * factor)), max(1, round(out_h * factor))
+
+
+def _model_device_dtype(state: WorkerState) -> tuple[Any, Any]:
+    try:
+        device = next(state.model.parameters()).device
+    except (StopIteration, AttributeError):
+        device = torch.device("cuda")
+    return device, (torch.float16 if state.half else torch.float32)
+
+
+def upscale_rgb_tiled(state: WorkerState, rgb: Any, *, tile: int, pad: int) -> tuple[Any, int]:
+    """Escala un array HxWx3 uint8 por teselas; devuelve (array escalado, teselas).
+
+    Cada tesela se procesa con ``pad`` píxeles de contexto por cada lado y de su
+    salida solo se copia la parte central, así que el resultado es el de
+    procesar la foto entera salvo en los bordes del campo receptivo. Imágenes
+    que caben en una tesela van de una pasada.
+    """
+    height, width = rgb.shape[:2]
+    scale = state.scale
+    device, dtype = _model_device_dtype(state)
+    out = np.empty((height * scale, width * scale, 3), dtype=np.uint8)
+    src = torch.from_numpy(np.require(rgb, requirements=["C", "W"])).permute(2, 0, 1)[None]
+    tile = max(16, tile)
+    tiles = 0
+    with torch.no_grad():
+        for y0 in range(0, height, tile):
+            for x0 in range(0, width, tile):
+                y1, x1 = min(y0 + tile, height), min(x0 + tile, width)
+                py0, px0 = max(0, y0 - pad), max(0, x0 - pad)
+                py1, px1 = min(height, y1 + pad), min(width, x1 + pad)
+                x = src[:, :, py0:py1, px0:px1].to(device=device, dtype=dtype).div_(255)
+                y = state.model(x).clamp_(0, 1)
+                oy, ox = (y0 - py0) * scale, (x0 - px0) * scale
+                core = y[:, :, oy : oy + (y1 - y0) * scale, ox : ox + (x1 - x0) * scale]
+                out[y0 * scale : y1 * scale, x0 * scale : x1 * scale] = (
+                    core.mul(255).round_().byte()[0].permute(1, 2, 0).cpu().numpy()
+                )
+                tiles += 1
+    return out, tiles
+
+
+def _is_oom(exc: BaseException) -> bool:
+    oom = getattr(torch.cuda, "OutOfMemoryError", None)
+    return (oom is not None and isinstance(exc, oom)) or "out of memory" in str(exc).lower()
+
+
+def upscale_image_sync(
+    state: WorkerState,
+    payload: bytes,
+    *,
+    scale: float | None = None,
+    target_width: int | None = None,
+    target_height: int | None = None,
+    output_format: str | None = None,
+    quality: int | None = None,
+    tile: int | None = None,
+) -> tuple[bytes, str, dict]:
+    """Escala una foto: decodifica con PIL, pasa la red por teselas y codifica.
+
+    - Orientación EXIF aplicada (las fotos de móvil vienen giradas por EXIF).
+    - Transparencia: el RGB pasa por la red y el canal alfa se reescala aparte
+      con Lanczos, porque estas redes son de 3 canales. JPEG no tiene alfa: se
+      descarta.
+    - Si la VRAM no alcanza se reintenta con teselas de la mitad de lado hasta
+      64 px antes de rendirse con un 507.
+    """
+    from io import BytesIO
+
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    fmt = normalize_output_format(output_format)
+    try:
+        img = Image.open(BytesIO(payload))
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ImageRequestError(f"No se reconoce la imagen: {exc}") from exc
+    width, height = img.size
+    # Antes de decodificar: un PNG pequeño puede declarar 50.000 x 50.000 px.
+    if width * height > IMAGE_MAX_PIXELS:
+        raise ImageRequestError(
+            f"La imagen tiene {width}x{height} px; el máximo son {IMAGE_MAX_PIXELS} px "
+            "de entrada (UPSCALER_IMAGE_MAX_PIXELS).",
+            status_code=413,
+        )
+    try:
+        img = ImageOps.exif_transpose(img)
+        img.load()
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise ImageRequestError(f"No se pudo decodificar la imagen: {exc}") from exc
+    width, height = img.size
+
+    has_alpha = img.mode in ("RGBA", "LA", "PA", "RGBa", "La") or (
+        img.mode == "P" and "transparency" in img.info
+    )
+    alpha = None
+    if has_alpha:
+        rgba = img.convert("RGBA")
+        alpha = rgba.getchannel("A")
+        rgb_img = rgba.convert("RGB")
+    else:
+        rgb_img = img.convert("RGB")
+
+    out_w, out_h = plan_delivered_size(
+        width,
+        height,
+        state.scale,
+        scale=scale,
+        target_width=target_width,
+        target_height=target_height,
+    )
+    if max(out_w, out_h) > _FORMAT_MAX_SIDE[fmt]:
+        raise ImageRequestError(
+            f"{fmt} admite como mucho {_FORMAT_MAX_SIDE[fmt]} px por lado y la salida "
+            f"sería {out_w}x{out_h}; pide png o un target_width/target_height menor."
+        )
+
+    started = time.monotonic()
+    rgb = np.asarray(rgb_img, dtype=np.uint8)
+    tile_side = tile or IMAGE_TILE
+    while True:
+        try:
+            up, tiles = upscale_rgb_tiled(state, rgb, tile=tile_side, pad=IMAGE_TILE_PAD)
+            break
+        except RuntimeError as exc:
+            if not _is_oom(exc):
+                raise
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if tile_side <= 64:
+                raise ImageRequestError(
+                    "Sin VRAM para escalar la imagen ni con teselas de 64 px.",
+                    status_code=507,
+                ) from exc
+            tile_side //= 2
+            _log("upscaler_image_oom_retry", level=logging.WARNING, tile=tile_side)
+    model_h, model_w = up.shape[:2]
+
+    result = Image.fromarray(up, "RGB")
+    del up
+    keep_alpha = alpha is not None and fmt != "jpeg"
+    if keep_alpha:
+        result.putalpha(alpha.resize((model_w, model_h), Image.Resampling.LANCZOS))
+    if (out_w, out_h) != (model_w, model_h):
+        result = result.resize((out_w, out_h), Image.Resampling.LANCZOS)
+
+    buf = BytesIO()
+    q = 95 if quality is None else max(1, min(100, int(quality)))
+    if fmt == "png":
+        # Nivel 4 y no el 6 por defecto: en salidas de 100+ MP el 9 tarda
+        # segundos y apenas gana; el cliente suele recomprimir de todas formas.
+        result.save(buf, format="PNG", compress_level=4)
+    elif fmt == "jpeg":
+        result.save(buf, format="JPEG", quality=q, subsampling=0 if q >= 90 else 2)
+    else:
+        result.save(buf, format="WEBP", quality=q, method=4)
+    elapsed = time.monotonic() - started
+    stats = {
+        "input_resolution": f"{width}x{height}",
+        "model_resolution": f"{model_w}x{model_h}",
+        "delivered_resolution": f"{out_w}x{out_h}",
+        "delivered_width": out_w,
+        "delivered_height": out_h,
+        "scale": state.scale,
+        "tiles": tiles,
+        "alpha": int(keep_alpha),
+        "output_format": fmt,
+        "seconds": round(elapsed, 2),
+    }
+    return buf.getvalue(), _FORMAT_MEDIA_TYPE[fmt], stats
+
+
 def create_app(state: WorkerState) -> FastAPI:
     app = FastAPI(title="oCabra Upscaler Worker")
 
@@ -536,6 +771,65 @@ def create_app(state: WorkerState) -> FastAPI:
         return Response(
             content=body,
             media_type="video/mp4",
+            headers={f"x-ocabra-{k.replace('_', '-')}": str(v) for k, v in stats.items()},
+        )
+
+    @app.post("/upscale/image")
+    async def upscale_image(
+        file: UploadFile,
+        scale: float | None = None,
+        target_width: int | None = None,
+        target_height: int | None = None,
+        output_format: str = "png",
+        quality: int | None = None,
+        tile: int | None = None,
+    ) -> Response:
+        """Escala una foto sin pasar por ningún códec de vídeo.
+
+        Devuelve la imagen en ``output_format`` (png por defecto) con cabeceras
+        ``x-ocabra-*`` de estadísticas, como ``/upscale``. 400 si la imagen o
+        los parámetros no valen, 413 si pasa de ``UPSCALER_IMAGE_MAX_PIXELS``,
+        507 si no hay VRAM ni con teselas mínimas.
+        """
+        if state.model is None:
+            raise HTTPException(status_code=503, detail=state.load_error or "Model not ready")
+        for name, value in (
+            ("scale", scale),
+            ("target_width", target_width),
+            ("target_height", target_height),
+            ("tile", tile),
+        ):
+            if value is not None and value <= 0:
+                raise HTTPException(status_code=400, detail=f"{name} debe ser mayor que 0")
+        payload = await file.read()
+        if not payload:
+            raise HTTPException(status_code=400, detail="Imagen vacía")
+        loop = asyncio.get_running_loop()
+        run = partial(
+            upscale_image_sync,
+            state,
+            payload,
+            scale=scale,
+            target_width=target_width,
+            target_height=target_height,
+            output_format=output_format,
+            quality=quality,
+            tile=tile,
+        )
+        try:
+            body, media_type, stats = await loop.run_in_executor(None, run)
+        except ImageRequestError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except ImportError as exc:  # pragma: no cover - instalación sin Pillow
+            raise HTTPException(
+                status_code=501,
+                detail=f"El backend upscaler no tiene Pillow instalado: {exc}",
+            ) from exc
+
+        _log("upscaler_image_done", model_id=state.model_id, **stats)
+        return Response(
+            content=body,
+            media_type=media_type,
             headers={f"x-ocabra-{k.replace('_', '-')}": str(v) for k, v in stats.items()},
         )
 

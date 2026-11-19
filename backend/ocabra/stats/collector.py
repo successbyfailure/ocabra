@@ -63,6 +63,10 @@ def _extract_work_size_meta(
     if not isinstance(response_payload, dict):
         response_payload = None
 
+    if request_kind == "image_upscale":
+        # One photo per request; the response is the image itself (no JSON).
+        return {"n_images": 1}
+
     if request_kind == "tts":
         meta: dict[str, float] = {}
         text = None
