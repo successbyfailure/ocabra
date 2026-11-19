@@ -7,7 +7,7 @@ retired integration, a typo) is dropped without a word, and a setting added to
 keep them in step:
 
 - every key in ``.env.example`` is a setting, or a variable that compose,
-  setup.sh or a build script reads;
+  setup.sh, a build script or a direct ``os.environ`` lookup reads;
 - every setting is in ``.env.example`` (APP_VERSION excepted: it is ignored);
 - a commented ``# KEY=value`` shows the real default: the one in config.py, or
   the ``${KEY:-value}`` that docker-compose passes instead.
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,8 @@ CONSUMERS = [
     REPO / "docker-compose.fat.yml",
     REPO / "setup.sh",
     *sorted((REPO / "backend" / "scripts").glob("*.sh")),
+    # os.environ lookups outside Settings (BACKEND_OCI_TOKEN, OCABRA_ENV).
+    *sorted((REPO / "backend" / "ocabra").rglob("*.py")),
 ]
 # Settings deliberately left out of .env.example.
 NOT_DOCUMENTED = {"APP_VERSION"}  # the validator ignores it: the version is the code's
@@ -50,12 +53,15 @@ def _entries() -> list[tuple[str, str, bool]]:
     return out
 
 
-def _consumers_text() -> str:
-    return "\n".join(p.read_text(encoding="utf-8") for p in CONSUMERS if p.exists())
+@cache
+def _consumers_text(*, shell_only: bool = False) -> str:
+    paths = [p for p in CONSUMERS if not (shell_only and p.suffix == ".py")]
+    return "\n".join(p.read_text(encoding="utf-8") for p in paths if p.exists())
 
 
 def _compose_defaults(key: str) -> set[str]:
-    return set(re.findall(r"\$\{" + re.escape(key) + r":-([^}]*)\}", _consumers_text()))
+    text = _consumers_text(shell_only=True)
+    return set(re.findall(r"\$\{" + re.escape(key) + r":-([^}]*)\}", text))
 
 
 def test_cada_clave_del_env_example_la_lee_alguien():
