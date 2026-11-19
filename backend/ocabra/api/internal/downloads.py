@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 import re
 import shutil
 import uuid
@@ -756,13 +757,16 @@ router = APIRouter(tags=["downloads"], lifespan=_lifespan)
 )
 async def list_downloads(
     # Lectura abierta para el indicador de descargas de la cabecera
-    # (2026-11-09). Lanzar o cancelar sigue pidiendo model_manager.
+    # (2026-11-09), igual que el detalle y el stream de un trabajo, que dan
+    # la misma información. Lanzar, cancelar o borrar sigue pidiendo
+    # model_manager.
     _user: UserContext = Depends(require_role("user")),
 ) -> list[DownloadJob]:
     """List every download job, most recent first.
 
     Open to any authenticated user (role ``user``) for the header's download
-    indicator; enqueueing and cancelling still require ``model_manager``.
+    indicator, like the job detail and its progress stream; enqueueing,
+    cancelling and clearing history still require ``model_manager``.
 
     Returns:
         A list of ``DownloadJob`` (queued, downloading, completed, failed,
@@ -825,9 +829,23 @@ async def enqueue_download(
 )
 async def get_download(
     job_id: str,
-    _user: UserContext = Depends(require_role("model_manager")),
+    _user: UserContext = Depends(require_role("user")),
 ) -> DownloadJob:
-    """Get a single download job by ID."""
+    """Get a single download job by ID.
+
+    Open to any authenticated user (role ``user``), like ``GET /downloads``,
+    which already returns this same job; enqueueing, cancelling and clearing
+    history still require ``model_manager``.
+
+    Args:
+        job_id: Download job id.
+
+    Returns:
+        The ``DownloadJob``.
+
+    Raises:
+        HTTPException 404: unknown job.
+    """
     job = await download_manager.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Download job not found")
@@ -886,19 +904,25 @@ async def cancel_download(
 @router.get(
     "/downloads/{job_id}/stream",
     summary="Stream download progress",
-    description="Subscribe to real-time Server-Sent Events for download progress updates.",
+    description=(
+        "Subscribe to real-time Server-Sent Events for download progress updates. "
+        "The stream ends by itself once the job reaches a terminal status "
+        "(completed, failed, cancelled); the last event carries that status."
+    ),
     responses={404: {"description": "Download job not found"}},
 )
 async def stream_download_progress(
     job_id: str,
-    _user: UserContext = Depends(require_role("model_manager")),
+    _user: UserContext = Depends(require_role("user")),
 ) -> StreamingResponse:
     """Stream a download job's progress as Server-Sent Events.
 
-    Requires the ``model_manager`` role. Relays the Redis channel
-    ``download:progress:{job_id}``; each event is a ``data:`` line with the job
-    JSON. The stream does not end by itself: the client closes it once the job
-    reaches a terminal status.
+    Open to any authenticated user (role ``user``), like ``GET /downloads``:
+    the global download panel follows active jobs for everyone. Relays the
+    Redis channel ``download:progress:{job_id}``; each event is a ``data:``
+    line with the job JSON. The first event is the job's current state, so a
+    job that finished before the client subscribed is not missed. The stream
+    ends after the first event whose ``status`` is terminal.
 
     Args:
         job_id: Download job id.
@@ -912,21 +936,62 @@ async def stream_download_progress(
     if await download_manager.get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="Download job not found")
 
-    channel = f"download:progress:{job_id}"
-
-    async def event_stream() -> AsyncGenerator[str, None]:
-        async with subscribe(channel) as pubsub:
-            while True:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if message is None:
-                    continue
-                data = message.get("data")
-                if not isinstance(data, str):
-                    continue
-                yield f"data: {data}\n\n"
-
+    channel = f"{DOWNLOAD_PROGRESS_CHANNEL}:{job_id}"
     return StreamingResponse(
-        event_stream(),
+        _download_event_stream(job_id, channel),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+_TERMINAL_DOWNLOAD_STATUSES = frozenset({"completed", "failed", "cancelled"})
+# Ticks of ``get_message(timeout=1.0)`` between re-reads of the stored job: a
+# terminal update published while the subscriber was busy (or dropped by
+# Redis) would otherwise leave the stream open forever.
+_STREAM_RECHECK_TICKS = 15
+
+
+async def _download_event_stream(job_id: str, channel: str) -> AsyncGenerator[str, None]:
+    """SSE events for one job until it reaches a terminal status."""
+    async with subscribe(channel) as pubsub:
+        # Subscribed first, then the snapshot: an update published in between
+        # is seen twice at worst, never lost.
+        job = await download_manager.get_job(job_id)
+        if job is None:
+            return
+        yield f"data: {job.model_dump_json()}\n\n"
+        if job.status in _TERMINAL_DOWNLOAD_STATUSES:
+            return
+        idle_ticks = 0
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message is None:
+                idle_ticks += 1
+                if idle_ticks >= _STREAM_RECHECK_TICKS:
+                    idle_ticks = 0
+                    job = await download_manager.get_job(job_id)
+                    if job is None:
+                        return
+                    if job.status in _TERMINAL_DOWNLOAD_STATUSES:
+                        yield f"data: {job.model_dump_json()}\n\n"
+                        return
+                continue
+            data = message.get("data")
+            if isinstance(data, bytes):
+                data = data.decode("utf-8", errors="replace")
+            if not isinstance(data, str):
+                continue
+            idle_ticks = 0
+            yield f"data: {data}\n\n"
+            if _status_of(data) in _TERMINAL_DOWNLOAD_STATUSES:
+                return
+
+
+def _status_of(data: str) -> str | None:
+    """``status`` of a published job payload, ``None`` if it is not one."""
+    try:
+        payload = json.loads(data)
+    except ValueError:
+        return None
+    status = payload.get("status") if isinstance(payload, dict) else None
+    return status if isinstance(status, str) else None
