@@ -227,7 +227,7 @@ async def test_the_pin_autoload_loads_the_default_preset_worker(monkeypatch):
     pin = _state("llamacpp_mks/gemma4:26b", LoadPolicy.PIN, ModelStatus.CONFIGURED)
     scheduler = SimpleNamespace(find_gpu_for_model=AsyncMock(return_value=[1]))
     mm = _mm_con_scheduler(scheduler, pin)
-    mm.pin_worker_resolver = AsyncMock(return_value="llamacpp_mks/gemma4:26b::abc")
+    mm.pin_worker_resolver = AsyncMock(return_value="llamacpp_mks/gemma4:26b::781a0367a8ba")
 
     async def carga(model_id, **kwargs):
         mm._states[model_id] = _state(model_id, LoadPolicy.PIN, ModelStatus.LOADED)
@@ -236,18 +236,18 @@ async def test_the_pin_autoload_loads_the_default_preset_worker(monkeypatch):
     load = AsyncMock(side_effect=carga)
     await _arranca(mm, load)
 
-    load.assert_awaited_once_with("llamacpp_mks/gemma4:26b::abc", allow_pressure_eviction=False)
+    load.assert_awaited_once_with("llamacpp_mks/gemma4:26b::781a0367a8ba", allow_pressure_eviction=False)
 
 
 def test_a_loaded_preset_worker_satisfies_the_pin():
     pin = _state("llamacpp_mks/gemma4:26b", LoadPolicy.PIN, ModelStatus.CONFIGURED)
-    derived = _state("llamacpp_mks/gemma4:26b::abc", LoadPolicy.PIN, ModelStatus.LOADED)
+    derived = _state("llamacpp_mks/gemma4:26b::781a0367a8ba", LoadPolicy.PIN, ModelStatus.LOADED)
     mm = _mm(pin, derived)
     assert mm._pinned_needing_load() == []
 
 
 def test_derived_states_are_never_autoloaded_on_their_own():
-    stale = _state("llamacpp_mks/gemma4:26b::old", LoadPolicy.PIN, ModelStatus.UNLOADED)
+    stale = _state("llamacpp_mks/gemma4:26b::0b2a99a4d66f", LoadPolicy.PIN, ModelStatus.UNLOADED)
     pin = _state("llamacpp_mks/gemma4:26b", LoadPolicy.PIN, ModelStatus.CONFIGURED)
     mm = _mm(pin, stale)
     assert mm._pinned_needing_load() == ["llamacpp_mks/gemma4:26b"]
@@ -258,6 +258,6 @@ async def test_if_the_preset_cannot_be_resolved_the_model_itself_loads():
     mm = _mm(_state("a/pin", LoadPolicy.PIN, ModelStatus.CONFIGURED))
     mm.pin_worker_resolver = AsyncMock(side_effect=RuntimeError("sin perfil"))
     assert await mm._pin_load_target("a/pin") == "a/pin"
-    mm.pin_worker_resolver = AsyncMock(return_value="a/pin::x")
-    assert await mm._pin_load_target("a/pin") == "a/pin::x"
-    assert await mm._pin_load_target("a/pin::x") == "a/pin::x"  # un derivado se carga tal cual
+    mm.pin_worker_resolver = AsyncMock(return_value="a/pin::c96aa660f486")
+    assert await mm._pin_load_target("a/pin") == "a/pin::c96aa660f486"
+    assert await mm._pin_load_target("a/pin::c96aa660f486") == "a/pin::c96aa660f486"  # un derivado se carga tal cual

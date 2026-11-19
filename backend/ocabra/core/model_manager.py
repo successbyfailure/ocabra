@@ -29,12 +29,14 @@ from ocabra.core.model_manager_helpers import (
     estimate_bitnet_vram_from_config,
     estimate_llama_cpp_vram_from_config,
     estimate_vllm_vram_from_config,
+    is_derived_worker_key,
     resolve_bitnet_gpu_layers,
     resolve_bitnet_option,
     resolve_llama_cpp_allowed_gpus,
     resolve_llama_cpp_gpu_layers,
     resolve_llama_cpp_split_policy,
     resolve_worker_slots,
+    strip_worker_suffix,
 )
 from ocabra.core.model_ref import (
     LLAMA_CPP_FAMILY,
@@ -42,6 +44,11 @@ from ocabra.core.model_ref import (
     is_llama_cpp_family,
     normalize_model_ref,
     parse_model_ref,
+)
+from ocabra.core.vram_arbiter import (
+    LoadGateTimeoutError,
+    VramArbiter,
+    acquire_lock_unless,
 )
 from ocabra.db.model_config import LogicalModel, ModelConfig
 from ocabra.db.stats import ModelLoadStat
@@ -120,18 +127,6 @@ def _request_attribution(user) -> dict:
         "username": getattr(user, "username", None),
         "api_key_name": getattr(user, "api_key_name", None),
     }
-
-
-class LoadGateTimeoutError(TimeoutError):
-    """Waiting for the global load gate (or a model's own load lock) ran out.
-
-    Retryable: nothing failed, another model's load/eviction is still holding
-    the GPU (a load may legitimately drain busy neighbours for minutes). The
-    waiting load leaves its model as it was instead of marking it ERROR, and
-    the API answers 503 with ``Retry-After`` like any other failed load.
-    Subclasses ``TimeoutError`` so existing ``except TimeoutError`` keep
-    catching it.
-    """
 
 
 class ModelStatus(str, Enum):
@@ -372,7 +367,12 @@ class ModelManager:
         # parallel starts from stepping on each other and prevents stale VRAM
         # decisions. The per-model lock above still covers concurrent requests
         # for the same model.
-        self._backend_load_gate: asyncio.Lock = asyncio.Lock()
+        # The gate is the VRAM arbiter's mutex (core/vram_arbiter.py): every
+        # other VRAM-changing operation outside a load (manual unload,
+        # ensure_vram_free, the shrinks of make_room_for_whisper/vision, the
+        # VRAM watchdog) takes it too. See docs/tasks/vram-arbiter-plan.md.
+        self._arbiter = VramArbiter()
+        self._backend_load_gate: asyncio.Lock = self._arbiter.lock
         # Counters exposed to clients so they can render meaningful hints
         # instead of a spinner during cold starts.
         # ``_load_queue_waiters``: how many loads are currently blocked
@@ -467,11 +467,10 @@ class ModelManager:
         self._session_registry = None
         self._duration_estimator = None
         self._batch_priority = None
-        # Task currently holding ``_backend_load_gate`` / each model's load
-        # lock. Lets a path that already holds one re-enter it (an eviction
-        # inside a load calling unload() or evict_for_whisper) instead of
-        # deadlocking on a non-reentrant asyncio.Lock.
-        self._load_gate_owner: asyncio.Task | None = None
+        # Task currently holding each model's load lock (the gate's owner is
+        # tracked by the arbiter). Lets a path that already holds one re-enter
+        # it (an eviction inside a load calling unload() or evict_for_whisper)
+        # instead of deadlocking on a non-reentrant asyncio.Lock.
         self._load_lock_owners: dict[str, asyncio.Task] = {}
         # model_id -> loop time by which the load of that model must stop
         # waiting for busy eviction candidates to drain. One budget for the
@@ -479,7 +478,7 @@ class ModelManager:
         self._drain_deadlines: dict[str, float] = {}
 
     @asynccontextmanager
-    async def _acquire_load_gate(self):
+    async def _acquire_load_gate(self, purpose: str = "load"):
         """Acquire ``_backend_load_gate`` with a bounded wait.
 
         The gate is held for the full admission+eviction+start sequence of
@@ -499,29 +498,13 @@ class ModelManager:
         Raises:
             LoadGateTimeoutError: the wait ran out (retryable).
         """
-        current = asyncio.current_task()
-        if current is not None and self._load_gate_owner is current:
+        async with self._arbiter.hold(
+            timeout_s=max(1, int(settings.max_drain_timeout_s)), purpose=purpose
+        ):
             yield
-            return
-        try:
-            await asyncio.wait_for(
-                self._backend_load_gate.acquire(),
-                timeout=max(1, int(settings.max_drain_timeout_s)),
-            )
-        except TimeoutError as exc:
-            raise LoadGateTimeoutError(
-                "Timed out waiting for the GPU load lock — another model's "
-                "load/eviction is still holding it"
-            ) from exc
-        self._load_gate_owner = current
-        try:
-            yield
-        finally:
-            self._load_gate_owner = None
-            self._backend_load_gate.release()
 
     @asynccontextmanager
-    async def _try_load_gate(self):
+    async def _try_load_gate(self, purpose: str = "evict"):
         """Take the load gate only if no load is running; yields whether held.
 
         For request-path evictions (``evict_for_whisper``) that must not run
@@ -529,31 +512,38 @@ class ModelManager:
         must not queue behind it: the request is in flight while it waits, and
         a load draining that very model would wait on it in turn.
         """
+        async with self._arbiter.try_hold(purpose=purpose) as held:
+            yield held
+
+    @asynccontextmanager
+    async def _arbiter_for_request(self, model_id: str, purpose: str):
+        """The gate for a VRAM change made on behalf of a request in flight on
+        ``model_id`` (vision projector, whisper growth). Yields whether held.
+
+        Waits like a load would, except that it gives up (``False``) as soon
+        as the gate's owner is waiting for ``model_id``'s requests to drain:
+        this request is one of them, so waiting on would only hold both until
+        the timeouts. The wait is bounded by
+        ``pressure_eviction_drain_timeout_s`` — no longer than a load would
+        wait for this request — and running out also yields ``False``.
+        """
         if self._holds_load_gate():
             yield True
             return
-        if self._backend_load_gate.locked():
-            yield False
-            return
-        # Not wait_for: on 3.11 a timeout racing the acquisition can drop a
-        # lock that was in fact taken; _acquire_lock_unless hands it back.
-        if not await self._acquire_lock_unless(self._backend_load_gate, lambda: False, 1.0):
-            yield False
-            return
-        self._load_gate_owner = asyncio.current_task()
-        try:
-            yield True
-        finally:
-            self._load_gate_owner = None
-            self._backend_load_gate.release()
+        async with self._arbiter.hold(
+            timeout_s=max(1, int(settings.pressure_eviction_drain_timeout_s)),
+            purpose=purpose,
+            abort_if=lambda: self._arbiter.is_waiting_on(model_id),
+            timeout_yields_false=True,
+        ) as held:
+            yield held
 
     def _holds_load_gate(self) -> bool:
-        current = asyncio.current_task()
-        return current is not None and self._load_gate_owner is current
+        return self._arbiter.held_by_current()
 
     def _load_gate_busy(self) -> bool:
         """Some *other* task holds the load gate (a load/eviction is running)."""
-        return self._backend_load_gate.locked() and not self._holds_load_gate()
+        return self._arbiter.busy()
 
     @asynccontextmanager
     async def _acquire_model_load_lock(
@@ -622,41 +612,8 @@ class ModelManager:
     async def _acquire_lock_unless(
         lock: asyncio.Lock, abort_if: Callable[[], bool], timeout_s: float
     ) -> bool | None:
-        """Acquire ``lock`` unless ``abort_if()`` turns true first.
-
-        Returns True (held), False (aborted, not held) or None (timed out,
-        not held).
-        """
-        if abort_if():
-            return False
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_s
-        acquire = asyncio.ensure_future(lock.acquire())
-        aborted = False
-        try:
-            while True:
-                done, _ = await asyncio.wait({acquire}, timeout=0.25)
-                if done:
-                    return True
-                if abort_if():
-                    aborted = True
-                    break
-                if loop.time() >= deadline:
-                    break
-        except BaseException:
-            acquire.cancel()
-            with suppress(asyncio.CancelledError):
-                await acquire
-            if not acquire.cancelled() and acquire.exception() is None:
-                lock.release()
-            raise
-        acquire.cancel()
-        with suppress(asyncio.CancelledError):
-            await acquire
-        if not acquire.cancelled() and acquire.exception() is None:
-            # Got the lock in the same tick we gave up: hand it back.
-            lock.release()
-        return False if aborted else None
+        """See :func:`ocabra.core.vram_arbiter.acquire_lock_unless`."""
+        return await acquire_lock_unless(lock, abort_if, timeout_s)
 
     def begin_request(self, model_id: str, *, source: str = "api", user=None) -> str:
         """Mark one request as in-flight. Returns request_id.
@@ -1593,10 +1550,13 @@ class ModelManager:
                 )
                 self._eviction_wait_for[requesting_model_id] = candidate_id
                 try:
-                    for _ in range(drain_timeout_s * 2):
-                        if not self.is_busy(candidate_id):
-                            break
-                        await asyncio.sleep(0.5)
+                    # A request on the candidate that waits for the arbiter
+                    # (vision, whisper) gives up instead of closing a cycle.
+                    with self._arbiter.waiting_on(candidate_id):
+                        for _ in range(drain_timeout_s * 2):
+                            if not self.is_busy(candidate_id):
+                                break
+                            await asyncio.sleep(0.5)
                 finally:
                     self._eviction_wait_for.pop(requesting_model_id, None)
                 if self.is_busy(candidate_id):
@@ -1701,7 +1661,14 @@ class ModelManager:
                                 evicting_mb=over_mb,
                                 loaded_count=len(loaded_on_gpu),
                             )
-                            await self._evict_for_space(gpu_state.index, over_mb)
+                            # Under the arbiter: the check above and the
+                            # eviction used to leave a window for a load to
+                            # start admitting on the same figures (BUG-23).
+                            async with self._try_load_gate("vram_watchdog") as held:
+                                if not held:
+                                    logger.debug("vram_watchdog_skipped_load_in_progress")
+                                    continue
+                                await self._evict_for_space(gpu_state.index, over_mb)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -1901,7 +1868,7 @@ class ModelManager:
             model_id
             for model_id, state in self._states.items()
             if state.load_policy == LoadPolicy.PIN
-            and "::" not in model_id
+            and not is_derived_worker_key(model_id)
             and state.status not in {ModelStatus.LOADED, ModelStatus.LOADING, ModelStatus.UNLOADING}
             and model_id not in self._load_in_progress
             and not self._pin_held_by_derived(model_id)
@@ -1910,9 +1877,10 @@ class ModelManager:
     def _pin_held_by_derived(self, model_id: str) -> bool:
         """A PIN with presets is served by a derived worker (``model::hash``):
         with one loaded (or loading) the PIN is satisfied."""
-        prefix = f"{model_id}::"
         return any(
-            mid.startswith(prefix) and st.status in (ModelStatus.LOADED, ModelStatus.LOADING)
+            mid != model_id
+            and strip_worker_suffix(mid) == model_id
+            and st.status in (ModelStatus.LOADED, ModelStatus.LOADING)
             for mid, st in self._states.items()
         )
 
@@ -1925,7 +1893,7 @@ class ModelManager:
         after every restart (gemma4:26b, 2026-11-13).
         """
         resolver = self.pin_worker_resolver
-        if resolver is None or "::" in model_id:
+        if resolver is None or is_derived_worker_key(model_id):
             return model_id
         try:
             target = await resolver(model_id)
@@ -2106,7 +2074,7 @@ class ModelManager:
             async for key in client.scan_iter(match="model:state:*", count=500):
                 key_s = key.decode() if isinstance(key, bytes) else str(key)
                 model_id = key_s[len("model:state:") :]
-                base = model_id.split("::", 1)[0]
+                base = strip_worker_suffix(model_id)
                 if model_id not in known and base not in known:
                     removed += int(await client.delete(key_s))
             if removed:
@@ -2213,9 +2181,9 @@ class ModelManager:
         the preset's own, and the public context comes from the presets.
         A loaded base keeps its own live capabilities.
         """
-        if "::" not in state.model_id:
+        if not is_derived_worker_key(state.model_id):
             return
-        base = self._states.get(state.model_id.split("::", 1)[0])
+        base = self._states.get(strip_worker_suffix(state.model_id))
         if base is None or base.status == ModelStatus.LOADED:
             return
         merged = base.capabilities.to_dict()
@@ -3246,19 +3214,76 @@ class ModelManager:
 
         Raises InsufficientVRAMError if not enough VRAM could be freed.
 
-        Not under the load gate (BUG-23, left open on purpose): the caller is a
-        service container mid-request, and a load holding the gate can be
-        waiting on that same service (``pressure_evict`` asks it to unload), so
-        queueing here could hold both until the gate timeout. Coordinating it
-        properly needs the VRAM arbiter.
+        Under the VRAM arbiter (BUG-23): the evictions here and a load's
+        admission no longer interleave, and a service's reservation
+        (``service:<id>`` VRAM lock, what ``POST /services/{id}/ensure-vram``
+        takes afterwards) is written before the arbiter is released, so a load
+        admitted right after sees the room as taken. The caller is a service
+        mid-request and a load holding the arbiter can be waiting on that same
+        service (``pressure_evict`` waits out its generation): then this gives
+        up at once (InsufficientVRAMError) instead of holding both until the
+        timeouts. The wait is bounded by ``pressure_eviction_drain_timeout_s``
+        and running out is also an InsufficientVRAMError — the caller's
+        contract for "could not free it all" (it loads anyway).
         """
-        return await self._assign_gpus_for_load(
-            model_id=requesting_id,
-            vram_needed=vram_needed_mb,
-            preferred_gpu=preferred_gpu,
-            enforce_vllm_headroom=False,
-            suppress_reload_seconds=suppress_reload_seconds,
-        )
+        from ocabra.core.scheduler import InsufficientVRAMError
+
+        async with self._arbiter.hold(
+            timeout_s=max(1, int(settings.pressure_eviction_drain_timeout_s)),
+            purpose="ensure_vram_free",
+            abort_if=lambda: self._arbiter.is_waiting_on(requesting_id),
+            timeout_yields_false=True,
+        ) as held:
+            if not held:
+                logger.info(
+                    "ensure_vram_free_arbiter_unavailable",
+                    requesting_id=requesting_id,
+                    being_evicted=self._arbiter.is_waiting_on(requesting_id),
+                    holder=self._arbiter.purpose,
+                )
+                raise InsufficientVRAMError(
+                    "Another model's load/eviction is using the GPU right now"
+                    + (
+                        " and is evicting this service"
+                        if self._arbiter.is_waiting_on(requesting_id)
+                        else ""
+                    )
+                )
+            try:
+                gpu_indices = await self._assign_gpus_for_load(
+                    model_id=requesting_id,
+                    vram_needed=vram_needed_mb,
+                    preferred_gpu=preferred_gpu,
+                    enforce_vllm_headroom=False,
+                    suppress_reload_seconds=suppress_reload_seconds,
+                )
+            except InsufficientVRAMError:
+                # The endpoint reserves on a partial failure too (the service
+                # loads anyway): do it here, while the arbiter is held.
+                await self._reserve_for_service(requesting_id, vram_needed_mb)
+                raise
+            await self._reserve_for_service(requesting_id, vram_needed_mb)
+            return gpu_indices
+
+    async def _reserve_for_service(self, requesting_id: str, vram_mb: int) -> None:
+        """Write a service's VRAM reservation into the ledger (GPU locks).
+
+        Same call ``api/internal/services.py`` makes after ``ensure_vram_free``
+        returns (idempotent: it sets the same lock), made here so there is no
+        window between the evictions and the reservation for a load to take
+        the room. Best effort: the endpoint still reserves on its own.
+        """
+        if not requesting_id.startswith("service:") or self._service_manager is None:
+            return
+        reserve = getattr(self._service_manager, "reserve_gpu_vram", None)
+        if not callable(reserve):
+            return
+        try:
+            await reserve(requesting_id.removeprefix("service:"), int(vram_mb))
+        except Exception as exc:  # noqa: BLE001 - the endpoint reserves again
+            logger.warning(
+                "ensure_vram_free_reserve_failed", requesting_id=requesting_id, error=str(exc)
+            )
 
     async def _llama_cpp_base_placement(
         self, state: "ModelState"
@@ -3634,7 +3659,11 @@ class ModelManager:
                         requested_model_id=model_id,
                         evicting_service_id=service_id,
                     )
-                    evicted = await self._service_manager.pressure_evict(service_id)
+                    # pressure_evict can wait out the service's generation; if
+                    # that service is the one asking ensure_vram_free (waiting
+                    # for this arbiter), it gives up instead of waiting for us.
+                    with self._arbiter.waiting_on(f"service:{service_id}"):
+                        evicted = await self._service_manager.pressure_evict(service_id)
                     if not evicted:
                         continue
                     await self._wait_for_vram_released(0)  # wait for VRAM to settle
@@ -3897,14 +3926,17 @@ class ModelManager:
                             )
                             self._eviction_wait_for[model_id] = candidate_id
                             try:
-                                # Cancellation propagates fast (closes the
-                                # upstream connection, see worker_pool.py); a
-                                # couple of seconds is plenty of slack for it to
-                                # actually land before we give up and move on.
-                                for _ in range(10):
-                                    if not self.is_busy(candidate_id):
-                                        break
-                                    await asyncio.sleep(0.5)
+                                # A request on the candidate that waits for the arbiter
+                                # (vision, whisper) gives up instead of closing a cycle.
+                                with self._arbiter.waiting_on(candidate_id):
+                                    # Cancellation propagates fast (closes the
+                                    # upstream connection, see worker_pool.py); a
+                                    # couple of seconds is plenty of slack for it to
+                                    # actually land before we give up and move on.
+                                    for _ in range(10):
+                                        if not self.is_busy(candidate_id):
+                                            break
+                                        await asyncio.sleep(0.5)
                             finally:
                                 self._eviction_wait_for.pop(model_id, None)
                             if self.is_busy(candidate_id):
@@ -3941,10 +3973,13 @@ class ModelManager:
                             )
                             self._eviction_wait_for[model_id] = candidate_id
                             try:
-                                for _ in range(drain_timeout_s * 2):
-                                    if not self.is_busy(candidate_id):
-                                        break
-                                    await asyncio.sleep(0.5)
+                                # A request on the candidate that waits for the arbiter
+                                # (vision, whisper) gives up instead of closing a cycle.
+                                with self._arbiter.waiting_on(candidate_id):
+                                    for _ in range(drain_timeout_s * 2):
+                                        if not self.is_busy(candidate_id):
+                                            break
+                                        await asyncio.sleep(0.5)
                             finally:
                                 self._eviction_wait_for.pop(model_id, None)
                             if self.is_busy(candidate_id):
@@ -4212,7 +4247,7 @@ class ModelManager:
         ]
         if configured:
             return max(configured, key=len)
-        return model_id.rsplit("::", 1)[0] if "::" in model_id else model_id
+        return strip_worker_suffix(model_id)
 
     async def cancel_load(self, model_id: str) -> list[str]:
         """Cancel active loads for a canonical model and all its variants.
@@ -4714,6 +4749,44 @@ class ModelManager:
         free = await self._fresh_free_vram(gpu)
         if free >= extra:
             return
+        # Shrinking a neighbour changes VRAM: under the arbiter, so a load's
+        # admission neither races the shrink nor takes the room it made
+        # (BUG-23). Gives up if the arbiter's owner is draining this whisper
+        # worker (this request is one of its requests).
+        async with self._arbiter_for_request(model_id, "whisper_room") as held:
+            if not held:
+                logger.info(
+                    "whisper_room_unavailable",
+                    whisper=model_id,
+                    gpu_index=gpu,
+                    needed_mb=extra - free,
+                    diarize=diarize,
+                    reason="vram_arbiter_busy",
+                )
+                return
+            await self._make_room_for_whisper_held(
+                model_id,
+                gpu,
+                extra,
+                diarize=diarize,
+                diarizer_missing=diarizer_missing,
+                concurrent=concurrent,
+            )
+
+    async def _make_room_for_whisper_held(
+        self,
+        model_id: str,
+        gpu: int,
+        extra: int,
+        *,
+        diarize: bool,
+        diarizer_missing: bool,
+        concurrent: int,
+    ) -> None:
+        """Body of :meth:`make_room_for_whisper`; the caller holds the arbiter."""
+        free = await self._fresh_free_vram(gpu)
+        if free >= extra:
+            return
         for candidate in self._get_pressure_eviction_candidates(model_id, gpu_indices=[gpu]):
             if candidate == model_id or not self._can_change_context_live(candidate):
                 continue
@@ -4918,6 +4991,30 @@ class ModelManager:
         path = backend.vision_projector_path(state.backend_model_id)
         if not path or self._gpu_manager is None:
             return
+        # Shrinking and loading the projector both change VRAM: under the
+        # arbiter, so a load's admission cannot read the card between the
+        # shrink and the projector taking that room, nor shrink/evict this
+        # worker meanwhile (BUG-23). This request is in flight on the model:
+        # if the arbiter's owner is draining it, give up at once (503, a
+        # router retries elsewhere) instead of holding both until timeouts.
+        async with self._arbiter_for_request(model_id, "vision_room") as held:
+            if not held:
+                raise VisionNoRoomError(
+                    f"Another model's load is changing the memory of the card '{model_id}' "
+                    "runs on; the vision projector cannot be loaded right now. Retry shortly."
+                )
+            if state.status != ModelStatus.LOADED or backend.vision_is_active(
+                state.backend_model_id
+            ):
+                return
+            await self._make_room_for_vision_held(model_id, state, backend, path)
+
+    async def _make_room_for_vision_held(
+        self, model_id: str, state: ModelState, backend: Any, path: str
+    ) -> None:
+        """Body of :meth:`make_room_for_vision`; the caller holds the arbiter."""
+        from ocabra.core.worker_pool import VisionNoRoomError
+
         cost = await asyncio.to_thread(self._vision_cost_estimate, state, path)
         for gpu, needed in cost.items():
             free = await self._fresh_free_vram(gpu)
@@ -5041,7 +5138,7 @@ class ModelManager:
             state = self._states.get(model_id)
             if state is None or state.live_context is None or self.is_busy(model_id):
                 return
-            async with self._acquire_load_gate():
+            async with self._acquire_load_gate("regrow_context"):
                 if state.live_context is None or self.is_busy(model_id):
                     return
                 live = state.live_context
@@ -5182,7 +5279,7 @@ class ModelManager:
             raise KeyError(f"Model '{model_id}' not configured")
         if state.live_context is None:
             return state
-        async with self._acquire_load_gate():
+        async with self._acquire_load_gate("grow_context"):
             if state.live_context is None:
                 return state
             for gpu_idx, missing_mb in (await self._missing_vram_to_grow(state)).items():
@@ -5417,16 +5514,90 @@ class ModelManager:
         def _not_unloadable() -> bool:
             return state.status not in (ModelStatus.LOADED, ModelStatus.ERROR)
 
-        async with self._acquire_model_load_lock(model_id, abort_if=_not_unloadable) as held:
-            if not held or _not_unloadable():
+        # Stopping a worker changes VRAM: outside a load it goes through the
+        # VRAM arbiter (gate first, then the model's lock — the order every
+        # eviction inside a load already uses), so it cannot interleave with
+        # a load's admission and eviction figures (BUG-23).
+        async with self._arbiter_for_unload(model_id, reason, _not_unloadable) as proceed:
+            if not proceed:
                 logger.info(
                     "model_unload_skipped",
                     model_id=model_id,
                     reason=reason,
                     status=state.status.value,
+                    cause="vram_arbiter",
                 )
                 return
-            await self._unload_locked(state, model_id, reason)
+            async with self._acquire_model_load_lock(model_id, abort_if=_not_unloadable) as held:
+                if not held or _not_unloadable():
+                    logger.info(
+                        "model_unload_skipped",
+                        model_id=model_id,
+                        reason=reason,
+                        status=state.status.value,
+                    )
+                    return
+                await self._unload_locked(state, model_id, reason)
+
+    # Unloads started by a background housekeeping loop: they never wait for
+    # a load (the model stays idle and goes on a later tick).
+    _BACKGROUND_UNLOAD_REASONS = frozenset({"idle"})
+
+    @asynccontextmanager
+    async def _arbiter_for_unload(
+        self, model_id: str, reason: str, not_unloadable: Callable[[], bool]
+    ):
+        """The VRAM arbiter for one ``unload()``; yields whether to go ahead.
+
+        * Already held by this task (an eviction inside a load): reentrant.
+        * This task holds some model's load lock without the arbiter: go
+          ahead without it, as before. Waiting would invert the lock order
+          (model lock -> arbiter is the load's order, and the owner may be
+          waiting for that very lock as an eviction victim).
+        * Housekeeping (``idle``): wait unless a load is in progress or the
+          model stops being unloadable; then skip it (``False``).
+        * Anything else (manual, schedules, watchdogs, request-path cleanups):
+          wait for the arbiter, bounded by ``pressure_eviction_drain_timeout_s``.
+          Go ahead without it — the old behaviour, never worse — when the
+          owner is in a passive wait (draining requests, a service's grace: it
+          measures nothing then and re-reads afterwards, and the request it
+          waits on may be the one asking for this unload), when the model
+          stops being unloadable (the lock step below then skips it), or when
+          the wait runs out (a stuck load must not block recovering a worker
+          by hand).
+        """
+        if self._holds_load_gate():
+            yield True
+            return
+        current = asyncio.current_task()
+        if current is not None and any(
+            owner is current for owner in self._load_lock_owners.values()
+        ):
+            yield True
+            return
+        if reason in self._BACKGROUND_UNLOAD_REASONS:
+            async with self._arbiter.hold(
+                timeout_s=max(1, int(settings.pressure_eviction_drain_timeout_s)),
+                purpose=f"unload:{reason}",
+                abort_if=lambda: bool(self._load_in_progress) or not_unloadable(),
+                timeout_yields_false=True,
+            ) as held:
+                yield held
+            return
+        async with self._arbiter.hold(
+            timeout_s=max(1, int(settings.pressure_eviction_drain_timeout_s)),
+            purpose=f"unload:{reason}",
+            abort_if=lambda: self._arbiter.is_waiting() or not_unloadable(),
+            timeout_yields_false=True,
+        ) as held:
+            if not held and not not_unloadable() and not self._arbiter.is_waiting():
+                logger.warning(
+                    "model_unload_without_arbiter",
+                    model_id=model_id,
+                    reason=reason,
+                    holder=self._arbiter.purpose,
+                )
+            yield True
 
     async def _unload_locked(self, state: ModelState, model_id: str, reason: str) -> None:
         """Body of :meth:`unload`; the caller holds ``model_id``'s load lock."""
@@ -6294,8 +6465,8 @@ class ModelManager:
         # Derived workers (``<id>::<hash>``, per-profile load overrides) inherit
         # the base deployment's model and artifact so loads re-resolve paths.
         derived_base = (
-            self._states.get(normalized_model_id.split("::", 1)[0])
-            if "::" in normalized_model_id
+            self._states.get(strip_worker_suffix(normalized_model_id))
+            if is_derived_worker_key(normalized_model_id)
             else None
         )
         if model_key is None:

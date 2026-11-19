@@ -865,7 +865,7 @@ async def test_effective_inflight_cap_still_scales_down_generative_kinds(
 
 def test_maintenance_toggle_covers_derived_worker_keys(model_manager):
     canonical = "ollama/qwen3.8:27b"
-    derived = f"{canonical}::abc123"
+    derived = f"{canonical}::be2ec6cf80d0"
 
     assert not model_manager.is_in_maintenance(canonical)
     assert not model_manager.is_in_maintenance(derived)
@@ -881,7 +881,7 @@ def test_maintenance_toggle_covers_derived_worker_keys(model_manager):
 
 def test_maintenance_toggle_via_derived_key_resolves_to_canonical(model_manager):
     canonical = "ollama/qwen3.8:27b"
-    derived = f"{canonical}::abc123"
+    derived = f"{canonical}::be2ec6cf80d0"
 
     model_manager.set_maintenance(derived, True)
     assert model_manager.is_in_maintenance(canonical)
@@ -2021,7 +2021,7 @@ async def test_downsize_runtime_rejects_busy_multi_gpu_worker() -> None:
     from ocabra.core.model_manager import ModelState
 
     mm = ModelManager(WorkerPool())
-    worker_id = "llama_cpp/chaos::large"
+    worker_id = "llama_cpp/chaos::81443edb3742"
     mm._states[worker_id] = ModelState(
         model_id=worker_id,
         display_name="Chaos large",

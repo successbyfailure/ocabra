@@ -63,6 +63,17 @@ def _bitnet_parallel(extra: dict) -> object:
 
 
 _WORKER_SUFFIX = re.compile(r"[0-9a-f]{12}")
+# Runtime suffixes older builds appended to a worker key instead of a hash.
+# ``::diarize`` marked the diarizing whisper/parakeet worker until the switch
+# left the worker identity (strip_diarization_overrides); request_stats still
+# holds rows with it (2026-03), so a lookup by those keys must reach the base.
+_LEGACY_WORKER_SUFFIXES = frozenset({"diarize"})
+
+
+def is_worker_suffix(suffix: str) -> bool:
+    """Whether the text after a key's last ``::`` is a runtime worker suffix
+    (preset hash or legacy marker) rather than part of the deployment id."""
+    return bool(_WORKER_SUFFIX.fullmatch(suffix)) or suffix in _LEGACY_WORKER_SUFFIXES
 
 
 def strip_worker_suffix(worker_key: str) -> str:
@@ -72,10 +83,18 @@ def strip_worker_suffix(worker_key: str) -> str:
     appends for a preset's worker, and the ``repo::file`` of a GGUF
     deployment. Splitting at the first ``::`` turned ``repo::file::hash`` into
     ``repo`` (losing the file) and splitting at the last turned a plain
-    ``repo::file`` into ``repo``. Only a trailing hash is stripped here.
+    ``repo::file`` into ``repo``. Only one trailing runtime suffix is
+    stripped: a lowercase 12-hex hash, or a legacy marker (``diarize``). A GGUF
+    file stem (``Model-Q4_K_M``, ``ggml-model-i2_s``) is never one of those.
     """
     base, separator, suffix = str(worker_key).rpartition("::")
-    return base if separator and _WORKER_SUFFIX.fullmatch(suffix) else str(worker_key)
+    return base if separator and base and is_worker_suffix(suffix) else str(worker_key)
+
+
+def is_derived_worker_key(model_id: str) -> bool:
+    """Whether ``model_id`` is a runtime worker of another deployment
+    (``<id>::<hash>``), not a deployment of its own (``repo::file`` included)."""
+    return strip_worker_suffix(model_id) != str(model_id)
 
 
 def compute_worker_key(base_model_id: str, load_overrides: dict | None) -> str:

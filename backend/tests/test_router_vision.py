@@ -236,7 +236,7 @@ async def test_el_worker_derivado_comparte_sus_capacidades_con_el_base(monkeypat
     mm = ModelManager(worker_pool=None)
     base = _estado("llamacpp_mks/ornith", vision=False, tools=False)
     base.capabilities = BackendCapabilities()  # nunca cargado: sin señal
-    derivado = _estado("llamacpp_mks/ornith::abc", vision=True, status=ModelStatus.LOADED)
+    derivado = _estado("llamacpp_mks/ornith::781a0367a8ba", vision=True, status=ModelStatus.LOADED)
     derivado.capabilities = BackendCapabilities(
         chat=True, tools=True, vision=True, reasoning=True, context_length=65536
     )
@@ -259,7 +259,7 @@ async def test_un_base_cargado_conserva_sus_capacidades(monkeypatch):
     monkeypatch.setattr(mm_mod, "set_key", AsyncMock())
     mm = ModelManager(worker_pool=None)
     base = _estado("m/x", vision=True, status=ModelStatus.LOADED)
-    derivado = _estado("m/x::abc", vision=False, status=ModelStatus.LOADED)
+    derivado = _estado("m/x::781a0367a8ba", vision=False, status=ModelStatus.LOADED)
     mm._states = {base.model_id: base, derivado.model_id: derivado}
     await mm._share_capabilities_with_base(derivado)
     assert base.capabilities.vision is True

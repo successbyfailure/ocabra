@@ -679,6 +679,14 @@ import pytest  # noqa: E402
         ("llama_cpp/org/repo::Model-Q4_K_M::0b2a99a4d66f", "llama_cpp/org/repo::Model-Q4_K_M"),
         ("vllm/org/model", "vllm/org/model"),
         ("x::ABCDEF012345", "x::ABCDEF012345"),  # uppercase is not our hash
+        # Legacy runtime marker still present in request_stats (2026-03).
+        ("whisper/openai/whisper-large-v3-turbo::diarize", "whisper/openai/whisper-large-v3-turbo"),
+        # Real GGUF stems from request_stats survive.
+        (
+            "bitnet/microsoft/BitNet-b1.58-2B-4T-gguf::ggml-model-i2_s",
+            "bitnet/microsoft/BitNet-b1.58-2B-4T-gguf::ggml-model-i2_s",
+        ),
+        ("::0b2a99a4d66f", "::0b2a99a4d66f"),  # no base: nothing to strip to
     ],
 )
 def test_strip_worker_suffix_only_removes_the_preset_hash(key, base):
@@ -688,3 +696,12 @@ def test_strip_worker_suffix_only_removes_the_preset_hash(key, base):
 
     assert strip_worker_suffix(key) == base
     assert strip_worker_suffix(compute_worker_key("a/b::F", {"x": 1})) == "a/b::F"
+
+
+def test_is_derived_worker_key_tells_a_gguf_deployment_from_a_preset_worker():
+    from ocabra.core.model_manager_helpers import compute_worker_key, is_derived_worker_key
+
+    assert not is_derived_worker_key("llama_cpp/org/repo::Model-Q4_K_M")
+    assert not is_derived_worker_key("vllm/org/model")
+    assert is_derived_worker_key(compute_worker_key("llama_cpp/org/repo::Model-Q4_K_M", {"x": 1}))
+    assert is_derived_worker_key("whisper/openai/whisper-large-v3-turbo::diarize")

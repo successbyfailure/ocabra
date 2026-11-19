@@ -1193,8 +1193,8 @@ async def test_backends_api_counts_loaded_models_once_per_canonical_id():
 
     states = [
         st("llamacpp_mks/gemma4:26b", "llamacpp_mks", "configured"),
-        st("llamacpp_mks/gemma4:26b::abc", "llamacpp_mks", "loaded"),
-        st("llamacpp_mks/gemma4:26b::def", "llamacpp_mks", "loaded"),
+        st("llamacpp_mks/gemma4:26b::781a0367a8ba", "llamacpp_mks", "loaded"),
+        st("llamacpp_mks/gemma4:26b::0b2a99a4d66f", "llamacpp_mks", "loaded"),
         st("llamacpp_mks/qwen3-embedding:4b", "llamacpp_mks", "loaded"),
         st("piper/glados", "piper", "loaded"),
         st("vllm/x", "vllm", "unloaded"),

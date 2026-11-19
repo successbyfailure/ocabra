@@ -30,6 +30,7 @@ from ocabra.core.backend_installer import (
     BackendInstaller,
     BackendModuleState,
 )
+from ocabra.core.model_manager_helpers import strip_worker_suffix
 
 logger = structlog.get_logger(__name__)
 
@@ -115,7 +116,8 @@ async def _loaded_by_backend(request: Request) -> dict[str, int]:
     for st in states:
         if getattr(st.status, "value", st.status) != "loaded":
             continue
-        seen.setdefault(st.backend_type, set()).add(str(st.model_id).split("::", 1)[0])
+        # Only the preset hash goes: a GGUF ``repo::file`` is its own model.
+        seen.setdefault(st.backend_type, set()).add(strip_worker_suffix(str(st.model_id)))
     return {backend: len(ids) for backend, ids in seen.items()}
 
 
