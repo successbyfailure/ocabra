@@ -151,8 +151,8 @@ y hace fallar el N-ésimo con una excepción o una cancelación.
 preferida, desbordada, partida, preset por tarjeta); orden del planificador
 (on-demand > warm > pin blando, LRU dentro de cada política; nunca pin duro
 ni sesión realtime; ocupados drenados y saltados; preferida imposible →
-la otra); cascada de colocación forzada (LRU puro entre warm/on-demand antes
-del pin blando); plan imposible sin expulsar nada; reglas de pares sin
+la otra); cascada de colocación forzada (hasta el 2026-11-19 LRU puro entre
+warm/on-demand antes del pin blando; ahora el mismo orden que el planificador); plan imposible sin expulsar nada; reglas de pares sin
 expulsión; vigilante; `ensure_vram_free`; whisper y visión; y un fallo y una
 cancelación en **cada** await de una carga que expulsa (≈30 puntos): nada
 queda a medias (árbitro libre, ningún LOADING/UNLOADING, reservas = GPUs de
@@ -181,7 +181,8 @@ anterior):
 ### Qué se movió y a dónde
 
 - `vram_arbiter.py` (planificador, funciones puras sobre una instantánea):
-  `rank_lru_candidates`, `rank_pressure_candidates`, `is_hard_pin`;
+  `rank_pressure_candidates` (el único ranking desde la unificación;
+  `rank_lru_candidates` se borró), `is_hard_pin`;
   `wait_for_reading` (la única forma de esperar VRAM liberada).
   `ModelManager._get_eviction_candidates` / `_get_pressure_eviction_candidates`
   delegan con la misma firma.
@@ -280,16 +281,8 @@ El argumento de la primera versión vale tal cual; lo nuevo:
 
 ### Lo que queda de REF-03 y por qué
 
-- **Las dos cascadas siguen siendo dos.** La del planificador
-  (servicios → encoger en todas → expulsar barato+encoger → presión con
-  verificación previa, orden por política) y la de colocación forzada
-  (abaratar → LRU educado sin PIN → último recurso) eligen víctimas
-  distintas para el mismo estado (lo fijan
-  `test_pressure_evicts_on_demand_before_warm_before_soft_pin` frente a
-  `test_forced_gpu_evicts_by_lru_among_warm_and_on_demand_before_any_pin`).
-  Unificarlas cambia a quién se expulsa en producción: es una decisión de
-  política, no un refactor. Se comparte ya el drenado, la cascada por
-  tarjeta y las esperas.
+- ~~Las dos cascadas siguen siendo dos.~~ Unificadas (2026-11-19, decisión
+  del usuario): ver «Una sola cascada».
 - **`_admit_gpu_load`, `_assign_gpus_for_load`, `_evict_*`, `_try_shrink_*`,
   `make_room_for_*`, `ensure_vram_free` siguen siendo métodos de
   `ModelManager`** (el ejecutor). Moverlos a `vram_arbiter.py` es mecánico
@@ -304,3 +297,58 @@ El argumento de la primera versión vale tal cual; lo nuevo:
 - La siguiente publicación de hw-monitor puede reescribir el refresco en
   vivo con una muestra anterior; solo puede mostrar menos libre (conservador).
 - `services.py` reserva tras un abort (ver arriba).
+
+## Una sola cascada (2026-11-19)
+
+Decisión del usuario: la colocación forzada usa el orden de la cascada de
+presión. Hasta entonces `_admit_gpu_load` (preset con `_runtime.gpu_indices`,
+`split_policy=always`) hacía primero una pasada LRU pura sobre
+warm/on-demand (`_evict_for_space`: sin PIN, los ocupados saltados sin
+esperar) y solo después la lista de presión; el planificador expulsaba por
+política. Con el mismo estado elegían víctimas distintas.
+
+Ahora:
+
+- **Un ranking**: `vram_arbiter.rank_pressure_candidates` — on-demand <
+  warm < pin blando, LRU dentro de cada política; nunca el solicitante, un
+  pin duro ni el worker de una sesión Realtime; respaldo por worker pool sin
+  pines duros. Con `include_pins=False, fallback=False` es la lista del
+  vigilante de VRAM (`_get_eviction_candidates`, que solo devuelve los
+  inactivos): mismo orden, sin ningún PIN.
+- **Un paso**: `ModelManager._evict_one` — ocupado: adelanto de batch o
+  drenado acotado (`_drain_or_preempt`), saltado si sigue ocupado; reclamo
+  (`claim_for_eviction`); encoger en vez de descargar si basta
+  (`try_shrink`); descarga con la recarga del PIN aplazada
+  (`suppress_reload_seconds`); espera de la liberación desde una referencia
+  previa. Lo usan las tres cascadas:
+  - planificador (`_assign_gpus_for_load`, también `ensure_vram_free`): tras
+    servicios / encoger / barato+encoger y la verificación previa, recorre el
+    ranking con `_evict_one` (sin encoger: ya se intentó) y reintenta el
+    planificador tras cada víctima;
+  - colocación forzada y `grow_context_back`
+    (`_evict_last_resort_for_space`): recorre el ranking de esa GPU con
+    `_evict_one(try_shrink=True)` hasta liberar el déficit;
+  - vigilante (`_evict_for_space`): ranking sin PIN, `drain=False` (no
+    espera a nadie con el árbitro tomado), sin esperar la liberación.
+
+Lo que no se unifica a propósito: los pasos previos del planificador
+(expulsar servicios, encoger en todas las GPUs, barato+encoger, rechazar el
+plan imposible antes de expulsar) siguen solo en su ruta; la colocación
+forzada conserva su abaratar previo (`_relieve_gpu_cheaply`) y la lectura
+fresca con segunda pasada contra el déficit físico.
+
+Qué nota un operador:
+
+- Una carga con GPU forzada que necesita hueco expulsa ahora antes un
+  on-demand (aunque se usase hace poco) que un warm inactivo desde hace
+  más tiempo. Ejemplo (test
+  `test_forced_gpu_evicts_a_recent_on_demand_before_an_older_warm`): en la
+  3090 un on-demand usado hace 10 s y un warm usado hace 5.000 s, hueco para
+  uno: antes se iba el warm, ahora el on-demand.
+- Si el on-demand está ocupado, la carga forzada espera su drenado (hasta
+  `pressure_eviction_drain_timeout_s`, o lo que el estimador diga) antes de
+  pasar al warm; antes lo saltaba al momento en la primera pasada. Uno que
+  solo sirve batch se adelanta en unos segundos (como en la otra ruta).
+- El vigilante de VRAM expulsa también on-demand antes que warm (antes LRU
+  puro); sigue sin tocar ningún PIN ni a nadie ocupado.
+- El pin blando sigue siendo lo último en ambas rutas; un pin duro, nunca.
