@@ -71,7 +71,14 @@ class RequestStat(Base):
     energy_wh: Mapped[float | None] = mapped_column(Float)
     error: Mapped[str | None] = mapped_column(Text)
     # Authenticated user who made the request; NULL for anonymous callers.
-    user_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid, nullable=True)
+    # Index and FK as migration 0007 created them (INF-12): undeclared, an
+    # autogenerate proposed dropping both.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid,
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_request_stats_user_id"),
+        nullable=True,
+        index=True,
+    )
     # Group associated with the API key used for this request; preserved even if group is deleted.
     group_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid, nullable=True, index=True)
     # Name/label of the API key used; stored denormalized so it survives key deletion.

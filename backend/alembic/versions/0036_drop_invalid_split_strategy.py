@@ -35,4 +35,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Data-only and not reversible: the removed values were never read by the
+    # backend, and which rows had them is not recorded (INF-12). Same as 0035.
     pass

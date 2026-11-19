@@ -3,13 +3,20 @@ from logging.config import fileConfig
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
-# Import all models so Alembic can detect them
+# Import all models so Alembic can detect them. Without auth (users, groups)
+# the metadata had foreign keys to tables it didn't know and
+# `alembic check` / autogenerate died with NoReferencedTableError (INF-12).
 import ocabra.db.agents  # noqa: F401  (Agent + AgentMCPServer)
+import ocabra.db.auth  # noqa: F401  (User, Group, ApiKey, ...)
+import ocabra.db.cloud  # noqa: F401
+import ocabra.db.federation  # noqa: F401
 import ocabra.db.gpu_power_settings  # noqa: F401  (GpuPowerSetting)
 import ocabra.db.mcp  # noqa: F401  (MCPServer)
 import ocabra.db.model_config  # noqa: F401  (includes ModelConfig + ModelProfile)
 import ocabra.db.openai_batches  # noqa: F401  (OpenAIFile + OpenAIBatch)
+import ocabra.db.server_config  # noqa: F401
 import ocabra.db.stats  # noqa: F401  (RequestStat, ToolCallStat, ...)
+import ocabra.db.trtllm  # noqa: F401
 from alembic import context
 from ocabra.config import settings
 from ocabra.database import Base

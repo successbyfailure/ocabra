@@ -18,7 +18,8 @@ Design and decisions: docs/archive/model-backends-unification-plan.md.
 Frozen semantics: migration 0034 depends on this module. Changing what
 build_plan decides changes what that migration does on a database that has not
 run it yet — treat edits here like edits to a migration. Live code keeps its
-own copy of the backend priority (``ocabra.core.model_deployments``).
+own copy of the backend priority (``ocabra.core.model_deployments``), and the
+artifact/config-key helpers this uses are frozen copies (``frozen_helpers``).
 """
 
 from __future__ import annotations
@@ -29,15 +30,18 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from ocabra.core.artifacts import (
+# Frozen copies, not ocabra.core.artifacts / config_keys (INF-12): see
+# frozen_helpers.
+from ocabra.db.migration_support.frozen_helpers import (
     ARTIFACT_KEYS,
     KIND_BY_BACKEND,
     LLAMA_CPP_FAMILY,
+    camel_to_snake,
     config_section_for,
+    normalize_case,
     scan_ollama_manifests,
     strip_derived,
 )
-from ocabra.core.config_keys import camel_to_snake, normalize_case
 
 # Lower = preferred as the default backend of a model. Ollama is kept as a
 # secondary backend on purpose (decision 2026-11-07): the goal is to serve
