@@ -16,6 +16,45 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.115.0 — 2026-11-19
+
+### Cambiado
+
+- **Las subidas (multipart) y `/v1/realtime` respetan el modo mantenimiento y
+  el límite de peticiones simultáneas**, como el resto. `/v1/audio/transcriptions`,
+  `/v1/images/edits` y demás peticiones multipart reciben `503`
+  `model_maintenance` (`Retry-After: 30`) si el modelo está en mantenimiento y
+  `429` `model_at_capacity` con `Retry-After` si está lleno; antes pasaban
+  siempre. `/v1/realtime` rechaza la conexión con esos mismos códigos antes de
+  abrir la sesión.
+- **Subagentes**: cada delegación tiene un tope de 600 s; al agotarlo, el agente
+  padre recibe un error de herramienta `subagent_timeout`. Una respuesta de
+  subagente de más de 32 KiB le llega recortada, con una marca visible.
+
+### Corregido
+
+- **Las herramientas de un agente seguían ejecutándose** después de que el
+  cliente se desconectara a mitad de un stream. Ahora se cancelan.
+- **llama.cpp podía servir otro fichero GGUF sin avisar**: un modelo cuyo
+  fichero había desaparecido, o cuyo nombre coincidía con varios ficheros (o
+  con otro más corto: `qwen3.8:27b` con `qwen3.gguf`), cargaba el que
+  encontrara. Ahora falla con un error que lo explica. Lo mismo en BitNet.
+- **whisper, TTS y ACE-Step**: si el proceso del modelo moría al arrancar, la
+  carga esperaba todo el tiempo máximo y fallaba sin motivo. Ahora falla al
+  instante con el código de salida y el final del log.
+- **Carreras de memoria de GPU**: la descarga manual de un modelo, hacer sitio
+  para la visión o para whisper, la reserva de memoria de un servicio y el
+  vigilante de VRAM ya no se cruzan con una carga en curso; esperan su turno
+  (o devuelven `503` reintentable si no pueden). Antes podían dejar la cuenta
+  de memoria desfasada y acabar en errores de memoria de CUDA.
+- **Latencia**: `/api/tags`, `/api/ps` y la lista de modelos ya no recorren el
+  disco en cada petición (los tamaños pueden tardar hasta 30 s en reflejar un
+  cambio dentro de una subcarpeta), y el servidor ya no vuelve a analizar los
+  streams largos en cada trozo ni lee en memoria los ficheros subidos para las
+  estadísticas.
+
+---
+
 ## 0.114.0 — 2026-11-19
 
 ### Nuevo

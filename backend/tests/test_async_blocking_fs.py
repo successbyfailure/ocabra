@@ -365,3 +365,23 @@ def test_weights_size_cache_reuses_until_dir_or_ttl_changes(tmp_path, monkeypatc
     assert len(walks) == 4
 
     assert fs_scan_cache.weights_size_bytes(tmp_path / "missing") == 0
+
+
+async def test_warm_arch_cache_parses_headers_off_the_event_loop(monkeypatch):
+    """ASY-01: synchronous callers hit the cache after the startup warm-up."""
+    import threading
+
+    from ocabra.core import vram_planner
+
+    loop_thread = threading.get_ident()
+    seen: list[tuple[str, int]] = []
+
+    def fake(path):
+        seen.append((str(path), threading.get_ident()))
+        return object() if str(path).endswith(".gguf") else None
+
+    monkeypatch.setattr(vram_planner, "arch_from_gguf", fake)
+    read = await vram_planner.warm_arch_cache(["/m/a.gguf", "/m/a.gguf", "/m/b.bin", None])
+    assert read == 1
+    assert [p for p, _ in seen] == ["/m/a.gguf", "/m/b.bin"]  # deduplicated
+    assert all(t != loop_thread for _, t in seen)

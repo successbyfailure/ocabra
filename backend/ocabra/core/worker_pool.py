@@ -727,6 +727,11 @@ class WorkerPool:
 
     def register_backend(self, backend_type: str, backend: BackendInterface) -> None:
         self._backends[backend_type] = backend
+        # Auxiliary processes (vLLM's estimate probe, whisper.cpp's diarization
+        # sidecar) take their ports from the managed range too (BUG-44).
+        attach = getattr(backend, "attach_port_allocator", None)
+        if callable(attach):
+            attach(self.assign_port, self.release_port)
         self._disabled_backends.pop(backend_type, None)
         logger.info("backend_registered", backend_type=backend_type)
 

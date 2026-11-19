@@ -484,7 +484,9 @@ def _resolve_worker_model_id(model_id: str, extra_config: dict) -> str:
     if isinstance(configured, str) and configured.strip():
         candidate = configured.strip()
     elif "::" in model_id:
-        candidate = model_id.split("::", 1)[0]
+        from ocabra.core.model_manager_helpers import strip_worker_suffix
+
+        candidate = strip_worker_suffix(model_id)
     else:
         candidate = model_id
 

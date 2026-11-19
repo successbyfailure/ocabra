@@ -1198,7 +1198,9 @@ class VLLMBackend(BackendInterface):
         miss, and then vLLM/transformers rejects the raw string with
         ``HFValidationError: Repo id must use alphanumeric chars, '-', '_' or '.'``.
         """
-        return model_id.split("::", 1)[0] if "::" in model_id else model_id
+        from ocabra.core.model_manager_helpers import strip_worker_suffix
+
+        return strip_worker_suffix(model_id)
 
     def _resolve_local_model_dir(self, model_id: str) -> Path | None:
         clean_id = self._strip_worker_key_suffix(model_id)

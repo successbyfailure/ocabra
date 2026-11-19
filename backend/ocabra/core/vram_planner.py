@@ -559,6 +559,27 @@ def arch_from_gguf(path: str | Path) -> ModelArch | None:
     return _arch_from_gguf_cached(str(path), st.st_mtime_ns, st.st_size)
 
 
+async def warm_arch_cache(paths) -> int:
+    """Parse the headers of *paths* in a thread so later calls hit the cache.
+
+    Several synchronous callers (planner, capacity, auto-setup, context probe)
+    run :func:`arch_from_gguf` on the event loop; the first parse of each file
+    costs ~100 ms there (ASY-01). Warming the cache at startup moves that cost
+    off the loop for every model already configured. Returns how many GGUF
+    headers were read.
+    """
+    import asyncio
+
+    read = 0
+    for path in dict.fromkeys(str(p) for p in paths if p):
+        try:
+            if await asyncio.to_thread(arch_from_gguf, path) is not None:
+                read += 1
+        except Exception:  # noqa: BLE001 -- a bad file must not stop the rest
+            continue
+    return read
+
+
 @functools.lru_cache(maxsize=256)
 def _arch_from_gguf_cached(path: str, _mtime_ns: int, _size: int) -> ModelArch | None:
     try:

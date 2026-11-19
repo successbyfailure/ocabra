@@ -782,6 +782,24 @@ async def _startup(app: FastAPI, teardown: _Teardown) -> None:
     await model_manager.start()
     teardown.push("model_manager", model_manager.stop)
 
+    async def _warm_gguf_headers() -> None:
+        """First GGUF header parse off the event loop (ASY-01)."""
+        from ocabra.core import artifacts as model_artifacts
+        from ocabra.core import vram_planner
+
+        paths: list[str] = []
+        for state in await model_manager.list_states():
+            try:
+                model = model_artifacts.resolve_paths(state.artifact).get("model")
+            except Exception:  # noqa: BLE001 -- uninstalled tag, missing file...
+                continue
+            if model:
+                paths.append(model)  # missing files: arch_from_gguf → None, in the thread
+        read = await vram_planner.warm_arch_cache(paths)
+        logger.info("gguf_header_cache_warmed", files=read)
+
+    teardown.cancel_on_exit(asyncio.create_task(_warm_gguf_headers(), name="gguf-header-warmup"))
+
     from ocabra.core.backend_process_manager import BackendProcessManager
 
     backend_process_manager = BackendProcessManager(model_manager, worker_pool, settings)

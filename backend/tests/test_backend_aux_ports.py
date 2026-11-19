@@ -121,3 +121,18 @@ async def test_whispercpp_dead_sidecar_port_is_released_on_relaunch(tmp_path: Pa
 
     assert second is not first
     assert pool._used_ports == {second.port}
+
+
+def test_registering_a_backend_gives_it_the_managed_port_range():
+    """BUG-44: the allocator existed but nothing attached it."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from ocabra.core.worker_pool import WorkerPool
+
+    pool = WorkerPool()
+    backend = SimpleNamespace(attach_port_allocator=MagicMock())
+    pool.register_backend("vllm", backend)
+    assign, release = backend.attach_port_allocator.call_args.args
+    assert assign == pool.assign_port and release == pool.release_port
+    pool.register_backend("plain", SimpleNamespace())  # no hook: nothing breaks

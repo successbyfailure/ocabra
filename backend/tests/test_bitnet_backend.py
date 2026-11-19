@@ -422,3 +422,25 @@ async def test_mlock_segun_el_binario(tmp_path: Path) -> None:
     viejos = await args(False)
     assert "--mlock" in viejos
     assert "--load-mode" not in viejos
+
+
+def test_resolve_model_file_does_not_guess_when_the_pinned_file_is_gone_or_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """BUG-43 for bitnet: a missing pinned file fell through to a name search,
+    and several files with the same name picked the newest."""
+    import pytest
+
+    from ocabra.backends.bitnet_backend import BitnetBackend
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "model.gguf").write_bytes(b"x")
+    (tmp_path / "b" / "model.gguf").write_bytes(b"x")
+    backend = BitnetBackend()
+    with patch("ocabra.backends.bitnet_backend.settings") as s:
+        s.models_dir = str(tmp_path)
+        with pytest.raises(FileNotFoundError, match="not found"):
+            backend._resolve_model_file("x", {"bitnet": {"model_path": str(tmp_path / "gone.gguf")}})
+        with pytest.raises(FileNotFoundError, match="ambiguous"):
+            backend._resolve_model_file("model", {})

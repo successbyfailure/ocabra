@@ -505,6 +505,9 @@ class BitnetBackend(BackendInterface):
             explicit = Path(str(model_path))
             if explicit.is_file():
                 return explicit
+            # A pinned file that is gone is an error, not a cue to guess
+            # another one (same rule as llama.cpp, BUG-43).
+            raise FileNotFoundError(f"BitNet model file not found: {explicit}")
 
         direct = Path(model_id)
         if direct.is_file():
@@ -524,8 +527,13 @@ class BitnetBackend(BackendInterface):
         # Fallback: find by stem for scanners that register `model_ref=path.stem`.
         stem = Path(model_id).stem
         matches = [p for p in root.rglob("*.gguf") if p.stem == stem]
+        if len(matches) == 1:
+            return matches[0]
         if matches:
-            return max(matches, key=lambda p: p.stat().st_mtime)
+            raise FileNotFoundError(
+                f"BitNet model '{model_id}' is ambiguous: {len(matches)} files named "
+                f"{stem}.gguf ({', '.join(str(m) for m in matches[:5])}); set bitnet.model_path"
+            )
 
         raise FileNotFoundError(f"BitNet GGUF model not found for '{model_id}' under {root}")
 
