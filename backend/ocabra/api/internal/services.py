@@ -240,6 +240,7 @@ async def start_service(
     "/services/{service_id}/generations",
     summary="List service generations",
     description="Return recent generation events for a service, ordered newest first.",
+    responses={404: {"description": "Service not found"}},
 )
 async def get_service_generations(
     service_id: str,
@@ -247,7 +248,26 @@ async def get_service_generations(
     limit: int = Query(default=50, ge=1, le=500),
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> list[dict]:
-    """Return recent generation events for a service, newest first."""
+    """Return recent generation events for a service, newest first.
+
+    Requires the ``model_manager`` role.
+
+    Args:
+        service_id: Service identifier.
+        limit: Maximum number of events (1-500, default 50).
+
+    Returns:
+        Generation event dicts (``started_at``, ``duration_ms``, ``gpu_index``,
+        ``vram_peak_mb``, ``evicted``...); empty for a known service with none.
+
+    Raises:
+        HTTPException 404: unknown service (it used to answer ``[]``,
+            indistinguishable from a service with no generations).
+    """
+    sm = request.app.state.service_manager
+    if await sm.get_state(service_id) is None:
+        raise HTTPException(status_code=404, detail=f"Service '{service_id}' not found")
+
     from sqlalchemy import select
 
     from ocabra.database import AsyncSessionLocal
