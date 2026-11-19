@@ -250,6 +250,61 @@ def invalidate_local_scan() -> None:
     _local_scanner.invalidate()
 
 
+# Backends that load a model from a folder (HF safetensors repo, diffusers
+# pipeline, upscaler weights...) and where each looks for it. None of them
+# reads a pinned path: they resolve the folder from ``model_ref`` itself, so a
+# folder can only be registered under a ``model_ref`` that points at it.
+#   ``direct``       → ``<MODELS_DIR>/<model_ref>``
+#   ``huggingface``  → ``<MODELS_DIR>/huggingface/<org>--<name>`` (the layout
+#                      oCabra's HF downloads write)
+_DIRECTORY_LAYOUTS: dict[str, tuple[str, ...]] = {
+    "vllm": ("direct", "huggingface"),
+    "sglang": ("direct", "huggingface"),
+    "tensorrt_llm": ("direct", "huggingface"),
+    "diffusers": ("direct",),
+    "mage": ("direct",),
+    "upscaler": ("direct",),
+    "flashvsr": ("direct",),
+}
+
+
+def _directory_model_ref_error(
+    backend_type: str, model_ref: str, folder: Path, models_dir: Path
+) -> str | None:
+    """Why ``folder`` cannot be registered for ``backend_type`` as ``model_ref``.
+
+    ``None`` when the backend will find ``folder`` from ``model_ref``. Otherwise
+    the message names the ``model_ref`` values that would work.
+    """
+    layouts = _DIRECTORY_LAYOUTS.get(backend_type)
+    if layouts is None:
+        file_based = ", ".join(sorted(_DIRECTORY_LAYOUTS))
+        return (
+            f"Backend '{backend_type}' loads a single weights file, not a folder: "
+            f"point 'path' at the file. Folders are accepted for: {file_based}."
+        )
+    if not folder.is_relative_to(models_dir):
+        return f"A model folder must live under MODELS_DIR ({models_dir}) to be found by its id"
+    ref = model_ref.strip()
+    candidates: dict[str, Path] = {"direct": models_dir / ref}
+    if "/" in ref:
+        candidates["huggingface"] = models_dir / "huggingface" / ref.replace("/", "--")
+    for layout in layouts:
+        target = candidates.get(layout)
+        if target is not None and target.resolve() == folder:
+            return None
+    accepted = [str(folder.relative_to(models_dir))]
+    relative_hf = folder.relative_to(models_dir).parts
+    if "huggingface" in layouts and len(relative_hf) == 2 and relative_hf[0] == "huggingface":
+        org, sep, name = relative_hf[1].partition("--")
+        if sep and org and name:
+            accepted.insert(0, f"{org}/{name}")
+    return (
+        f"Backend '{backend_type}' finds a model folder by its id, and '{model_ref}' does not "
+        f"point at '{folder}'. Use model_ref " + " or ".join(f"'{ref}'" for ref in accepted) + "."
+    )
+
+
 class RegisterLocalModelRequest(BaseModel):
     """Register a model whose weights are already on disk.
 
@@ -262,12 +317,20 @@ class RegisterLocalModelRequest(BaseModel):
     ``backend_type`` is explicit on purpose. The scanner can only guess one
     backend per file, and the same GGUF is servable by upstream llama.cpp, the
     Makespace fork or bitnet.
+
+    ``path`` may also be a folder (HF safetensors repo, diffusers pipeline...)
+    for the backends that load one (``_DIRECTORY_LAYOUTS``); ``model_ref`` must
+    then be the id those backends resolve to that folder.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     model_ref: str = Field(..., min_length=1, description="Backend-native id, e.g. 'gemma4-26b'")
-    path: str = Field(..., min_length=1, description="Absolute path to the weights on disk")
+    path: str = Field(
+        ...,
+        min_length=1,
+        description="Absolute path to the weights file, or to the model folder for folder backends",
+    )
     backend_type: str = Field(..., min_length=1)
     display_name: str | None = None
     load_policy: str = "on_demand"
@@ -282,10 +345,19 @@ class RegisterLocalModelRequest(BaseModel):
         "pinning the exact file so the backend does not have to guess it. "
         "Use this to attach an Ollama-downloaded GGUF to a llama.cpp backend "
         "without re-downloading it, or to serve the same file with a different "
-        "backend than the one the scanner inferred."
+        "backend than the one the scanner inferred. ``path`` may be a folder "
+        "(HF safetensors repo, diffusers pipeline...) for vllm, sglang, "
+        "tensorrt_llm, diffusers, mage, upscaler and flashvsr; ``model_ref`` "
+        "must then be the folder's path under MODELS_DIR or, for a folder in "
+        "``huggingface/<org>--<name>``, the repo id ``<org>/<name>``."
     ),
     responses={
-        400: {"description": "Unknown backend, or path outside the allowed roots"},
+        400: {
+            "description": (
+                "Unknown backend, path outside the allowed roots, a folder for a "
+                "file-based backend, or a model_ref that does not point at the folder"
+            )
+        },
         404: {"description": "Path does not exist"},
         409: {"description": "That model id is already registered"},
     },
@@ -297,10 +369,11 @@ async def register_local_model(
 ) -> dict:
     """Register weights that are already on disk under an explicit backend.
 
-    Requires the ``model_manager`` role. The exact file is pinned as
-    ``model_path`` in the backend's config section, launch defaults are applied,
-    and the model's default profile is created so it shows up in ``/v1/models``
-    without a restart.
+    Requires the ``model_manager`` role. A file is pinned as ``model_path`` in
+    the backend's config section; a folder (folder backends only) is found by
+    the backend from ``model_ref``, which must point at it. Launch defaults are
+    applied, and the model's default profile is created so it shows up in
+    ``/v1/models`` without a restart.
 
     Args:
         body: ``RegisterLocalModelRequest`` (``model_ref``, ``path``,
@@ -312,8 +385,10 @@ async def register_local_model(
 
     Raises:
         HTTPException 400: unknown backend, invalid path, path outside
-            ``MODELS_DIR``/``OLLAMA_SHARED_MODELS_DIR``, or rejected config.
-        HTTPException 404: the path is not an existing file.
+            ``MODELS_DIR``/``OLLAMA_SHARED_MODELS_DIR``, a folder for a
+            file-based backend or under a ``model_ref`` that does not point at
+            it, or rejected config.
+        HTTPException 404: the path does not exist.
         HTTPException 409: the resulting model id is already registered.
     """
     if body.backend_type not in KNOWN_BACKEND_TYPES:
@@ -340,8 +415,16 @@ async def register_local_model(
             )
     except OSError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid path '{path}'") from exc
-    if not await asyncio.to_thread(resolved.is_file):
-        raise HTTPException(status_code=404, detail=f"No such file: '{path}'")
+    is_dir = await asyncio.to_thread(resolved.is_dir)
+    if not is_dir and not await asyncio.to_thread(resolved.is_file):
+        raise HTTPException(status_code=404, detail=f"No such file or folder: '{path}'")
+    if is_dir:
+        models_root = await asyncio.to_thread(Path(settings.models_dir).resolve)
+        error = await asyncio.to_thread(
+            _directory_model_ref_error, body.backend_type, body.model_ref, resolved, models_root
+        )
+        if error is not None:
+            raise HTTPException(status_code=400, detail=error)
 
     model_id = build_model_ref(body.backend_type, body.model_ref)
     mm = request.app.state.model_manager
@@ -353,7 +436,11 @@ async def register_local_model(
     # directory/stem heuristics that cannot find an Ollama blob (its filename
     # is a sha256 digest, unrelated to the model name).
     extra_config: dict = {}
-    if is_llama_cpp_family(body.backend_type):
+    if is_dir:
+        # Folder backends resolve the folder from model_ref (checked above)
+        # and none reads a pinned path.
+        pass
+    elif is_llama_cpp_family(body.backend_type):
         extra_config = {LLAMA_CPP_CONFIG_SECTION: {"model_path": str(resolved)}}
     elif body.backend_type == "bitnet":
         extra_config = {"bitnet": {"model_path": str(resolved)}}

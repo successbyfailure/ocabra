@@ -139,3 +139,91 @@ class TestRegisterLocalModel:
         with pytest.raises(HTTPException) as exc:
             await register_local_model(body, _request(str(tmp_path)))
         assert exc.value.status_code == 404
+
+
+class TestRegisterLocalFolder:
+    """Folders (HF safetensors repos, diffusers pipelines...) used to get 404
+    "No such file" because only ``is_file()`` was accepted. Folder backends
+    find the folder from ``model_ref``, so it has to point at it."""
+
+    @staticmethod
+    def _setup(tmp_path, monkeypatch):
+        models = tmp_path / "models"
+        repo = models / "huggingface" / "Qwen--Qwen3-8B"
+        repo.mkdir(parents=True)
+        (repo / "config.json").write_text("{}")
+        monkeypatch.setattr("ocabra.api.internal.registry.settings.models_dir", str(models))
+        monkeypatch.setattr("ocabra.api.internal.registry.settings.ollama_shared_models_dir", "")
+        return models, repo
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model_ref", ["Qwen/Qwen3-8B", "huggingface/Qwen--Qwen3-8B"])
+    async def test_accepts_hf_folder_for_vllm(self, tmp_path, monkeypatch, model_ref) -> None:
+        models, repo = self._setup(tmp_path, monkeypatch)
+        req = _request(str(models))
+        body = RegisterLocalModelRequest(model_ref=model_ref, path=str(repo), backend_type="vllm")
+
+        await register_local_model(body, req)
+
+        kwargs = req.app.state.model_manager.add_model.await_args.kwargs
+        assert kwargs["model_id"] == f"vllm/{model_ref}"
+        # Nothing pinned: vLLM resolves the folder from the id.
+        assert kwargs["extra_config"] == {}
+
+    @pytest.mark.asyncio
+    async def test_direct_layout_for_diffusers(self, tmp_path, monkeypatch) -> None:
+        models, _repo = self._setup(tmp_path, monkeypatch)
+        pipe = models / "flux-klein"
+        pipe.mkdir()
+        req = _request(str(models))
+        body = RegisterLocalModelRequest(
+            model_ref="flux-klein", path=str(pipe), backend_type="diffusers"
+        )
+        await register_local_model(body, req)
+        assert req.app.state.model_manager.add_model.await_args.kwargs["model_id"] == (
+            "diffusers/flux-klein"
+        )
+
+    @pytest.mark.asyncio
+    async def test_diffusers_has_no_hf_layout(self, tmp_path, monkeypatch) -> None:
+        models, repo = self._setup(tmp_path, monkeypatch)
+        body = RegisterLocalModelRequest(
+            model_ref="Qwen/Qwen3-8B", path=str(repo), backend_type="diffusers"
+        )
+        with pytest.raises(HTTPException) as exc:
+            await register_local_model(body, _request(str(models)))
+        assert exc.value.status_code == 400
+        assert "'huggingface/Qwen--Qwen3-8B'" in exc.value.detail
+
+    @pytest.mark.asyncio
+    async def test_model_ref_must_point_at_the_folder(self, tmp_path, monkeypatch) -> None:
+        models, repo = self._setup(tmp_path, monkeypatch)
+        body = RegisterLocalModelRequest(model_ref="qwen3", path=str(repo), backend_type="vllm")
+        with pytest.raises(HTTPException) as exc:
+            await register_local_model(body, _request(str(models)))
+        assert exc.value.status_code == 400
+        # The error names the ids that would work.
+        assert "'Qwen/Qwen3-8B'" in exc.value.detail
+        assert "'huggingface/Qwen--Qwen3-8B'" in exc.value.detail
+
+    @pytest.mark.asyncio
+    async def test_file_backends_still_need_a_file(self, tmp_path, monkeypatch) -> None:
+        models, repo = self._setup(tmp_path, monkeypatch)
+        body = RegisterLocalModelRequest(
+            model_ref="Qwen/Qwen3-8B", path=str(repo), backend_type="llamacpp_mks"
+        )
+        with pytest.raises(HTTPException) as exc:
+            await register_local_model(body, _request(str(models)))
+        assert exc.value.status_code == 400
+        assert "single weights file" in exc.value.detail
+
+    @pytest.mark.asyncio
+    async def test_folder_outside_roots_is_still_refused(self, tmp_path, monkeypatch) -> None:
+        models, _repo = self._setup(tmp_path, monkeypatch)
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        body = RegisterLocalModelRequest(model_ref="x", path=str(outside), backend_type="vllm")
+        with pytest.raises(HTTPException) as exc:
+            await register_local_model(body, _request(str(models)))
+        assert exc.value.status_code == 400
+        assert "outside the configured roots" in exc.value.detail
