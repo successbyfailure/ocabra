@@ -1,6 +1,6 @@
 import { CacheCell, TimingBreakdown } from "@/components/dashboard/RequestBreakdown"
 import { useEffect, useState } from "react"
-import { useNavigate } from "react-router-dom"
+import { useNavigate } from "react-router"
 import { FlaskConical, Gauge, MessageSquareText } from "lucide-react"
 import { api } from "@/api/client"
 import { fmtDuration, fmtTokens, fmtTps } from "@/components/dashboard/format"

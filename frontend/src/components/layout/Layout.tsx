@@ -3,7 +3,7 @@ import { Header } from "./Header"
 import { Sidebar } from "./Sidebar"
 import { DownloadQueue } from "@/components/downloads/DownloadQueue"
 import { useWebSocket } from "@/hooks/useWebSocket"
-import { useLocation } from "react-router-dom"
+import { useLocation } from "react-router"
 import { ArrowLeft, MonitorSmartphone } from "lucide-react"
 import { getRemoteNode, leaveRemoteNode, REMOTE_HIDDEN_ROUTES, type RemoteNode } from "@/lib/remoteNode"
 

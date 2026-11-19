@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Link, useSearchParams } from "react-router-dom"
+import { Link, useSearchParams } from "react-router"
 import { Copy, Pause, Play, Plus, Star, Trash2, Upload } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"

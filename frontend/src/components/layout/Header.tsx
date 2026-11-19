@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { useLocation, useNavigate } from "react-router-dom"
+import { useLocation, useNavigate } from "react-router"
 import { Loader2, LogOut, Menu, Search, X } from "lucide-react"
 import * as Tooltip from "@radix-ui/react-tooltip"
 import { useAuthStore } from "@/stores/authStore"

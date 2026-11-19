@@ -1,4 +1,4 @@
-import { Navigate } from "react-router-dom"
+import { Navigate } from "react-router"
 import { useAuthStore } from "@/stores/authStore"
 import type { UserRole } from "@/types"
 import type { ReactNode } from "react"

@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react"
-import { Navigate, useNavigate } from "react-router-dom"
+import { Navigate, useNavigate } from "react-router"
 import { api } from "@/api/client"
 import { useAuthStore } from "@/stores/authStore"
 

@@ -10,7 +10,7 @@ import {
   SlidersHorizontal,
   Sparkles,
 } from "lucide-react"
-import { Link } from "react-router-dom"
+import { Link } from "react-router"
 import * as Tooltip from "@radix-ui/react-tooltip"
 import { toast } from "sonner"
 import { api } from "@/api/client"

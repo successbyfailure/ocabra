@@ -11,7 +11,7 @@ import {
   X,
   Zap,
 } from "lucide-react"
-import { Link } from "react-router-dom"
+import { Link } from "react-router"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import { agentsApi } from "@/api/agents"

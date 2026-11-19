@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { ArrowLeft, Cpu, Play, Square, Trash2, RefreshCw } from "lucide-react"
-import { Link } from "react-router-dom"
+import { Link } from "react-router"
 import { useIsAdmin } from "@/hooks/useAuth"
 import { api } from "@/api/client"
 import { useModelStore } from "@/stores/modelStore"

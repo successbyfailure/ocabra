@@ -31,8 +31,8 @@ vi.mock("@/components/dashboard/useLiveActivity", () => ({
 }))
 // El editor es una página: solo importa a qué despliegue navega.
 const navigate = vi.fn()
-vi.mock("react-router-dom", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("react-router-dom")>()),
+vi.mock("react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react-router")>()),
   useNavigate: () => navigate,
 }))
 

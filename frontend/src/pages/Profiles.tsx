@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { Gauge, Layers3, Pencil, Plus, RefreshCw, Search } from "lucide-react"
-import { useNavigate } from "react-router-dom"
+import { useNavigate } from "react-router"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import type { ModelProfile, ModelState, ProfileCategory } from "@/types"

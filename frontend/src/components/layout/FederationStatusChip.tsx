@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { useNavigate } from "react-router-dom"
+import { useNavigate } from "react-router"
 import { Cloud, Network } from "lucide-react"
 import { api } from "@/api/client"
 import { useAuthStore } from "@/stores/authStore"

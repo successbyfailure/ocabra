@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { withCapacity } from "@/components/model-editor/sections/capacity/occupancy"
-import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom"
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router"
 import {
   ArrowLeft,
   Box,
