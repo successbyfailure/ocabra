@@ -17,8 +17,8 @@
 # Output: ${BIN_DIR}/llama-server, plus any libggml*.so/libllama*.so referenced
 # by the binary, copied next to it for LD_LIBRARY_PATH-free loading.
 #
-# Same recipe as backends/dockerfiles/Dockerfile.llama_cpp, repackaged so the
-# slim image can build it at runtime via BackendInstaller.
+# Builds llama.cpp from source so the slim image can install it at runtime via
+# BackendInstaller (prebuilt portable packages come from Dockerfile.backend-native).
 
 # GGML_CPU_FLAGS (optional): extra cmake flags for the CPU code. Empty = ggml's
 #   default (-march=native, tuned to this machine). Prebuilt packages for other

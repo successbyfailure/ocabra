@@ -1,83 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { Sparkles } from "lucide-react"
 import { agentStatsApi } from "@/api/agents"
-import type { AgentStatRow, ByAgentStats, ToolCallRow, ToolStatRow } from "@/types/agents"
-
-// TODO: remove mock once backend exposes /ocabra/stats/by-agent and
-// /ocabra/stats/tool-calls. See docs/tasks/agents-mcp-plan.md "Deudas abiertas".
-const MOCK_BY_AGENT: ByAgentStats = {
-  byAgent: [
-    {
-      agentId: "mock-agent-1",
-      slug: "research-bot",
-      displayName: "Research bot",
-      requestCount: 142,
-      toolCallCount: 318,
-      errorCount: 4,
-      p50DurationMs: 1800,
-      p95DurationMs: 5200,
-      totalTokens: 284000,
-    },
-  ],
-  byTool: [
-    {
-      mcpServerAlias: "filesystem",
-      toolName: "read_file",
-      invocations: 210,
-      errors: 2,
-      p50DurationMs: 35,
-      p95DurationMs: 120,
-      errorRate: 0.0095,
-    },
-    {
-      mcpServerAlias: "filesystem",
-      toolName: "list_dir",
-      invocations: 88,
-      errors: 0,
-      p50DurationMs: 22,
-      p95DurationMs: 65,
-      errorRate: 0,
-    },
-    {
-      mcpServerAlias: "github",
-      toolName: "list_repos",
-      invocations: 20,
-      errors: 2,
-      p50DurationMs: 180,
-      p95DurationMs: 820,
-      errorRate: 0.1,
-    },
-  ],
-}
-
-const MOCK_TOOL_CALLS: ToolCallRow[] = [
-  {
-    id: "tc-mock-1",
-    createdAt: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
-    agentId: "mock-agent-1",
-    agentSlug: "research-bot",
-    mcpServerAlias: "filesystem",
-    toolName: "read_file",
-    status: "ok",
-    durationMs: 42,
-    hopIndex: 2,
-    error: null,
-    argsRedacted: { path: "/data/docs/readme.md" },
-  },
-  {
-    id: "tc-mock-2",
-    createdAt: new Date(Date.now() - 9 * 60 * 1000).toISOString(),
-    agentId: "mock-agent-1",
-    agentSlug: "research-bot",
-    mcpServerAlias: "github",
-    toolName: "list_repos",
-    status: "mcp_error",
-    durationMs: 412,
-    hopIndex: 1,
-    error: "401 Unauthorized",
-    argsRedacted: {},
-  },
-]
+import type { AgentStatRow, ToolCallRow, ToolStatRow } from "@/types/agents"
 
 function fmtMs(value: number | null): string {
   if (value == null) return "—"
@@ -96,7 +20,7 @@ interface AgentsPanelProps {
 
 export function AgentsPanel({ from, to }: AgentsPanelProps) {
   const [loading, setLoading] = useState(true)
-  const [usingMock, setUsingMock] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [byAgent, setByAgent] = useState<AgentStatRow[]>([])
   const [byTool, setByTool] = useState<ToolStatRow[]>([])
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
@@ -111,14 +35,13 @@ export function AgentsPanel({ from, to }: AgentsPanelProps) {
         if (!active) return
         setByAgent(data.byAgent)
         setByTool(data.byTool)
-        setUsingMock(false)
+        setError(null)
       })
-      .catch(() => {
-        // TODO: remove mock once backend exposes /ocabra/stats/by-agent.
+      .catch((err: unknown) => {
         if (!active) return
-        setByAgent(MOCK_BY_AGENT.byAgent)
-        setByTool(MOCK_BY_AGENT.byTool)
-        setUsingMock(true)
+        setByAgent([])
+        setByTool([])
+        setError(err instanceof Error ? err.message : String(err))
       })
       .finally(() => {
         if (active) setLoading(false)
@@ -140,8 +63,7 @@ export function AgentsPanel({ from, to }: AgentsPanelProps) {
         if (active) setToolCalls(data.toolCalls)
       })
       .catch(() => {
-        // TODO: remove mock once backend exposes /ocabra/stats/tool-calls.
-        if (active) setToolCalls(MOCK_TOOL_CALLS.filter((tc) => tc.agentId === selectedAgentId))
+        if (active) setToolCalls([])
       })
     return () => {
       active = false
@@ -155,11 +77,9 @@ export function AgentsPanel({ from, to }: AgentsPanelProps) {
 
   return (
     <div className="space-y-4">
-      {usingMock && (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100">
-          Modo mock: los endpoints <code>/ocabra/stats/by-agent</code> y{" "}
-          <code>/ocabra/stats/tool-calls</code> aún no existen. Ver deudas abiertas en
-          <code> docs/tasks/agents-mcp-plan.md</code>.
+      {error && (
+        <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
+          No se pudieron cargar las estadísticas de agentes: {error}
         </div>
       )}
 

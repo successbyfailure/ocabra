@@ -17,7 +17,7 @@ const state = {
     b("vllm", "not_installed", "vLLM", ["LLM"]),
     b("piper", "not_installed", "Piper", ["TTS"]),
   ],
-  loading: false, usingMock: false, error: null,
+  loading: false, error: null,
   fetchAll: vi.fn(), install: vi.fn(), cancelInstall: vi.fn(), uninstall: vi.fn(),
 }
 vi.mock("@/stores/backendsStore", () => ({ useBackendsStore: (sel: (s: typeof state) => unknown) => sel(state) }))

@@ -32,7 +32,6 @@ function fmtSize(mb: number): string {
 export function Backends() {
   const backends = useBackendsStore((s) => s.backends)
   const loading = useBackendsStore((s) => s.loading)
-  const usingMock = useBackendsStore((s) => s.usingMock)
   const error = useBackendsStore((s) => s.error)
   const fetchAll = useBackendsStore((s) => s.fetchAll)
   const install = useBackendsStore((s) => s.install)
@@ -101,12 +100,6 @@ export function Backends() {
   const handleViewLogs = async (backend: BackendModuleState) => {
     setLogsTarget(backend)
     setLogsContent("")
-    if (usingMock) {
-      setLogsContent(
-        `[mock] Logs de instalación para ${backend.backendType}.\nNo hay datos reales disponibles en modo mock.`,
-      )
-      return
-    }
     setLogsLoading(true)
     try {
       const text = await api.backends.logs(backend.backendType)
@@ -151,18 +144,7 @@ export function Backends() {
         </div>
       </div>
 
-      {usingMock && (
-        <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-100">
-          <AlertCircle size={16} className="mt-0.5 shrink-0" />
-          <div>
-            <span className="font-semibold">Modo mock:</span> la API{" "}
-            <code className="font-mono">/ocabra/backends</code> todavía no está disponible.
-            Esta vista muestra datos de ejemplo hasta que el backend se fusione.
-          </div>
-        </div>
-      )}
-
-      {error && !usingMock && (
+      {error && (
         <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-100">
           <AlertCircle size={16} className="mt-0.5 shrink-0" />
           <div>
