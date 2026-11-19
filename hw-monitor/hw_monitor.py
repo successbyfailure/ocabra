@@ -15,6 +15,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import pynvml
 import redis.asyncio as aioredis
@@ -28,7 +29,21 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 # ---------------------------------------------------------------------------
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql+asyncpg://ocabra:ocabra@postgres:5432/ocabra")
+
+
+def _default_database_url() -> str:
+    """URL built from POSTGRES_* like the postgres service (INF-11).
+
+    Compose already passes DATABASE_URL built this way; this covers running the
+    monitor outside compose with only the POSTGRES_* variables set.
+    """
+    user = quote(os.environ.get("POSTGRES_USER") or "ocabra", safe="")
+    password = quote(os.environ.get("POSTGRES_PASSWORD") or "ocabra", safe="")
+    db = os.environ.get("POSTGRES_DB") or "ocabra"
+    return f"postgresql+asyncpg://{user}:{password}@postgres:5432/{db}"
+
+
+DATABASE_URL = os.environ.get("DATABASE_URL") or _default_database_url()
 POLL_INTERVAL_S = float(os.environ.get("POLL_INTERVAL_S", "2"))
 PERSIST_INTERVAL_POLLS = int(os.environ.get("PERSIST_INTERVAL_POLLS", "30"))
 

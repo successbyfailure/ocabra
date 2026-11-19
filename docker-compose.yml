@@ -396,7 +396,7 @@ services:
       HF_TOKEN: ${HF_TOKEN:-}
       # Para pedirle a oCabra que libere VRAM (evict on-demand/warm) en su GPU
       # preferida antes de cargar el pipeline — ver POST .../ensure_vram en
-      # docs/CONTRACTS.md 5.7. Sin esto, compite en silencio por VRAM con lo
+      # docs/CONTRACTS.md 5.6. Sin esto, compite en silencio por VRAM con lo
       # que ya esté cargado y puede colgarse en vez de fallar limpio.
       OCABRA_API_URL: http://api:8000
       GATEWAY_SERVICE_TOKEN: ${GATEWAY_SERVICE_TOKEN:-}

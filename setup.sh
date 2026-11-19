@@ -202,7 +202,8 @@ ok "Data directories ready"
 "${COMPOSE[@]}" config -q || fatal "docker-compose.yml is not valid with the current .env."
 
 CORE_SERVICES=(api docker-agent frontend postgres redis hw-monitor ollama caddy)
-BUILD_SERVICES=(api frontend hw-monitor ollama)
+# ollama is the official image as is (no build:); `up -d` pulls it.
+BUILD_SERVICES=(api frontend hw-monitor)
 START_SERVICES=("${CORE_SERVICES[@]}")
 
 if $WITH_SERVICES; then
