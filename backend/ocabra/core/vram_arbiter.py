@@ -1,6 +1,8 @@
 """Árbitro de VRAM: un único dueño de las operaciones que cambian la VRAM.
 
-Primera versión de REF-03 (cierra lo que quedaba de BUG-23). El mutex es la
+REF-03 (cierra lo que quedaba de BUG-23). Además del mutex, aquí viven las
+decisiones puras del planificador (``rank_*_candidates``) y la única forma de
+esperar a que se libere VRAM (``wait_for_reading``). El mutex es la
 puerta de carga de siempre (``ModelManager._backend_load_gate``): una carga
 la toma desde la admisión hasta el arranque del backend, y ahora también la
 toman las demás operaciones que cambian la VRAM fuera de una carga
