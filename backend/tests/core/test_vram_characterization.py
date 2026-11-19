@@ -500,20 +500,7 @@ async def _count_points() -> int:
         return env.faults.count
 
 
-@pytest.mark.parametrize(
-    "kind",
-    [
-        "error",
-        pytest.param(
-            "cancel",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="BUG: cancelling a load while it unloads a victim leaves the "
-                "victim in UNLOADING for good",
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("kind", ["error", "cancel"])
 async def test_a_failure_at_any_await_of_an_evicting_load_leaves_nothing_behind(kind):
     total = await _count_points()
     assert total > 10
@@ -612,3 +599,29 @@ async def test_an_eviction_already_visible_is_not_waited_out_again():
         await env.mm.load("new")
         assert env.backend.unloads == ["od"]
         assert time.monotonic() - started < 3.0
+
+
+async def test_a_cancelled_unload_can_be_finished_by_the_next_one(env):
+    """Cancelled while the worker is stopping: ERROR (not UNLOADING for good),
+    and a second unload releases the process and its locks."""
+    await env.resident("od", 6_000, [GPU_3090])
+    stopping = asyncio.Event()
+    release = asyncio.Event()
+    original = env.backend.unload
+
+    async def slow_unload(model_id):
+        stopping.set()
+        await release.wait()
+        await original(model_id)
+
+    env.backend.unload = slow_unload
+    task = asyncio.create_task(env.mm.unload("od"))
+    await asyncio.wait_for(stopping.wait(), timeout=2)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert env.status("od") == ModelStatus.ERROR
+    env.backend.unload = original
+    await env.mm.unload("od")
+    assert env.status("od") == ModelStatus.UNLOADED
+    assert env.world.live[GPU_3090] == {}
+    assert_quiescent(env)

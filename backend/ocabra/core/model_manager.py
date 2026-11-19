@@ -5634,10 +5634,13 @@ class ModelManager:
             if snapshot is not None:
                 baseline_free_mb = snapshot[0]
 
+        status_before = state.status
         state.status = ModelStatus.UNLOADING
-        await self._publish_event(model_id, "status_changed")
+        stopping = False
 
         try:
+            await self._publish_event(model_id, "status_changed")
+            stopping = True
             await self.stop_worker_process(state)
 
             if self._gpu_manager:
@@ -5684,6 +5687,24 @@ class ModelManager:
                     task_name=f"watch-and-reload:{model_id}",
                     model_id=model_id,
                 )
+        except asyncio.CancelledError:
+            # Cancelled mid-unload (typically a load evicting this model was
+            # cancelled). Leaving UNLOADING made the model unusable and
+            # un-unloadable until a restart. Before the worker was told to
+            # stop nothing changed: back to how it was. After, its process and
+            # locks are in an unknown state: ERROR, which unload() and the
+            # eviction fallback both accept, so the next one finishes the job.
+            if stopping:
+                state.status = ModelStatus.ERROR
+                state.error_message = "unload interrupted by cancellation; unload it again"
+            else:
+                state.status = status_before
+            spawn(
+                self._publish_event(model_id, "status_changed"),
+                name=f"unload-cancelled-event:{model_id}",
+            )
+            logger.warning("model_unload_cancelled", model_id=model_id, reason=reason)
+            raise
         except Exception as e:
             state.status = ModelStatus.ERROR
             state.error_message = str(e)
