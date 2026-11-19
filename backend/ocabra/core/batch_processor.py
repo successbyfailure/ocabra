@@ -105,6 +105,42 @@ class BatchProcessor:
         from ocabra.api._deps_auth import INTERNAL_TOKEN
 
         self._token = INTERNAL_TOKEN
+        # batch id → what its run is doing right now, for GET /v1/batches
+        # (``ocabra`` field, see live_status). In memory: it describes the
+        # run in this process; a batch not being run has no entry.
+        self._live: dict[str, dict[str, Any]] = {}
+
+    def live_status(self, batch_id: str) -> dict[str, Any] | None:
+        """Snapshot of a batch's run (``None`` when it is not being run)."""
+        live = self._live.get(str(batch_id))
+        if live is None:
+            return None
+        retry_at = live.get("retry_at")
+        return {
+            "in_flight": int(live["in_flight"]),
+            "waiting": int(live["waiting"]),
+            "preemptions": int(live["preemptions"]),
+            "dispatch_models": sorted(live["dispatch_models"]),
+            "cooldown_models": sorted(live["cooldown_models"]),
+            "vram_models": sorted(live["vram_models"]),
+            "retry_in_seconds": (
+                max(0, int(retry_at - time.monotonic())) if retry_at is not None else None
+            ),
+            "started": bool(live["started"]),
+        }
+
+    @staticmethod
+    def _new_live() -> dict[str, Any]:
+        return {
+            "in_flight": 0,
+            "waiting": 0,
+            "preemptions": 0,
+            "dispatch_models": set(),
+            "cooldown_models": set(),
+            "vram_models": set(),
+            "retry_at": None,
+            "started": False,
+        }
 
     def notify(self) -> None:
         """Wake the processor immediately (e.g. on batch creation)."""
@@ -167,6 +203,8 @@ class BatchProcessor:
                 await self._finalize_expiration(batch.id)
                 continue
             ran_a_job = False
+            if batch.status in ("validating", "in_progress"):
+                self._live[str(batch.id)] = self._new_live()
             try:
                 if batch.status == "validating":
                     await self._mark_in_progress(batch.id)
@@ -180,6 +218,8 @@ class BatchProcessor:
             except Exception as exc:
                 logger.exception("batch_processing_error", batch_id=str(batch.id), error=str(exc))
                 await self._mark_failed(batch.id, str(exc))
+            finally:
+                self._live.pop(str(batch.id), None)
 
             # Let the server breathe between back-to-back long-running batch
             # jobs — unrelated to interactive priority, just avoids pegging
@@ -245,6 +285,9 @@ class BatchProcessor:
             await session.commit()
 
     async def _process_batch(self, batch_id: uuid.UUID) -> None:
+        # What this run is doing, for the ``ocabra`` field of GET /v1/batches.
+        live = self._live.setdefault(str(batch_id), self._new_live())
+        live["started"] = True
         # Load batch + input file path + user
         async with AsyncSessionLocal() as session:
             batch = await session.get(OpenAIBatch, batch_id)
@@ -489,9 +532,12 @@ class BatchProcessor:
                 # on both sides (the real worker_key is e.g.
                 # ``llama_cpp/qwen3.8-27b::781a0367a8ba``).
                 target_model = await _coordinator_key(str(body.get("model") or ""), body)
+                live_model = target_model or str(body.get("model") or "")
 
                 if coordinator is not None and target_model and coordinator.in_cooldown(target_model):
                     _extend_requeue_deadline()
+                    live["waiting"] += 1
+                    live["cooldown_models"].add(live_model)
                     return False
 
                 handle = None
@@ -506,6 +552,9 @@ class BatchProcessor:
                         line_idx=idx,
                         handle=handle,
                     )
+                live["in_flight"] += 1
+                if live_model:
+                    live["dispatch_models"].add(live_model)
                 try:
                     response_payload, status_code, error_payload = await self._dispatch(
                         endpoint=endpoint,
@@ -514,6 +563,9 @@ class BatchProcessor:
                         api_key_name=api_key_name,
                     )
                 except asyncio.CancelledError:
+                    live["preemptions"] += 1
+                    live["waiting"] += 1
+                    live["cooldown_models"].add(live_model)
                     # Preempted to free a slot/model for a waiting
                     # interactive caller — not a real failure. Swallow it
                     # here (the task itself tolerates being cancelled; see
@@ -522,6 +574,7 @@ class BatchProcessor:
                     _extend_requeue_deadline()
                     return False
                 finally:
+                    live["in_flight"] -= 1
                     if handle is not None:
                         await coordinator.unregister(target_model, handle)
 
@@ -534,6 +587,8 @@ class BatchProcessor:
                         line_idx=idx,
                         target_model=target_model,
                     )
+                    live["waiting"] += 1
+                    live["vram_models"].add(live_model)
                     return False
 
                 record: dict[str, Any] = {
@@ -596,6 +651,10 @@ class BatchProcessor:
                 if expires_at is not None and datetime.now(UTC) > expires_at:
                     expired_mid_run = True
                     break
+                live["waiting"] = 0
+                live["cooldown_models"].clear()
+                live["vram_models"].clear()
+                live["retry_at"] = None
                 results = await asyncio.gather(*(
                     _process_line(idx, lines[idx]) for idx in pending_indices
                 ))
@@ -603,6 +662,7 @@ class BatchProcessor:
                     idx for idx, done in zip(pending_indices, results, strict=True) if not done
                 ]
                 if pending_indices and not cancelled:
+                    live["retry_at"] = time.monotonic() + _REQUEUE_BACKOFF_S
                     await asyncio.sleep(_REQUEUE_BACKOFF_S)
 
             if pending_indices and not cancelled:

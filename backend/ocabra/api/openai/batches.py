@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,7 +18,7 @@ from typing import Annotated, Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ocabra.api._deps_auth import UserContext
@@ -26,6 +27,7 @@ from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.auth import User
 from ocabra.db.openai_batches import OpenAIBatch, OpenAIFile
+from ocabra.schemas.batches import Batch, BatchList
 
 router = APIRouter(tags=["OpenAI Batches"])
 logger = structlog.get_logger(__name__)
@@ -150,13 +152,140 @@ def _is_manager_or_admin(user: UserContext) -> bool:
     return user.role in ("model_manager", "system_admin")
 
 
-async def _with_username(session: AsyncSession, batch: OpenAIBatch) -> dict[str, Any]:
+async def _with_username(
+    session: AsyncSession, batch: OpenAIBatch, request: Request | None = None
+) -> dict[str, Any]:
     d = batch.to_openai_dict()
     username = (await session.execute(
         select(User.username).where(User.id == batch.user_id)
     )).scalar_one_or_none()
     d["user"] = {"id": str(batch.user_id), "username": username}
+    d["ocabra"] = await _live_field(session, batch, request) if request is not None else None
     return d
+
+
+_TERMINAL = ("completed", "failed", "expired", "cancelled")
+_NOT_READY = ("loading", "unloaded", "configured", "discovered", "unloading")
+
+
+async def _model_wait(mm: Any, model: str) -> dict[str, Any]:
+    """State of ``model`` across its workers (``<model>`` and ``<model>::<hash>``)."""
+    states = [
+        st
+        for key, st in (getattr(mm, "_states", {}) or {}).items()
+        if key == model or key.startswith(model + "::")
+    ]
+    statuses = {str(getattr(st.status, "value", st.status)) for st in states}
+    if "loaded" in statuses:
+        status = "loaded"
+    elif "loading" in statuses:
+        status = "loading"
+    elif statuses:
+        status = sorted(statuses)[0]
+    else:
+        status = None
+    expected: int | None = None
+    if status in ("loading", "unloaded", "configured"):
+        try:
+            typical = await mm.get_expected_load_seconds(model)
+        except Exception:  # noqa: BLE001 - a hint, never an error
+            typical = None
+        if typical is not None:
+            started = [
+                t for t in (mm.load_started_at(st.model_id) for st in states) if t
+            ] if status == "loading" else []
+            elapsed = (time.time() - min(started)) if started else 0.0
+            expected = max(0, int(typical - elapsed))
+    return {"model": model, "status": status, "expected_wait_seconds": expected}
+
+
+async def _live_field(
+    session: AsyncSession, batch: OpenAIBatch, request: Request
+) -> dict[str, Any] | None:
+    """``ocabra``: why an unfinished batch is where it is (``BatchLiveStatus``).
+
+    A batch at 0/144 for a minute looked the same whether it was queued behind
+    another batch, waiting for its model to load or yielding to interactive
+    traffic; for single requests oCabra already says so (X-Ocabra-Model-Status,
+    X-Ocabra-Expected-Wait-Seconds), for a batch nothing did.
+    """
+    if batch.status in _TERMINAL:
+        return None
+    base: dict[str, Any] = {
+        "queue_position": None, "in_flight": 0, "waiting": 0, "preemptions": 0,
+        "retry_in_seconds": None, "models": [],
+    }  # fmt: skip
+    if batch.status == "finalizing":
+        return {**base, "phase": "finalizing", "detail": "Writing the output files."}
+    if batch.status == "cancelling":
+        return {**base, "phase": "cancelling", "detail": "Stopping: no new lines are dispatched."}
+    processor = getattr(request.app.state, "batch_processor", None)
+    snap = processor.live_status(str(batch.id)) if processor is not None else None
+    if snap is None:
+        ahead = (await session.execute(
+            select(func.count()).select_from(OpenAIBatch).where(
+                OpenAIBatch.status.in_(("validating", "in_progress", "finalizing", "cancelling")),
+                OpenAIBatch.created_at < batch.created_at,
+            )
+        )).scalar_one()
+        return {
+            **base,
+            "phase": "queued",
+            "queue_position": int(ahead),
+            "detail": (
+                f"Queued: {ahead} batch(es) ahead; batches run one at a time."
+                if ahead
+                else "Queued: it starts on the processor's next pass."
+            ),
+        }
+    mm = getattr(request.app.state, "model_manager", None)
+    names = sorted(set(snap["dispatch_models"]) | set(snap["cooldown_models"]) | set(snap["vram_models"]))
+    models = [await _model_wait(mm, m) for m in names] if mm is not None else []
+    by_name = {m["model"]: m for m in models}
+    out = {
+        **base,
+        "in_flight": snap["in_flight"],
+        "waiting": snap["waiting"],
+        "preemptions": snap["preemptions"],
+        "retry_in_seconds": snap["retry_in_seconds"],
+        "models": models,
+    }
+    loading = [
+        by_name[m] for m in snap["dispatch_models"]
+        if by_name.get(m, {}).get("status") in _NOT_READY
+    ]  # fmt: skip
+    if snap["in_flight"] and loading:
+        m = loading[0]
+        wait = m.get("expected_wait_seconds")
+        return {
+            **out,
+            "phase": "loading_model",
+            "detail": f"Waiting for {m['model']} to load"
+            + (f" (about {wait} s left)." if wait is not None else "."),
+        }
+    if snap["in_flight"]:
+        return {**out, "phase": "running", "detail": f"Serving {snap['in_flight']} line(s)."}
+    if snap["cooldown_models"]:
+        retry = snap["retry_in_seconds"]
+        return {
+            **out,
+            "phase": "yielding_to_interactive",
+            "detail": (
+                f"{', '.join(snap['cooldown_models'])} was lent to interactive requests; "
+                f"{snap['waiting']} line(s) retry"
+                + (f" in {retry} s." if retry is not None else " shortly.")
+            ),
+        }
+    if snap["vram_models"]:
+        return {
+            **out,
+            "phase": "waiting_for_vram",
+            "detail": (
+                f"No GPU memory free for {', '.join(snap['vram_models'])} yet; "
+                f"{snap['waiting']} line(s) retry shortly."
+            ),
+        }
+    return {**out, "phase": "starting", "detail": "Starting: reading the input file."}
 
 
 async def _resolve_owned_batch_file(
@@ -223,7 +352,7 @@ def _strip_id(prefixed: str, prefix: str) -> uuid.UUID:
         }}) from exc
 
 
-@router.post("/batches", summary="Create a batch")
+@router.post("/batches", summary="Create a batch", response_model=Batch)
 async def create_batch(
     body: BatchCreateBody,
     user: Annotated[UserContext, Depends(get_openai_user)],
@@ -283,6 +412,19 @@ async def create_batch(
         request_total = 0
         validation_errors: list[dict[str, Any]] = []
         raw_lines = await asyncio.to_thread(_read_jsonl_lines, path)
+        # The limit before validating each line (that can mean a DB lookup
+        # per line): a file far over it is refused at once.
+        lines_in_file = sum(1 for line in raw_lines if line.strip())
+        if lines_in_file > settings.batch_max_requests:
+            raise HTTPException(status_code=400, detail={"error": {
+                "message": (
+                    f"The input file has {lines_in_file} requests; a batch may hold at most "
+                    f"{settings.batch_max_requests}. Split it into several batches."
+                ),
+                "type": "invalid_request_error",
+                "param": "input_file_id",
+                "code": "batch_too_large",
+            }})
         for line_no, line in enumerate(raw_lines, start=1):
             stripped = line.strip()
             if not stripped:
@@ -376,6 +518,8 @@ async def create_batch(
             raise HTTPException(status_code=400, detail={"error": {
                 "message": "Input file contains no requests",
                 "type": "invalid_request_error",
+                "param": "input_file_id",
+                "code": "empty_batch",
             }})
         if validation_errors:
             raise HTTPException(status_code=400, detail={"error": {
@@ -422,14 +566,23 @@ async def create_batch(
         if processor is not None:
             processor.notify()
 
-        return await _with_username(session, batch)
+        return await _with_username(session, batch, request)
 
 
-@router.get("/batches/{batch_id}", summary="Retrieve a batch")
+@router.get("/batches/{batch_id}", summary="Retrieve a batch", response_model=Batch)
 async def retrieve_batch(
     batch_id: str,
     user: Annotated[UserContext, Depends(get_openai_user)],
+    request: Request,
 ) -> dict:
+    """Return one batch (OpenAI ``Batch``).
+
+    While it is unfinished, the oCabra field ``ocabra`` says why it is where
+    it is (queued, its model loading, yielding to interactive traffic…), with
+    an estimate of the wait when there is one. Poll this until ``status`` is
+    ``completed``, ``failed``, ``expired`` or ``cancelled``; the results are in
+    ``output_file_id`` and ``error_file_id`` (``GET /v1/files/{id}/content``).
+    """
     batch_uuid = _strip_id(batch_id, "batch_")
     async with AsyncSessionLocal() as session:
         batch = await session.get(OpenAIBatch, batch_uuid)
@@ -445,15 +598,19 @@ async def retrieve_batch(
                 "message": f"No such batch: '{batch_id}'",
                 "type": "invalid_request_error",
             }})
-        return await _with_username(session, batch)
+        return await _with_username(session, batch, request)
 
 
-@router.get("/batches", summary="List batches")
+@router.get("/batches", summary="List batches", response_model=BatchList)
 async def list_batches(
     user: Annotated[UserContext, Depends(get_openai_user)],
+    request: Request,
     after: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> dict:
+    """List the caller's batches, newest first (all of them for
+    model_manager and system_admin). Each item is a ``Batch`` with its
+    ``ocabra`` live status."""
     if user.user_id is None:
         return {"object": "list", "data": [], "first_id": None, "last_id": None, "has_more": False}
     manager_or_admin = _is_manager_or_admin(user)
@@ -467,7 +624,7 @@ async def list_batches(
                 stmt = stmt.where(OpenAIBatch.created_at < cursor.created_at)
         stmt = stmt.order_by(desc(OpenAIBatch.created_at)).limit(limit)
         rows = (await session.execute(stmt)).scalars().all()
-        data = [await _with_username(session, r) for r in rows]
+        data = [await _with_username(session, r, request) for r in rows]
         return {
             "object": "list",
             "data": data,
@@ -477,11 +634,15 @@ async def list_batches(
         }
 
 
-@router.post("/batches/{batch_id}/cancel", summary="Cancel a batch")
+@router.post("/batches/{batch_id}/cancel", summary="Cancel a batch", response_model=Batch)
 async def cancel_batch(
     batch_id: str,
     user: Annotated[UserContext, Depends(get_openai_user)],
+    request: Request,
 ) -> dict:
+    """Cancel a batch: it goes to ``cancelling`` (no new lines are
+    dispatched) and then to ``cancelled``; already-finished batches are
+    returned unchanged."""
     batch_uuid = _strip_id(batch_id, "batch_")
     async with AsyncSessionLocal() as session:
         batch = await session.get(OpenAIBatch, batch_uuid)
@@ -494,14 +655,13 @@ async def cancel_batch(
                 "type": "invalid_request_error",
             }})
         if batch.status in ("completed", "failed", "expired", "cancelled"):
-            return await _with_username(session, batch)
+            return await _with_username(session, batch, request)
         if batch.status == "cancelling":
-            return await _with_username(session, batch)
+            return await _with_username(session, batch, request)
         batch.status = "cancelling"
         batch.cancelling_at = datetime.now(UTC)
         await session.commit()
         await session.refresh(batch)
-        return await _with_username(session, batch)
+        return await _with_username(session, batch, request)
 
 
-_ = settings  # keep import for forward-compat config use

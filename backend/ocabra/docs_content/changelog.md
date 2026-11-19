@@ -16,6 +16,27 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.116.0 — 2026-11-19
+
+### Nuevo
+
+- `/v1/batches`: las respuestas tienen su esquema en OpenAPI (`Batch`,
+  `BatchList`, con `status`, `request_counts`, `output_file_id`,
+  `error_file_id`…). Antes las cuatro rutas declaraban `{"type": "object"}` y
+  un cliente generado del esquema no podía leer el resultado de un lote.
+- Un lote sin terminar trae `ocabra`: en qué fase está y por qué espera
+  (`queued` con `queue_position`, `loading_model` con
+  `models[].expected_wait_seconds`, `running`, `yielding_to_interactive` con
+  `retry_in_seconds`, `waiting_for_vram`, `finalizing`, `cancelling`), con una
+  frase en `detail`. Un lote a 0/144 durante un minuto ya no es indistinguible
+  de uno lento.
+- Límite de peticiones por lote: 50 000 (`BATCH_MAX_REQUESTS`). Por encima,
+  `POST /v1/batches` da 400 con `code: "batch_too_large"` (comprobado antes de
+  validar las líneas); un fichero sin peticiones, `code: "empty_batch"`. Los
+  límites están documentados en `/docs`.
+
+---
+
 ## 0.115.0 — 2026-11-19
 
 ### Cambiado

@@ -1054,6 +1054,38 @@ peticion: `{"custom_id", "method": "POST", "url", "body"}`) y crea el lote con
 `POST /v1/batches` (`input_file_id`, `endpoint`). Consulta el progreso con
 `GET /v1/batches/{id}`.
 
+El objeto que devuelven `POST /v1/batches`, `GET /v1/batches/{id}`, `GET
+/v1/batches` (lista) y `.../cancel` es el `Batch` de OpenAI, con su esquema en
+la sección Schemas: `status` (`validating`, `in_progress`, `finalizing`,
+`completed`, `failed`, `expired`, `cancelling`, `cancelled`),
+`request_counts` (`total`, `completed`, `failed`) y, al terminar,
+`output_file_id` (una línea por petición correcta) y `error_file_id` (una por
+cada fallo). Los dos se leen con `GET /v1/files/{id}/content`.
+
+**Por qué espera un lote** (extensión de oCabra). Mientras no ha terminado, el
+`Batch` trae `ocabra`, con `phase` y `detail` (una frase lista para una barra de
+progreso):
+
+| `phase` | Qué pasa |
+|---------|----------|
+| `queued` | Hay otros lotes delante (`queue_position`); se procesan de uno en uno. |
+| `starting` | Recién cogido, leyendo la entrada. |
+| `loading_model` | Sus líneas esperan a que cargue el modelo; `models[].expected_wait_seconds` estima lo que queda con su tiempo de carga habitual (lo mismo que `X-Ocabra-Expected-Wait-Seconds` en una petición normal). |
+| `running` | Hay líneas sirviéndose (`in_flight`). |
+| `yielding_to_interactive` | Su modelo se cedió a tráfico interactivo; las líneas (`waiting`) se reintentan solas en `retry_in_seconds`. |
+| `waiting_for_vram` | No había memoria de GPU libre; se reintenta enseguida. |
+| `finalizing` / `cancelling` | Escribiendo los resultados / parando. |
+
+**Límites.** Un lote admite como mucho **50 000 peticiones** por defecto
+(`BATCH_MAX_REQUESTS`; cuentan las líneas no
+vacías). Por encima, `POST /v1/batches` responde 400 con
+`code: "batch_too_large"`, y si no hay ninguna, `code: "empty_batch"`. El fichero
+de entrada tiene el tope de cualquier subida, **512 MB** (`POST /v1/files` → 413).
+Una línea mal formada hace que se rechace el lote entero con un 400 que lista
+hasta 20 errores (`error.errors`, con `line`, `code` y `message`). El lote
+caduca a las 24 h (`completion_window`); lo no despachado para entonces sale en
+`error_file_id` como `batch_expired`.
+
 ### Endpoints admitidos en lote
 
 **oCabra admite en lotes bastante mas que el estandar de Batches de OpenAI.**

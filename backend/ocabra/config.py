@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.115.0"
+APP_VERSION = "0.116.0"
 
 
 class Settings(BaseSettings):
@@ -846,6 +846,10 @@ class Settings(BaseSettings):
     # X-Forwarded-* headers; behind our gateway that's not the case, so set this
     # explicitly to e.g. https://api.example.com when response_format=url is used.
     public_url: str = ""
+    # Requests (non-empty lines) one batch may hold; above it POST /v1/batches
+    # answers 400 code=batch_too_large. 50 000 is OpenAI's own limit. The input
+    # file itself is capped at upload (512 MB, /v1/files → 413).
+    batch_max_requests: int = Field(default=50_000, ge=1)
     batch_max_concurrency: int = Field(
         default=4, ge=1, description="Max concurrent requests dispatched per batch."
     )
