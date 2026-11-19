@@ -119,7 +119,8 @@ pesadas al arrancar; es deliberado.
   `app.routes`).
 - Mocks de GPU/procesos con `unittest.mock.AsyncMock`.
 - Se ejecutan con y sin Postgres (`env -u DATABASE_URL pytest`): los tests
-  que necesitan BD se saltan solos sin ella.
+  marcados `requires_db` (`tests/conftest.py`) se saltan si no hay Postgres, y
+  nunca tocan la BD de producción (se redirige a `<db>_test`).
 - Invariantes del repositorio como tests: la versión y el changelog,
   `ALLOWED_ENDPOINTS` de Batches frente a `/docs`, todas las rutas en
   `docs/API.md` (`test_api_md.py`), `.env.example` frente a `config.py`.
