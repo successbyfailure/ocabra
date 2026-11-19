@@ -528,6 +528,25 @@ JSONL de entrada: `{"custom_id", "method": "POST", "url", "body"}`.
   `BATCH_RESUME_COOLDOWN_SLOTS_S`, `BATCH_RESUME_COOLDOWN_EVICTION_S`,
   `BATCH_INTER_JOB_COOLDOWN_S`.
 
+### 5.10 Benchmarks de aplicaciones
+
+Rutas internas (rol `model_manager`) en `api/internal/benchmarks.py`:
+`GET /ocabra/benchmarks/catalog`, `POST/GET /ocabra/benchmarks/runs`, detalle,
+log y acciones `pause|resume|cancel`. Los estados persistidos son
+`queued|running|pausing|paused|cancelling|completed|failed|cancelled`.
+
+`BenchmarkManager` ejecuta una sola unidad `app + suite + model` a la vez. Usa
+un usuario/API key internos para distinguir sus peticiones en
+`ModelManager.active_requests_snapshot()` y `request_stats`. Tráfico de otra
+identidad termina el subprocess, marca el intento y pausa la ejecución; tras
+`benchmark_quiet_period_s` sin tráfico la reencola. Un intento terminado con
+solape se repite desde un checkout limpio. Un intento interrumpido reutiliza
+su workspace y los argumentos de reanudación del runner.
+
+Workspaces y logs viven bajo `benchmark_dir` (`/data/benchmarks` por defecto,
+volumen persistente). Corrala usa una base separada cuyo nombre contiene
+`bench/test/scratch/tmp`; nunca la base de producción.
+
 ---
 
 ## 6. Redis — Keys y canales
@@ -592,6 +611,7 @@ columnas, en el código.
 | `agents`, `agent_mcp_servers` | `db/agents.py` | Agentes |
 | `mcp_servers` | `db/mcp.py` | Servidores MCP |
 | `trtllm_compile_jobs` | `db/trtllm.py` | Compilaciones TensorRT-LLM |
+| `benchmark_runs`, `benchmark_attempts` | `db/benchmarks.py` | Cola, checkpoints, contaminación y resultados de benchmarks |
 
 ---
 

@@ -84,6 +84,8 @@ import type {
   OpenAIBatchJob,
   OpenAIFileObject,
   BatchEndpoint,
+  BenchmarkAppCatalog,
+  BenchmarkRun,
 } from "@/types";
 import { useAuthStore } from "@/stores/authStore";
 
@@ -3016,6 +3018,57 @@ export const api = {
       request<OpenAIBatchJob>(
         "POST",
         `/v1/batches/${encodeURIComponent(batchId)}/cancel`,
+      ),
+  },
+
+  benchmarks: {
+    catalog: () =>
+      request<BenchmarkAppCatalog[]>("GET", "/ocabra/benchmarks/catalog"),
+    list: (limit = 100) =>
+      request<BenchmarkRun[]>(
+        "GET",
+        `/ocabra/benchmarks/runs${buildQuery({ limit })}`,
+      ),
+    get: (runId: string) =>
+      request<BenchmarkRun>(
+        "GET",
+        `/ocabra/benchmarks/runs/${encodeURIComponent(runId)}`,
+      ),
+    create: (payload: {
+      app: string;
+      suite: string;
+      models: string[];
+      revision?: string;
+      suiteArgs?: string[];
+      autoPause?: boolean;
+    }) =>
+      request<BenchmarkRun>("POST", "/ocabra/benchmarks/runs", {
+        app: payload.app,
+        suite: payload.suite,
+        models: payload.models,
+        revision: payload.revision || null,
+        suite_args: payload.suiteArgs ?? [],
+        auto_pause: payload.autoPause ?? true,
+      }),
+    pause: (runId: string) =>
+      request<BenchmarkRun>(
+        "POST",
+        `/ocabra/benchmarks/runs/${encodeURIComponent(runId)}/pause`,
+      ),
+    resume: (runId: string) =>
+      request<BenchmarkRun>(
+        "POST",
+        `/ocabra/benchmarks/runs/${encodeURIComponent(runId)}/resume`,
+      ),
+    cancel: (runId: string) =>
+      request<BenchmarkRun>(
+        "POST",
+        `/ocabra/benchmarks/runs/${encodeURIComponent(runId)}/cancel`,
+      ),
+    log: (runId: string, lines = 500) =>
+      request<{ lines: string[]; attemptId: string | null }>(
+        "GET",
+        `/ocabra/benchmarks/runs/${encodeURIComponent(runId)}/log${buildQuery({ lines })}`,
       ),
   },
 

@@ -109,6 +109,7 @@ services:
       - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/hf_cache:/data/hf_cache
       - ./data/openai_files:/data/openai_files
       - ./data/image_outputs:/data/image_outputs
+      - ./data/benchmarks:/data/benchmarks
       - backends_data:/data/backends
       # Token the docker agent writes at startup (read-only here).
       - docker_agent_token:/run/ocabra-agent:ro

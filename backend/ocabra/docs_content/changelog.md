@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.122.0 — 2026-11-19
+
+### Nuevo
+
+- **Benchmarks de aplicaciones desde el panel.** Un gestor de modelos puede
+  encolar suites de Escriba o Corrala para varios modelos, consultar sus
+  resultados e intentos y pausar, reanudar o cancelar la ejecución. oCabra
+  pausa automáticamente cuando detecta tráfico interactivo, conserva el
+  checkpoint y repite los intentos que se hayan solapado con peticiones
+  externas. Las rutas internas viven bajo `/ocabra/benchmarks/*`.
+
+---
+
 ## 0.121.1 — 2026-11-19
 
 ### Arreglos

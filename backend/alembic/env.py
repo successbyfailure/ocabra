@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 # `alembic check` / autogenerate died with NoReferencedTableError (INF-12).
 import ocabra.db.agents  # noqa: F401  (Agent + AgentMCPServer)
 import ocabra.db.auth  # noqa: F401  (User, Group, ApiKey, ...)
+import ocabra.db.benchmarks  # noqa: F401
 import ocabra.db.cloud  # noqa: F401
 import ocabra.db.federation  # noqa: F401
 import ocabra.db.gpu_power_settings  # noqa: F401  (GpuPowerSetting)

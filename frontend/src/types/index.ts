@@ -2120,6 +2120,65 @@ export interface OpenAIFileObject {
   status_details: string | null;
 }
 
+export type BenchmarkRunStatus =
+  | "queued"
+  | "running"
+  | "pausing"
+  | "paused"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface BenchmarkSuiteCatalog {
+  name: string;
+  description: string;
+  resumable: boolean;
+  needsPreparation: boolean;
+}
+
+export interface BenchmarkAppCatalog {
+  app: string;
+  description: string;
+  defaultRevision: string;
+  suites: BenchmarkSuiteCatalog[];
+}
+
+export interface BenchmarkAttempt {
+  id: string;
+  model: string;
+  attemptNumber: number;
+  status: "running" | "interrupted" | "contaminated" | "completed" | "failed";
+  returnCode: number | null;
+  externalRequests: Array<Record<string, unknown>>;
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  result: Record<string, unknown> | null;
+}
+
+export interface BenchmarkRun {
+  id: string;
+  app: string;
+  suite: string;
+  revision: string;
+  models: string[];
+  suiteArgs: string[];
+  status: BenchmarkRunStatus;
+  autoPause: boolean;
+  pauseReason: "manual" | "external_traffic" | null;
+  currentModelIndex: number;
+  currentModel: string | null;
+  result: Record<string, Record<string, unknown>>;
+  contaminatedAttempts: number;
+  error: string | null;
+  externalActivityAt: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  attempts: BenchmarkAttempt[];
+}
+
 // Backend modules (Bloque 15) — re-exported for convenience.
 export type {
   BackendInstallStatus,

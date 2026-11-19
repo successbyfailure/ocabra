@@ -128,6 +128,7 @@ def harness(monkeypatch):
     h.component("ocabra.agents.mcp_registry", "MCPRegistry")
     monkeypatch.setattr("ocabra.agents.mcp_registry.set_registry", lambda r: None)
     h.component("ocabra.core.batch_processor", "BatchProcessor")
+    h.component("ocabra.benchmarks.manager", "BenchmarkManager")
     monkeypatch.setattr(
         "ocabra.core.default_presets.ensure_llm_default_presets",
         AsyncMock(return_value={"created": 0, "skipped": 0}),
@@ -194,6 +195,7 @@ async def test_shutdown_stops_everything_in_reverse_start_order(harness):
         assert "ModelManager.stop" not in harness.events
     ev = harness.events
     for expected in (
+        "BenchmarkManager.stop",
         "BatchProcessor.stop",
         "MCPRegistry.stop",
         "TrtllmCompileManager.stop",
@@ -210,6 +212,7 @@ async def test_shutdown_stops_everything_in_reverse_start_order(harness):
     ):
         assert expected in ev, expected
     order = [
+        "BenchmarkManager.stop",
         "BatchProcessor.stop",
         "MCPRegistry.stop",
         "BackendProcessManager.stop",

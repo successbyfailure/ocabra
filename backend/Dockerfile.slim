@@ -111,7 +111,8 @@ COPY pyproject.toml constraints.txt ./
 # constraints.txt pins every installed package (see its header): rebuilding the
 # same commit must not pull different versions.
 RUN pip install --upgrade pip setuptools wheel \
-    && pip install -c constraints.txt -e "."
+    && pip install -c constraints.txt -e "." \
+    && pip install "uv==0.9.11"
 
 # --- dev target (slim + pytest/ruff, no AI backends) ---
 FROM base AS dev
@@ -130,7 +131,7 @@ RUN chmod +x /app/docker-entrypoint.sh
 ARG OCABRA_UID=1000
 ARG OCABRA_GID=1000
 RUN mkdir -p /data/backends /data/models /data/hf_cache /data/openai_files \
-        /data/image_outputs /opt/ocabra/data/ollama \
+        /data/image_outputs /data/benchmarks /opt/ocabra/data/ollama \
     && chown -R "${OCABRA_UID}:${OCABRA_GID}" /data /opt/ocabra
 
 EXPOSE 8000

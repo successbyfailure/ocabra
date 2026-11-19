@@ -24,6 +24,7 @@ import { OpenAICompat } from "@/pages/OpenAICompat"
 import { Profiles } from "@/pages/Profiles"
 import { Services } from "@/pages/Services"
 import { Batches } from "@/pages/Batches"
+import { Benchmarks } from "@/pages/Benchmarks"
 import { Federation } from "@/pages/Federation"
 
 // ROUTES — Each stream adds its page component here. Do not remove this comment.
@@ -60,6 +61,14 @@ export default function App() {
                   element={
                     <ProtectedRoute minRole="model_manager">
                       <Batches />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/benchmarks"
+                  element={
+                    <ProtectedRoute minRole="model_manager">
+                      <Benchmarks />
                     </ProtectedRoute>
                   }
                 />

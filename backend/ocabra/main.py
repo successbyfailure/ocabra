@@ -973,6 +973,16 @@ async def _startup(app: FastAPI, teardown: _Teardown) -> None:
     app.state.batch_processor = batch_processor
     logger.info("batch_processor_ready")
 
+    # Application benchmarks: persistent queue with process-level pause/resume
+    # and automatic preemption when non-benchmark inference traffic appears.
+    from ocabra.benchmarks.manager import BenchmarkManager
+
+    benchmark_manager = BenchmarkManager(app)
+    await benchmark_manager.start()
+    teardown.push("benchmark_manager", benchmark_manager.stop)
+    app.state.benchmark_manager = benchmark_manager
+    logger.info("benchmark_manager_ready")
+
 
 _API_DESCRIPTION = """
 # oCabra — Multi-GPU AI Model Server
@@ -1674,6 +1684,7 @@ app.include_router(ollama_router)
 
 # Stream 5: Metrics (public), Config/Stats/TRT/Auth/Users/Groups/Profiles (internal)
 from ocabra.api.internal.auth import router as auth_router  # noqa: E402
+from ocabra.api.internal.benchmarks import router as benchmarks_router  # noqa: E402
 from ocabra.api.internal.config import router as config_router  # noqa: E402
 from ocabra.api.internal.estimate import router as estimate_router  # noqa: E402
 from ocabra.api.internal.groups import router as groups_router  # noqa: E402
@@ -1688,6 +1699,7 @@ app.include_router(config_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(stats_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(trtllm_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(auth_router, prefix="/ocabra", include_in_schema=False)
+app.include_router(benchmarks_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(users_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(groups_router, prefix="/ocabra", include_in_schema=False)
 app.include_router(estimate_router, prefix="/ocabra", include_in_schema=False)

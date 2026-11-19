@@ -218,9 +218,11 @@ Implementado:
 - Gateway con portal de servicios y páginas mejoradas.
 - Benchmark harness de motores en `benchmark/run_benchmark.py` y runner manual
   de datasets externos por aplicación en `benchmark/app_benchmarks.py`. El
-  primer adaptador ejecuta las suites LLM, STT, diarización y embeddings mantenidas por
-  Escriba y archiva revisión, versión del servidor y resultado bruto sin
-  guardar credenciales. Uso y contrato en `docs/BENCHMARKS.md`.
+  adaptador ejecuta las suites LLM, STT, diarización y embeddings mantenidas por
+  Escriba, además del benchmark agéntico de Corrala. La primera UI permite
+  encolar por modelo, ver resultados, pausar/reanudar y repetir automáticamente
+  intentos contaminados por tráfico interactivo. Uso y contrato en
+  `docs/BENCHMARKS.md`.
 
 ---
 

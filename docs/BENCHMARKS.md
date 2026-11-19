@@ -1,4 +1,4 @@
-# Benchmarks manuales por aplicación
+# Benchmarks por aplicación
 
 oCabra puede ejecutar bajo demanda los datasets que mantienen las aplicaciones
 que lo consumen. No forman parte de CI, no bloquean despliegues y no aplican
@@ -6,9 +6,38 @@ umbrales automáticos: una persona decide qué suites ejecutar y cómo interpret
 la comparación.
 
 Los datos y la lógica de evaluación permanecen en el repositorio de cada
-aplicación. oCabra solo contiene adaptadores en `benchmark/apps/`, ejecuta el
-runner declarado y archiva el resultado bruto junto con el contexto de la
-medición.
+aplicación. oCabra solo contiene el contrato de ejecución, ejecuta el runner
+declarado y conserva su resultado sin recalcular la puntuación.
+
+## Ejecución desde la UI
+
+La página **Benchmarks** (rol `model_manager`) permite elegir aplicación,
+suite y modelos, encolar una ejecución y consultar resultados e intentos. La
+unidad de trabajo es `aplicación + suite + modelo`: los modelos se ejecutan
+secuencialmente para que una contaminación afecte solo al modelo en curso.
+
+El ejecutor crea una identidad y una API key internas efímeras. Mientras corre
+observa las peticiones en vuelo de `ModelManager`; cualquier petición de otra
+identidad se considera tráfico real. Con la pausa automática activa:
+
+1. termina el subprocess del runner (no congela una inferencia a medias);
+2. marca el intento como interrumpido o contaminado;
+3. conserva checkout, resultados parciales y log en `/data/benchmarks`;
+4. espera `BENCHMARK_QUIET_PERIOD_S` sin tráfico;
+5. vuelve a invocar el runner con `--skip-done` o, si ya había terminado
+   contaminado, desde un checkout nuevo.
+
+`request_stats` se consulta al terminar como segunda red: detecta peticiones
+cortas que hayan empezado y acabado entre dos sondeos. Solo un intento sin
+solapes entra en los resultados limpios. Una pausa manual usa el mismo
+checkpoint, pero nunca se reanuda sola.
+
+Corrala requiere `uv` (incluido en la imagen API) y una PostgreSQL desechable.
+Por defecto oCabra crea `<base principal>_bench`; se puede indicar otra con
+`BENCHMARK_CORRALA_DATABASE_URL`, cuyo nombre debe contener
+`bench`/`test`/`scratch`/`tmp`. Para repositorios privados se configura un token
+de solo lectura en `BENCHMARK_GIT_TOKEN`; se pasa a Git por entorno y no se
+escribe en comandos ni logs.
 
 ## Suites disponibles
 
@@ -16,13 +45,17 @@ medición.
 python3 -m benchmark.app_benchmarks list
 ```
 
-El primer adaptador es **Escriba** y expone cuatro suites:
+**Escriba** expone cuatro suites:
 
 - `llm`: extracción de claims y velocidad sobre transcripciones de reuniones.
 - `stt`: WER y velocidad de transcripción sobre VoxPopuli en español.
 - `stt_diarization`: DER, JER, hablantes detectados y velocidad sobre cuatro
   reuniones AMI SDM multihablante con anotación temporal gold.
 - `embeddings`: recuperación, clustering y reranking sobre evidencia de reuniones.
+
+**Corrala** expone `llm`: 83 casos de triage Zammad, routing de GLaDOS,
+subagentes y bucles, con perfiles `quick` (34), `standard` (54), `full` (83)
+y `final` (83 × 3 pasadas).
 
 ## Ejecutar Escriba
 

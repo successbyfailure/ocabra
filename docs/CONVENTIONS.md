@@ -88,7 +88,7 @@ pesadas al arrancar; es deliberado.
 
 ### SQLAlchemy
 - Usar siempre `AsyncSession`.
-- Modelos SQLAlchemy en `ocabra/db/` (33 tablas; índice en
+- Modelos SQLAlchemy en `ocabra/db/` (35 tablas; índice en
   `docs/CONTRACTS.md` §7). Todo cambio de esquema va con una migración de
   Alembic nueva; las existentes no se tocan ni se borran.
 - Schemas Pydantic compartidos en `ocabra/schemas/` (81 clases). Los cuerpos

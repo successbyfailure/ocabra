@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.121.1"
+APP_VERSION = "0.122.0"
 
 
 class Settings(BaseSettings):
@@ -858,6 +858,20 @@ class Settings(BaseSettings):
     batch_poll_interval_seconds: int = Field(
         default=5, ge=2, description="How often the batch processor polls for pending batches."
     )
+
+    # Application benchmark queue. Workspaces survive API restarts so runners
+    # that expose --skip-done can continue without repeating clean cases.
+    benchmark_dir: str = "/data/benchmarks"
+    benchmark_base_url: str = "http://127.0.0.1:8000"
+    benchmark_poll_interval_s: float = Field(default=1.0, ge=0.25)
+    benchmark_quiet_period_s: float = Field(default=30.0, ge=0)
+    # Optional read-only token for private benchmark repositories. It is
+    # passed to git through environment-only config, never argv or logs.
+    benchmark_git_token: str = Field(default="", repr=False)
+    # Empty derives <DATABASE_URL database>_bench on the same PostgreSQL
+    # server and creates it on first Corrala run. An explicit value must still
+    # contain bench/test/scratch/tmp: Corrala drops its public schema.
+    benchmark_corrala_database_url: str = ""
 
     # Batch vs. interactive priority (2026-10-30 design). Batches never get
     # the next free slot ahead of a waiting interactive caller (see

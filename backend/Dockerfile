@@ -127,6 +127,7 @@ ARG SGLANG_VERSION=0.5.9
 ARG VLLM_OMNI_VERSION=0.18.0
 COPY pyproject.toml .
 RUN python -m pip install ".[vllm,audio]"
+RUN python -m pip install "uv==0.9.11"
 RUN python -m pip install --upgrade "transformers>=5.0"
 RUN python -m pip install "qwen-tts>=0.1.1"
 RUN python -m venv /opt/sglang-venv \

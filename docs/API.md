@@ -336,6 +336,23 @@ Instalación por backend en `/data/backends`, desde el registro OCI o desde fuen
 | DELETE | `/ocabra/trtllm/engines/{engine_name}` | Delete TRT-LLM engine | `model_manager` |
 | GET | `/ocabra/trtllm/estimate` | Estimate TRT-LLM VRAM requirements | `user` |
 
+## Benchmarks de aplicaciones
+
+La unidad pausable es una suite de una aplicación para un modelo. Los intentos
+contaminados por tráfico interactivo quedan en el histórico, pero no se aceptan
+como resultado limpio.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| GET | `/ocabra/benchmarks/catalog` | List benchmark applications and suites | `model_manager` |
+| POST | `/ocabra/benchmarks/runs` | Queue a benchmark run | `model_manager` |
+| GET | `/ocabra/benchmarks/runs` | List benchmark runs | `model_manager` |
+| GET | `/ocabra/benchmarks/runs/{run_id}` | Get one benchmark run | `model_manager` |
+| GET | `/ocabra/benchmarks/runs/{run_id}/log` | Read the current benchmark log | `model_manager` |
+| POST | `/ocabra/benchmarks/runs/{run_id}/pause` | Pause a benchmark run | `model_manager` |
+| POST | `/ocabra/benchmarks/runs/{run_id}/resume` | Resume a benchmark run | `model_manager` |
+| POST | `/ocabra/benchmarks/runs/{run_id}/cancel` | Cancel a benchmark run | `model_manager` |
+
 ## Daemon Ollama
 
 | Método | Ruta | Qué hace | Acceso |
