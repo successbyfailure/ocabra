@@ -16,6 +16,8 @@ import hmac
 import json
 import os
 import secrets
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,6 @@ from . import ops
 
 logger = structlog.get_logger(__name__)
 
-app = FastAPI(title="oCabra docker agent", docs_url=None, redoc_url=None, openapi_url=None)
 _token = ""
 
 
@@ -46,11 +47,22 @@ def _write_token() -> str:
     return token
 
 
-@app.on_event("startup")
-async def _startup() -> None:  # noqa: D401 - FastAPI hook
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Write a fresh token at startup (a restart rotates it)."""
     global _token
     _token = _write_token()
     logger.info("docker_agent_ready", operations=sorted([*ops.OPERATIONS, *ops.STREAM_OPERATIONS]))
+    yield
+
+
+app = FastAPI(
+    title="oCabra docker agent",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    lifespan=_lifespan,
+)
 
 
 def _authorize(request: Request) -> None:
