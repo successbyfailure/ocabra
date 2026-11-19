@@ -74,7 +74,7 @@ def ollama_root() -> str:
     """Ollama model store as this process sees it."""
     from ocabra.config import settings
 
-    return getattr(settings, "ollama_shared_models_dir", "") or DEFAULT_OLLAMA_ROOT
+    return settings.ollama_shared_models_dir or DEFAULT_OLLAMA_ROOT
 
 
 def config_section_for(backend_type: str) -> str:

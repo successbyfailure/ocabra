@@ -219,10 +219,12 @@ class Settings(BaseSettings):
     # Helps keep torch/vLLM GPU index mapping aligned with NVML/pynvml.
     cuda_device_order: str = "PCI_BUS_ID"
     # Runtime-stability knobs for vLLM on mixed consumer GPUs.
-    # Flipped True → False: compiling CUDA graphs adds ~10 s to cold start
-    # but reduces per-token latency 20-40 % on Ampere. Perfiles individuales
-    # aún pueden forzar True vía load_overrides si dan problemas.
-    vllm_enforce_eager: bool = False
+    # True, as the hub runs and as docker-compose.yml defaulted it (INF-10:
+    # the code said False and compose said true, so only installs without
+    # compose ran with CUDA graphs). False compiles them: ~10 s more of cold start
+    # and 20-40 % less per-token latency on Ampere, at the cost of VRAM; set it
+    # globally in Ajustes or per profile (load_overrides enforce_eager).
+    vllm_enforce_eager: bool = True
     # FlashInfer's sampler is optional. Keep it disabled by default because
     # its runtime CUDA JIT is more fragile than vLLM's native sampler in the
     # modular, wheel-based CUDA environment.

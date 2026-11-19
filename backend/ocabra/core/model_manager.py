@@ -1298,11 +1298,11 @@ class ModelManager:
         """One pass of the busy watchdog (see :meth:`_busy_watchdog`)."""
         inference_timeout_s = max(
             30,
-            int(getattr(settings, "inference_request_timeout_seconds", 900)),
+            int(settings.inference_request_timeout_seconds),
         )
         timeout_s = max(
             30,
-            int(getattr(settings, "busy_timeout_seconds", 300)),
+            int(settings.busy_timeout_seconds),
             inference_timeout_s + 30,
         )
         now = time.time()
@@ -1354,7 +1354,7 @@ class ModelManager:
                     model_id=req.model_id,
                 )
                 continue
-            action = getattr(settings, "busy_timeout_action", "mark_error")
+            action = settings.busy_timeout_action
             # Both actions stop the worker. ``mark_error`` used to only flip
             # the status to ERROR with the process still alive: nothing
             # evicts or unloads an ERROR model (eviction only considers
@@ -1761,7 +1761,7 @@ class ModelManager:
                     # see the settled card.
                     logger.debug("vram_watchdog_skipped_load_in_progress")
                     continue
-                threshold = float(getattr(settings, "vram_eviction_threshold", 0.96))
+                threshold = float(settings.vram_eviction_threshold)
                 gpu_states = await self._gpu_manager.get_all_states()
                 for gpu_state in gpu_states:
                     if gpu_state.total_vram_mb <= 0:
@@ -6658,7 +6658,7 @@ class ModelManager:
                 if state.status == ModelStatus.LOADED and state.loaded_at is not None:
                     grace_s = max(
                         0,
-                        int(getattr(settings, "ollama_inventory_loaded_grace_s", 60)),
+                        int(settings.ollama_inventory_loaded_grace_s),
                     )
                     age_s = (datetime.now(UTC) - state.loaded_at).total_seconds()
                     if age_s < grace_s:

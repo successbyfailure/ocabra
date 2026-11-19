@@ -111,7 +111,7 @@ async def gpu_budgets(model_manager: Any, indices: list[int]) -> list[GpuBudget]
     if gm is None:
         return []
     states = list(getattr(model_manager, "_states", {}).values())
-    threshold = float(getattr(settings, "vram_eviction_threshold", 0.96) or 0.96)
+    threshold = float(settings.vram_eviction_threshold or 0.96)
     buffer = int(settings.vram_buffer_mb or 0)
     out: list[GpuBudget] = []
     for gpu in await gm.get_all_states():

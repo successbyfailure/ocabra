@@ -35,7 +35,7 @@ HEADER = "X-Ocabra-Privacy"
 
 
 def mode() -> str:
-    value = str(getattr(settings, "privacy_mode", FUNCTIONAL) or FUNCTIONAL).strip().lower()
+    value = str(settings.privacy_mode or FUNCTIONAL).strip().lower()
     return value if value in MODES else FUNCTIONAL
 
 
