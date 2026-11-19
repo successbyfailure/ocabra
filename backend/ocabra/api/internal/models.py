@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.config import settings
-from ocabra.core import config_schema
+from ocabra.core import config_schema, fs_scan_cache
 from ocabra.core import vram_planner as vp
 from ocabra.core.config_schema import vram_override_section
 from ocabra.core.model_manager_helpers import resolve_worker_slots as _resolve_worker_slots
@@ -2591,12 +2591,17 @@ async def _resolve_disk_size_bytes(
             return None
         return await asyncio.to_thread(_compute_path_size_bytes, path)
 
+    return await asyncio.to_thread(_local_disk_size_bytes, state.extra_config, backend_model_id)
+
+
+def _local_disk_size_bytes(extra_config: dict | None, backend_model_id: str) -> int | None:
+    """Bytes on disk of a local model's weights. Blocking: run it in a thread."""
     path = _resolve_extra_config_path(
-        state.extra_config, "model_path", "base_model_id"
+        extra_config, "model_path", "base_model_id"
     ) or _resolve_local_model_path(backend_model_id)
     if path is None or not path.exists():
         return None
-    return await asyncio.to_thread(_compute_path_size_bytes, path)
+    return _compute_path_size_bytes(path)
 
 
 async def _build_model_memory_estimate(
@@ -2632,7 +2637,10 @@ async def _build_model_memory_estimate(
         "total_vram_mb": total_vram_mb,
         "free_vram_mb": free_vram_mb,
         "budget_vram_mb": None,
-        "requested_context_length": _resolve_requested_context_length(state, extra_config),
+        # Can fall back to finding the model on disk and reading its config.json.
+        "requested_context_length": await asyncio.to_thread(
+            _resolve_requested_context_length, state, extra_config
+        ),
         "estimated_weights_mb": None,
         "estimated_engine_mb_per_gpu": None,
         "estimated_kv_cache_mb": None,
@@ -2705,8 +2713,11 @@ async def _build_model_memory_estimate(
         return estimate
 
     if is_llama_cpp_family(state.backend_type):
-        # Sprint 17.2 — deterministic GGUF estimator.
-        return _estimate_llama_cpp_memory(
+        # Sprint 17.2 — deterministic GGUF estimator. In a thread: it locates
+        # the GGUF on disk and, the first time per file, parses its header
+        # (~0.1 s on a 20 GB model).
+        return await asyncio.to_thread(
+            _estimate_llama_cpp_memory,
             estimate=estimate,
             state=state,
             extra_config=extra_config,
@@ -3236,7 +3247,7 @@ async def _resolve_capabilities_payload(
 
     worker_pool = getattr(request.app.state, "worker_pool", None)
     if worker_pool is None:
-        return _apply_capability_fallbacks(state, current_payload)
+        return await asyncio.to_thread(_apply_capability_fallbacks, state, current_payload)
 
     try:
         backend = await worker_pool.get_backend(state.backend_type)
@@ -3245,7 +3256,7 @@ async def _resolve_capabilities_payload(
     except Exception:
         payload = dict(current_payload)
 
-    return _apply_capability_fallbacks(state, payload)
+    return await asyncio.to_thread(_apply_capability_fallbacks, state, payload)
 
 
 def _llama_cpp_shape_from_config(state) -> dict[str, Any]:
@@ -3474,11 +3485,16 @@ def _resolve_local_model_path(model_id: str) -> Path | None:
     if variant_stem:
         candidate_stems.add(variant_stem)
         candidate_stems.add(Path(variant_stem).stem)
+    # Cached walk: this runs for every model in a listing, and the walk covers
+    # the whole models directory (see fs_scan_cache for the invalidation).
     gguf_candidates = [
         path
-        for path in base.rglob("*.gguf")
-        if path.name == leaf
-        or any(path.stem == stem or path.stem.endswith(stem) for stem in candidate_stems)
+        for path in fs_scan_cache.glob_files(base, "*.gguf")
+        if (
+            path.name == leaf
+            or any(path.stem == stem or path.stem.endswith(stem) for stem in candidate_stems)
+        )
+        and path.exists()
     ]
     if gguf_candidates:
         return max(gguf_candidates, key=lambda path: path.stat().st_mtime)

@@ -10,6 +10,7 @@ that want to estimate cold-start cost when a model is *not* in this list.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ from fastapi import APIRouter, Depends, Request
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
+from ocabra.core import fs_scan_cache
 
 from ._shared import get_ollama_user
 
@@ -40,6 +42,8 @@ async def list_running(
     profile_registry = getattr(request.app.state, "profile_registry", None)
 
     models: list[dict[str, Any]] = []
+    # (entry, backend_model_id, vram_mb): sizes filled in one thread hop at the end.
+    pending_sizes: list[tuple[dict, str, int]] = []
 
     if profile_registry is not None:
         enabled_profiles = await profile_registry.list_enabled()
@@ -73,37 +77,35 @@ async def list_running(
 
         seen_base_models.add(profile.base_model_id)
         backend_model_id = served_state.backend_model_id or profile.base_model_id
-        size_bytes = _estimate_size_bytes(backend_model_id, served_state.vram_used_mb)
         runtime = (
             served_state.extra_config.get("_runtime", {})
             if isinstance(served_state.extra_config, dict)
             else {}
         )
 
-        models.append(
-            {
-                "name": profile.profile_id,
-                "model": profile.profile_id,
-                "size": size_bytes,
-                "size_vram": int(max(0, served_state.vram_used_mb)) * 1024 * 1024,
-                "digest": "sha256:"
-                + hashlib.sha256(profile.profile_id.encode("utf-8")).hexdigest(),
-                "details": {
-                    "parent_model": profile.base_model_id,
-                    "format": _infer_format(backend_model_id),
-                    "family": profile.category,
-                    "families": [profile.category],
-                    "parameter_size": "unknown",
-                    "quantization_level": "F16",
-                },
-                "expires_at": _compute_expires_at(served_state),
-                "context_length": runtime.get("effective_context"),
-                "context_preset": runtime.get("preset_key"),
-                "expected_load_seconds": await model_manager.get_expected_load_seconds(
-                    profile.base_model_id
-                ),
-            }
-        )
+        entry = {
+            "name": profile.profile_id,
+            "model": profile.profile_id,
+            "size": 0,  # filled after the loop
+            "size_vram": int(max(0, served_state.vram_used_mb)) * 1024 * 1024,
+            "digest": "sha256:" + hashlib.sha256(profile.profile_id.encode("utf-8")).hexdigest(),
+            "details": {
+                "parent_model": profile.base_model_id,
+                "format": _infer_format(backend_model_id),
+                "family": profile.category,
+                "families": [profile.category],
+                "parameter_size": "unknown",
+                "quantization_level": "F16",
+            },
+            "expires_at": _compute_expires_at(served_state),
+            "context_length": runtime.get("effective_context"),
+            "context_preset": runtime.get("preset_key"),
+            "expected_load_seconds": await model_manager.get_expected_load_seconds(
+                profile.base_model_id
+            ),
+        }
+        pending_sizes.append((entry, backend_model_id, served_state.vram_used_mb))
+        models.append(entry)
 
     # Fallback: include any LOADED model without an enabled profile (legacy or
     # admin-managed models). Admins see them all; regular users only see ones
@@ -118,42 +120,44 @@ async def list_running(
             continue
 
         backend_model_id = state.backend_model_id or state.model_id
-        size_bytes = _estimate_size_bytes(backend_model_id, state.vram_used_mb)
-        models.append(
-            {
-                "name": state.model_id,
-                "model": state.model_id,
-                "size": size_bytes,
-                "size_vram": int(max(0, state.vram_used_mb)) * 1024 * 1024,
-                "digest": "sha256:" + hashlib.sha256(state.model_id.encode("utf-8")).hexdigest(),
-                "details": {
-                    "parent_model": "",
-                    "format": _infer_format(backend_model_id),
-                    "family": state.backend_type,
-                    "families": [state.backend_type],
-                    "parameter_size": "unknown",
-                    "quantization_level": "F16",
-                },
-                "expires_at": _compute_expires_at(state),
-                "expected_load_seconds": await model_manager.get_expected_load_seconds(
-                    state.model_id
-                ),
-            }
+        entry = {
+            "name": state.model_id,
+            "model": state.model_id,
+            "size": 0,  # filled after the loop
+            "size_vram": int(max(0, state.vram_used_mb)) * 1024 * 1024,
+            "digest": "sha256:" + hashlib.sha256(state.model_id.encode("utf-8")).hexdigest(),
+            "details": {
+                "parent_model": "",
+                "format": _infer_format(backend_model_id),
+                "family": state.backend_type,
+                "families": [state.backend_type],
+                "parameter_size": "unknown",
+                "quantization_level": "F16",
+            },
+            "expires_at": _compute_expires_at(state),
+            "expected_load_seconds": await model_manager.get_expected_load_seconds(state.model_id),
+        }
+        pending_sizes.append((entry, backend_model_id, state.vram_used_mb))
+        models.append(entry)
+
+    if pending_sizes:
+        sizes = await asyncio.to_thread(
+            lambda: [_estimate_size_bytes(mid, vram) for _e, mid, vram in pending_sizes]
         )
+        for (entry, _mid, _vram), size in zip(pending_sizes, sizes, strict=True):
+            entry["size"] = size
 
     return {"models": models}
 
 
 def _estimate_size_bytes(model_id: str, vram_used_mb: int) -> int:
-    model_dir = Path(settings.models_dir) / model_id
-    if model_dir.exists():
-        size = sum(
-            path.stat().st_size
-            for path in model_dir.rglob("*")
-            if path.is_file() and path.suffix in {".safetensors", ".bin", ".gguf"}
-        )
-        if size > 0:
-            return int(size)
+    """Weights on disk under ``models_dir/<model_id>``, else the VRAM in use.
+
+    Blocking (cached directory walk): call it from a worker thread.
+    """
+    size = fs_scan_cache.weights_size_bytes(Path(settings.models_dir) / model_id)
+    if size > 0:
+        return int(size)
     return int(max(0, vram_used_mb)) * 1024 * 1024
 
 

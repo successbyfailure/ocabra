@@ -5,6 +5,7 @@ GET  /v1/images/files/{name} — serve a generated image (URL response_format).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -136,7 +137,11 @@ def _ensure_output_dir() -> Path:
 
 
 def _save_image(b64_data: str) -> str:
-    """Decode a base64 PNG payload and store it. Returns the bare filename."""
+    """Decode a base64 PNG payload and store it. Returns the bare filename.
+
+    Blocking (decode + disk write of a multi-MB PNG): callers run it in a
+    thread so the event loop keeps serving other requests meanwhile.
+    """
     try:
         raw = base64.b64decode(b64_data, validate=True)
     except (binascii.Error, ValueError) as exc:
@@ -275,7 +280,7 @@ async def image_generations(
             b64 = img.get("b64_json", "")
             if not b64:
                 continue
-            name = _save_image(b64)
+            name = await asyncio.to_thread(_save_image, b64)
             data.append({"url": _build_public_url(request, name)})
         payload: dict[str, Any] = {"created": int(time.time()), "data": data}
     else:
@@ -594,7 +599,7 @@ async def image_edits(
             b64 = img.get("b64_json", "")
             if not b64:
                 continue
-            name = _save_image(b64)
+            name = await asyncio.to_thread(_save_image, b64)
             data.append({"url": _build_public_url(request, name)})
         edit_payload: dict[str, Any] = {"created": int(time.time()), "data": data}
     else:

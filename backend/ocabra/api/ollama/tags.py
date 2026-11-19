@@ -10,6 +10,7 @@ nodes are merged into the listing with deduplication.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from fastapi import APIRouter, Depends, Request
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
+from ocabra.core import fs_scan_cache
 from ocabra.core.model_ref import build_model_ref
 from ocabra.core.router_resolver import router_advertised_context
 from ocabra.registry.ollama_registry import OllamaRegistry
@@ -88,6 +90,9 @@ async def _list_tags_from_profiles(
     local_profile_ids: set[str] = set()
     entry_index_by_model_id: dict[str, int] = {}
     entries_by_profile_id: dict[str, dict] = {}
+    # (entry, backend_model_id, vram_mb): sizes are filled in one thread hop
+    # after the loop, before the routers below read them.
+    pending_sizes: list[tuple[dict, str, int]] = []
 
     for profile in execution_profiles:
         # Keep private target metadata available to authorised routers without
@@ -106,7 +111,6 @@ async def _list_tags_from_profiles(
         loaded_at = base_state.loaded_at if base_state and base_state.loaded_at else None
         modified_at = _to_iso_z(loaded_at)
         vram_mb = base_state.vram_used_mb if base_state else 0
-        size_bytes = _estimate_size_bytes(backend_model_id, vram_mb)
 
         local_model_ids.add(profile.base_model_id)
         local_profile_ids.add(profile.profile_id)
@@ -115,7 +119,7 @@ async def _list_tags_from_profiles(
             "name": profile.profile_id,
             "model": profile.profile_id,
             "modified_at": modified_at,
-            "size": size_bytes,
+            "size": 0,  # filled by _fill_sizes below
             "digest": "sha256:" + hashlib.sha256(profile.profile_id.encode("utf-8")).hexdigest(),
             "details": {
                 "parent_model": profile.base_model_id,
@@ -127,6 +131,7 @@ async def _list_tags_from_profiles(
             },
             "loaded": bool(base_state and base_state.status.value == "loaded"),
         }
+        pending_sizes.append((entry, backend_model_id, vram_mb))
         if base_state is not None and getattr(profile, "runtime_presets", []):
             try:
                 from ocabra.api.openai.models import _context_metadata
@@ -142,6 +147,8 @@ async def _list_tags_from_profiles(
         if profile_visible:
             entry_index_by_model_id[profile.base_model_id] = len(models)
             models.append(entry)
+
+    await _fill_sizes(pending_sizes)
 
     for profile in router_profiles:
         if not user.can_access_model(profile.profile_id):
@@ -275,6 +282,7 @@ async def _list_tags_legacy(model_manager, user: UserContext) -> dict:
         loaded = {str(item.get("name") or "") for item in installed_details}
 
     models: list[dict] = []
+    pending_sizes: list[tuple[dict, str, int]] = []
     for item in installed_details:
         ollama_name = str(item.get("name") or "")
         if not ollama_name:
@@ -300,27 +308,27 @@ async def _list_tags_legacy(model_manager, user: UserContext) -> dict:
         family = ollama_name.split(":", 1)[0]
         is_loaded = ollama_name in loaded
         size_bytes = int(item.get("size") or 0)
+        entry = {
+            "name": ollama_name,
+            "model": ollama_name,
+            "modified_at": modified_at,
+            "size": size_bytes,
+            "digest": f"sha256:{hashlib.sha256(canonical_id.encode('utf-8')).hexdigest()}",
+            "details": {
+                "parent_model": "",
+                "format": _infer_format(backend_model_id),
+                "family": family,
+                "families": [family],
+                "parameter_size": _infer_parameter_size(ollama_name),
+                "quantization_level": "F16",
+            },
+            "loaded": is_loaded,
+        }
         if size_bytes <= 0:
-            size_bytes = _estimate_size_bytes(backend_model_id, state.vram_used_mb if state else 0)
-        models.append(
-            {
-                "name": ollama_name,
-                "model": ollama_name,
-                "modified_at": modified_at,
-                "size": size_bytes,
-                "digest": f"sha256:{hashlib.sha256(canonical_id.encode('utf-8')).hexdigest()}",
-                "details": {
-                    "parent_model": "",
-                    "format": _infer_format(backend_model_id),
-                    "family": family,
-                    "families": [family],
-                    "parameter_size": _infer_parameter_size(ollama_name),
-                    "quantization_level": "F16",
-                },
-                "loaded": is_loaded,
-            }
-        )
+            pending_sizes.append((entry, backend_model_id, state.vram_used_mb if state else 0))
+        models.append(entry)
 
+    await _fill_sizes(pending_sizes)
     return {"models": models}
 
 
@@ -330,17 +338,28 @@ def _to_iso_z(value: datetime | None) -> str:
 
 
 def _estimate_size_bytes(model_id: str, vram_used_mb: int) -> int:
-    model_dir = Path(settings.models_dir) / model_id
-    if model_dir.exists():
-        size = sum(
-            path.stat().st_size
-            for path in model_dir.rglob("*")
-            if path.is_file() and path.suffix in {".safetensors", ".bin", ".gguf"}
-        )
-        if size > 0:
-            return int(size)
+    """Weights on disk under ``models_dir/<model_id>``, else the VRAM in use.
+
+    Blocking (cached directory walk): call it from a worker thread.
+    """
+    size = fs_scan_cache.weights_size_bytes(Path(settings.models_dir) / model_id)
+    if size > 0:
+        return int(size)
 
     return int(max(0, vram_used_mb) * 1024 * 1024)
+
+
+def _estimate_sizes(pending: list[tuple[dict, str, int]]) -> list[int]:
+    return [_estimate_size_bytes(model_id, vram_mb) for _entry, model_id, vram_mb in pending]
+
+
+async def _fill_sizes(pending: list[tuple[dict, str, int]]) -> None:
+    """Set ``entry["size"]`` for every pending entry, off the event loop."""
+    if not pending:
+        return
+    sizes = await asyncio.to_thread(_estimate_sizes, pending)
+    for (entry, _model_id, _vram_mb), size in zip(pending, sizes, strict=True):
+        entry["size"] = size
 
 
 def _infer_format(model_id: str) -> str:
