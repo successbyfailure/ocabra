@@ -229,13 +229,28 @@ class ServerConfigPatch(BaseModel):
         default=None, alias="batchInterJobCooldownS", ge=0
     )
 
-    # ── Generation services (Hunyuan, ComfyUI, A1111, ACE-Step, Unsloth) ───
+    # ── Generation services (TRELLIS.2, ComfyUI, A1111, ACE-Step, Unsloth) ───
     # Hot config: idle unload, generation grace, preferred GPU.
-    hunyuan_idle_unload_seconds: int | None = Field(default=None, alias="hunyuanIdleUnloadSeconds")
-    hunyuan_generation_grace_period_s: int | None = Field(
-        default=None, alias="hunyuanGenerationGracePeriodS"
+    # Hunyuan3D was retired: its keys are still accepted, and ignored, so an
+    # old tab that sends them doesn't get a 422 from extra="forbid".
+    hunyuan_idle_unload_seconds: int | None = Field(
+        default=None,
+        alias="hunyuanIdleUnloadSeconds",
+        description="Deprecated and ignored: Hunyuan3D was removed.",
+        deprecated=True,
     )
-    hunyuan_preferred_gpu: int | None = Field(default=None, alias="hunyuanPreferredGpu")
+    hunyuan_generation_grace_period_s: int | None = Field(
+        default=None,
+        alias="hunyuanGenerationGracePeriodS",
+        description="Deprecated and ignored: Hunyuan3D was removed.",
+        deprecated=True,
+    )
+    hunyuan_preferred_gpu: int | None = Field(
+        default=None,
+        alias="hunyuanPreferredGpu",
+        description="Deprecated and ignored: Hunyuan3D was removed.",
+        deprecated=True,
+    )
     comfyui_idle_unload_seconds: int | None = Field(default=None, alias="comfyuiIdleUnloadSeconds")
     comfyui_generation_grace_period_s: int | None = Field(
         default=None, alias="comfyuiGenerationGracePeriodS"
@@ -266,7 +281,7 @@ class ServerConfigPatch(BaseModel):
     generation_gpu_util_threshold_pct: int | None = Field(
         default=None,
         alias="generationGpuUtilThresholdPct",
-        description="GPU utilisation %% above which services without a dedicated generation-status endpoint are considered busy (Hunyuan, ACE-Step, Unsloth).",
+        description="GPU utilisation %% above which services without a dedicated generation-status endpoint are considered busy (ACE-Step, Unsloth).",
     )
 
     # Bloque 20 — routing + estimator + sessions
@@ -381,9 +396,6 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "batchResumeCooldownSlotsS": settings.batch_resume_cooldown_slots_s,
         "batchResumeCooldownEvictionS": settings.batch_resume_cooldown_eviction_s,
         "batchInterJobCooldownS": settings.batch_inter_job_cooldown_s,
-        "hunyuanIdleUnloadSeconds": settings.hunyuan_idle_unload_seconds,
-        "hunyuanGenerationGracePeriodS": settings.hunyuan_generation_grace_period_s,
-        "hunyuanPreferredGpu": settings.hunyuan_preferred_gpu,
         "comfyuiIdleUnloadSeconds": settings.comfyui_idle_unload_seconds,
         "comfyuiGenerationGracePeriodS": settings.comfyui_generation_grace_period_s,
         "comfyuiPreferredGpu": settings.comfyui_preferred_gpu,
@@ -766,7 +778,6 @@ async def patch_config(
     # ── Generation services: persist setting + propagate to live ServiceState ──
     # service_id (in ServiceManager) → settings prefix
     _SERVICE_PREFIXES = (
-        ("hunyuan", "hunyuan"),
         ("comfyui", "comfyui"),
         ("a1111", "a1111"),
         ("trellis2", "trellis2"),

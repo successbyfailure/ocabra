@@ -165,7 +165,7 @@ async def test_service_lock_always_subtracted():
         gm = GPUManager()
         gm._locks = {0: {}}
         gm._states[0] = gm._read_gpu(0)
-        await gm.lock_vram(0, 4000, "service:hunyuan")
+        await gm.lock_vram(0, 4000, "service:trellis2")
 
         assert await gm.get_free_vram(0) == 10000 - 4000 - settings.vram_buffer_mb
 

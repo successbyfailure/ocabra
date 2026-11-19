@@ -700,9 +700,6 @@ export interface ServerConfig {
   batchResumeCooldownSlotsS: number;
   batchResumeCooldownEvictionS: number;
   batchInterJobCooldownS: number;
-  hunyuanIdleUnloadSeconds: number;
-  hunyuanGenerationGracePeriodS: number;
-  hunyuanPreferredGpu: number;
   trellis2IdleUnloadSeconds: number;
   trellis2GenerationGracePeriodS: number;
   trellis2PreferredGpu: number;

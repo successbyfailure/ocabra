@@ -29,7 +29,7 @@ class EnsureVramRequest(BaseModel):
 @router.get(
     "/services",
     summary="List all services",
-    description="Return the state of all registered interactive services (ComfyUI, A1111, Hunyuan, etc.).",
+    description="Return the state of all registered interactive services (ComfyUI, A1111, TRELLIS.2, etc.).",
 )
 async def list_services(
     request: Request,

@@ -64,7 +64,7 @@ class ServiceState:
     last_unload_at: datetime | None = None
     vram_reserved_at: datetime | None = None
     # Set by _refresh_runtime_status from the service's own /runtime/status
-    # payload when it reports in_flight_requests (Hunyuan, TRELLIS.2). None
+    # payload when it reports in_flight_requests (TRELLIS.2). None
     # when the service exposes no such signal — falls back to the GPU-util
     # heuristic in _refresh_generation_metrics.
     precise_in_flight: int | None = None
@@ -131,21 +131,6 @@ class ServiceManager:
     def __init__(self) -> None:
         self._gpu_manager: GPUManager | None = None
         self._states: dict[str, ServiceState] = {
-            "hunyuan": ServiceState(
-                service_id="hunyuan",
-                service_type="hunyuan3d",
-                display_name="Hunyuan3D",
-                base_url=settings.hunyuan_base_url.rstrip("/"),
-                ui_url=settings.hunyuan_ui_url,
-                preferred_gpu=settings.hunyuan_preferred_gpu,
-                idle_unload_after_seconds=settings.hunyuan_idle_unload_seconds,
-                generation_grace_period_s=settings.hunyuan_generation_grace_period_s,
-                runtime_check_path="/runtime/status",
-                runtime_check_key="runtime_loaded",
-                unload_path="/runtime/unload",
-                docker_container_name=settings.hunyuan_docker_container,
-                compose_service_name="hunyuan",
-            ),
             "trellis2": ServiceState(
                 service_id="trellis2",
                 service_type="trellis2",
@@ -242,7 +227,7 @@ class ServiceManager:
         self._gpu_manager = gpu_manager
 
     # ── VRAM reservation (external services managing their own GPU load) ───
-    # Services like Hunyuan/TRELLIS.2 load VRAM directly inside their own
+    # Services like TRELLIS.2 load VRAM directly inside their own
     # container, outside ModelManager's scheduler — so without an explicit
     # reservation here, GPUScheduler.find_gpu_for_model sees their GPU as
     # free and lets an unrelated inference load land right on top of them
@@ -499,8 +484,8 @@ class ServiceManager:
                 elif not val:
                     state.active_model_ref = None
 
-        # Precise generation signal, when the service exposes one (Hunyuan,
-        # TRELLIS.2: both report in_flight_requests on this same endpoint).
+        # Precise generation signal, when the service exposes one (TRELLIS.2
+        # reports in_flight_requests on this same endpoint).
         # _refresh_generation_metrics prefers this over its GPU-util heuristic
         # — the heuristic can read "idle" mid-generation during CPU-bound
         # steps (e.g. TRELLIS.2's mesh remeshing/export) with GPU util briefly
@@ -529,7 +514,7 @@ class ServiceManager:
             elif state.service_type == "automatic1111":
                 await self._refresh_a1111_metrics(state)
             elif state.precise_in_flight is not None:
-                # Hunyuan, TRELLIS.2: exact signal from /runtime/status.
+                # TRELLIS.2: exact signal from /runtime/status.
                 state.is_generating = state.precise_in_flight > 0
                 state.queue_depth = 0
             else:

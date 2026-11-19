@@ -8,7 +8,7 @@ interface GenerationServicesSettingsProps {
   onSave: (patch: Partial<ServerConfig>) => Promise<void>
 }
 
-type ServiceKey = "hunyuan" | "trellis2" | "comfyui" | "a1111" | "acestep" | "unsloth"
+type ServiceKey = "trellis2" | "comfyui" | "a1111" | "acestep" | "unsloth"
 
 interface ServiceMeta {
   key: ServiceKey
@@ -21,16 +21,9 @@ interface ServiceMeta {
 
 const SERVICES: ServiceMeta[] = [
   {
-    key: "hunyuan",
-    label: "Hunyuan3D",
-    hint: "Text/Image → 3D mesh. Generación corta-media (segundos).",
-    maxIdle: 1800,
-    allowDisable: false,
-  },
-  {
     key: "trellis2",
     label: "TRELLIS.2",
-    hint: "Image → 3D mesh PBR (Microsoft, evaluación paralela a Hunyuan3D).",
+    hint: "Image → 3D mesh PBR (Microsoft).",
     maxIdle: 1800,
     allowDisable: false,
   },
@@ -65,11 +58,6 @@ const SERVICES: ServiceMeta[] = [
 ]
 
 const KEY_MAP = {
-  hunyuan: {
-    idle: "hunyuanIdleUnloadSeconds",
-    grace: "hunyuanGenerationGracePeriodS",
-    gpu: "hunyuanPreferredGpu",
-  },
   comfyui: {
     idle: "comfyuiIdleUnloadSeconds",
     grace: "comfyuiGenerationGracePeriodS",
@@ -128,11 +116,6 @@ export function GenerationServicesSettings({
   const initial = useMemo<LocalState>(
     () =>
       ({
-        hunyuan: {
-          idle: config.hunyuanIdleUnloadSeconds,
-          grace: config.hunyuanGenerationGracePeriodS,
-          gpu: config.hunyuanPreferredGpu,
-        },
         trellis2: {
           idle: config.trellis2IdleUnloadSeconds,
           grace: config.trellis2GenerationGracePeriodS,
@@ -295,7 +278,7 @@ export function GenerationServicesSettings({
         <h3 className="text-sm font-medium">Detección de uso (heurístico GPU)</h3>
         <p className="text-xs text-muted-foreground/70">
           Para servicios que no exponen un endpoint de estado de generación
-          (Hunyuan, ACE-Step, Unsloth Studio), el sistema marca el servicio como
+          (ACE-Step, Unsloth Studio), el sistema marca el servicio como
           ocupado cuando la utilización de su GPU preferida supera este umbral.
           ComfyUI y A1111 usan sus propios endpoints y no dependen de este valor.
         </p>

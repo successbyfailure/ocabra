@@ -482,7 +482,6 @@ header {
 const GPU_LABEL = { 0: 'RTX 3060 12G', 1: 'RTX 3090 24G' };
 
 const SERVICE_DESC = {
-  hunyuan:  'Text or image to 3D — genera meshes 3D texturizados con Hunyuan3D-2.1.',
   comfyui:  'Pipeline de generación de imágenes y vídeo basado en nodos. Compatible con SD, FLUX y workflows personalizados.',
   a1111:    'Automatic1111 Stable Diffusion WebUI — generación de imágenes con control detallado.',
   acestep:  'Generación de música desde texto o audio de referencia. Produce pistas completas.',

@@ -21,7 +21,7 @@ FROM docker:28-cli AS docker-cli
 # The compose plugin is shipped separately from the docker CLI in the
 # upstream docker/compose project. service_manager runs `docker compose
 # up -d <service>` from inside the api container to start optional
-# external services (ComfyUI, ACE-Step, Hunyuan3D, A1111), so we need
+# external services (ComfyUI, ACE-Step, TRELLIS.2, A1111), so we need
 # the plugin on the same docker CLI install. Pinned for reproducibility.
 # The self-updater runs `docker compose` here too, against the host's
 # docker-compose.yml: it must understand everything that file uses (v2.31

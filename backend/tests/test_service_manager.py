@@ -270,10 +270,10 @@ async def test_start_disabled_service_raises(monkeypatch) -> None:
     monkeypatch.setattr("ocabra.core.service_manager.set_key", fake_set_key)
 
     manager = ServiceManager()
-    await manager.set_enabled("hunyuan", enabled=False)
+    await manager.set_enabled("trellis2", enabled=False)
 
     with pytest.raises(RuntimeError):
-        await manager.start_service("hunyuan")
+        await manager.start_service("trellis2")
 
 
 @pytest.mark.asyncio
@@ -289,7 +289,7 @@ async def test_compose_up_uses_services_profile_and_pull(monkeypatch) -> None:
     monkeypatch.setattr("ocabra.core.docker_ops.settings.docker_agent_url", "")
 
     manager = ServiceManager()
-    state = await manager.get_state("hunyuan")
+    state = await manager.get_state("trellis2")
     assert state is not None
 
     await manager._compose_up(state)
@@ -333,14 +333,14 @@ async def test_start_container_bg_rebuilds_on_failed_docker_start(monkeypatch) -
     monkeypatch.setattr(ServiceManager, "_check_service_alive", fake_check_service_alive)
 
     manager = ServiceManager()
-    state = await manager.get_state("hunyuan")
+    state = await manager.get_state("trellis2")
     assert state is not None
     state.service_alive = False
     state.status = "unknown"
 
     await manager._start_container_bg(state)
 
-    assert compose_up_calls == ["hunyuan"]
+    assert compose_up_calls == ["trellis2"]
 
 
 @pytest.mark.asyncio

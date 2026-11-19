@@ -275,6 +275,30 @@ def test_langfuse_settings_retired_and_stored_overrides_skipped():
     assert not hasattr(fresh, "langfuse_enabled")
 
 
+@pytest.mark.asyncio
+async def test_retired_hunyuan_keys_accepted_and_ignored():
+    """Hunyuan3D was removed: PATCH still accepts its keys (no 422 for an old
+    tab) but neither persists nor returns them."""
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    patch_body = ServerConfigPatch.model_validate(
+        {
+            "hunyuanIdleUnloadSeconds": 300,
+            "hunyuanGenerationGracePeriodS": 120,
+            "hunyuanPreferredGpu": 1,
+        }
+    )
+    save = AsyncMock()
+    with (
+        patch.object(config_api, "save_override", new=save),
+        patch.object(config_api, "AsyncSessionLocal", new=_FakeSessionLocal),
+        patch.object(config_api, "_load_global_schedules", new=AsyncMock(return_value=[])),
+    ):
+        result = await config_api.patch_config(patch_body, request)
+    assert not [key for key in result if key.startswith("hunyuan")]
+    assert not hasattr(settings, "hunyuan_idle_unload_seconds")
+    save.assert_not_awaited()
+
+
 def patch_db_and_schedules():
     """Context manager to mock database persistence and schedule loading."""
     import contextlib

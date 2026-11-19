@@ -1691,17 +1691,6 @@ function toServerConfig(raw: unknown): ServerConfig {
     batchInterJobCooldownS: Number(
       data.batchInterJobCooldownS ?? data.batch_inter_job_cooldown_s ?? 0,
     ),
-    hunyuanIdleUnloadSeconds: Number(
-      data.hunyuanIdleUnloadSeconds ?? data.hunyuan_idle_unload_seconds ?? 300,
-    ),
-    hunyuanGenerationGracePeriodS: Number(
-      data.hunyuanGenerationGracePeriodS ??
-        data.hunyuan_generation_grace_period_s ??
-        120,
-    ),
-    hunyuanPreferredGpu: Number(
-      data.hunyuanPreferredGpu ?? data.hunyuan_preferred_gpu ?? 1,
-    ),
     trellis2IdleUnloadSeconds: Number(
       data.trellis2IdleUnloadSeconds ??
         data.trellis2_idle_unload_seconds ??
