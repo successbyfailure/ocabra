@@ -68,6 +68,14 @@ _GROW_MARGIN_MB = 256
 # Longest wait for an evicted worker's memory to show as free (it ends as soon
 # as the reading shows it; see vram_arbiter.wait_for_reading).
 _VRAM_RELEASE_MAX_S = 12.0
+# Longest a whisper growth reservation stands when its growth never shows (it
+# goes earlier: once the card shows the growth or the requests end).
+_WHISPER_RESERVATION_TTL_S = 120.0
+
+
+def _whisper_reservation_key(model_id: str) -> str:
+    """GPU lock key of a whisper request's growth reservation."""
+    return f"reserve:whisper:{model_id}"
 
 
 def _to_camel_key(value: str) -> str:
@@ -480,6 +488,10 @@ class ModelManager:
         # waiting for busy eviction candidates to drain. One budget for the
         # whole load, not one per candidate (see _drain_wait_budget_s).
         self._drain_deadlines: dict[str, float] = {}
+        # whisper model_id -> growth reservation made by make_room_for_whisper
+        # ({"gpu", "mb", "used_at", "deadline"}), written as the GPU lock
+        # ``reserve:whisper:<model_id>`` until the growth shows up.
+        self._whisper_reservations: dict[str, dict[str, Any]] = {}
 
     @asynccontextmanager
     async def _acquire_load_gate(self, purpose: str = "load"):
@@ -4744,7 +4756,7 @@ class ModelManager:
                 return True
         return await self._evict_cheap_then_shrink(model_id, gpu_idx, needed_mb)
 
-    async def _fresh_free_vram(self, gpu: int) -> int:
+    async def _fresh_free_vram(self, gpu: int, *, exclude_reservation: str | None = None) -> int:
         """Free VRAM on a GPU from a direct per-process reading, minus the buffer.
 
         ``get_physical_free_vram`` follows hw-monitor, which refreshes every
@@ -4758,7 +4770,19 @@ class ModelManager:
         if ceiling is None:
             return int(await self._gpu_manager.get_physical_free_vram(gpu))
         held = sum(int(mb) for mb in self._gpu_manager.get_process_vram_mb(gpu).values())
-        return max(0, int(ceiling) - held - int(settings.vram_buffer_mb))
+        # Growth another request is about to allocate (whisper) is taken too.
+        reserved = 0
+        snapshot = getattr(self._gpu_manager, "locks_snapshot", None)
+        if callable(snapshot):
+            with suppress(Exception):
+                locks = snapshot(gpu)
+                if isinstance(locks, dict):
+                    reserved = sum(
+                        int(mb)
+                        for key, mb in locks.items()
+                        if str(key).startswith("reserve:") and key != exclude_reservation
+                    )
+        return max(0, int(ceiling) - held - reserved - int(settings.vram_buffer_mb))
 
     async def _record_vram_curve_point(
         self,
@@ -4837,8 +4861,12 @@ class ModelManager:
         if extra <= 0:
             return
         gpu = int(state.current_gpu[0])
-        free = await self._fresh_free_vram(gpu)
+        own_key = _whisper_reservation_key(model_id)
+        free = await self._fresh_free_vram(gpu, exclude_reservation=own_key)
         if free >= extra:
+            # The room is there now; reserve it so a load admitted before the
+            # growth lands does not take it (BUG-23 left this window open).
+            await self._reserve_whisper_growth(model_id, gpu, extra)
             return
         # Shrinking a neighbour changes VRAM: under the arbiter, so a load's
         # admission neither races the shrink nor takes the room it made
@@ -4854,15 +4882,140 @@ class ModelManager:
                     diarize=diarize,
                     reason="vram_arbiter_busy",
                 )
-                return
-            await self._make_room_for_whisper_held(
-                model_id,
-                gpu,
-                extra,
-                diarize=diarize,
-                diarizer_missing=diarizer_missing,
-                concurrent=concurrent,
+            else:
+                await self._make_room_for_whisper_held(
+                    model_id,
+                    gpu,
+                    extra,
+                    diarize=diarize,
+                    diarizer_missing=diarizer_missing,
+                    concurrent=concurrent,
+                )
+            # The growth happens inside the request, after the arbiter is
+            # released: reserved before that (inside it when held), so the
+            # room made here is not handed to the next load. Also when no
+            # room could be made: the request grows anyway, and a load that
+            # counts on that memory would make it fail.
+            await self._reserve_whisper_growth(model_id, gpu, extra)
+
+    async def _reserve_whisper_growth(self, model_id: str, gpu: int, extra_mb: int) -> None:
+        """Reserve ``extra_mb`` on ``gpu`` for a whisper request's growth.
+
+        Written as the GPU lock ``reserve:whisper:<model_id>`` (a reservation:
+        every free-VRAM figure subtracts it, see gpu_manager.is_reservation)
+        and dropped by ``_watch_whisper_reservation`` as soon as the card shows
+        the growth, the model's requests end, or after
+        ``_WHISPER_RESERVATION_TTL_S``. Several requests share one reservation
+        (the largest figure asked). Best effort: never fails the request.
+        """
+        if self._gpu_manager is None or extra_mb <= 0:
+            return
+        key = _whisper_reservation_key(model_id)
+        loop = asyncio.get_running_loop()
+        entry = self._whisper_reservations.get(model_id)
+        try:
+            if entry is not None and entry["gpu"] != gpu:
+                await self._gpu_manager.unlock_vram(entry["gpu"], key)
+                entry = None
+            mb = max(int(extra_mb), int(entry["mb"]) if entry else 0)
+            await self._gpu_manager.lock_vram(gpu, mb, key)
+        except Exception as exc:  # noqa: BLE001 - a reservation is best effort
+            logger.warning("whisper_reservation_failed", whisper=model_id, error=str(exc))
+            return
+        used_at = entry["used_at"] if entry else self._gpu_used_now(gpu)
+        self._whisper_reservations[model_id] = {
+            "gpu": gpu,
+            "mb": mb,
+            "used_at": used_at,
+            "deadline": loop.time() + _WHISPER_RESERVATION_TTL_S,
+        }
+        logger.info("whisper_growth_reserved", whisper=model_id, gpu_index=gpu, reserved_mb=mb)
+        if entry is None:
+            self._create_background_task(
+                self._watch_whisper_reservation(model_id),
+                task_name=f"whisper-reservation:{model_id}",
+                model_id=model_id,
             )
+
+    def _gpu_used_now(self, gpu: int) -> int | None:
+        """MB in use on a GPU now: NVML here, else the polled figure."""
+        total = None
+        state = None
+        getter = getattr(self._gpu_manager, "get_state_nowait", None)
+        if callable(getter):
+            with suppress(Exception):
+                state = getter(gpu)
+        if state is not None:
+            total = getattr(state, "total_vram_mb", None)
+        live_reader = getattr(self._gpu_manager, "live_free_vram_mb", None)
+        live = None
+        if callable(live_reader):
+            with suppress(Exception):
+                live = live_reader(gpu)
+        if inspect.iscoroutine(live):
+            live.close()
+            live = None
+        if isinstance(live, int) and isinstance(total, int):
+            return total - live
+        used = getattr(state, "used_vram_mb", None) if state is not None else None
+        return int(used) if isinstance(used, int) else None
+
+    async def _watch_whisper_reservation(self, model_id: str, poll_s: float = 0.5) -> None:
+        """Drop a whisper growth reservation once it is no longer needed."""
+        loop = asyncio.get_running_loop()
+        never = asyncio.Event()
+        try:
+            while True:
+                # Not asyncio.sleep: tests that stub it out would make this
+                # background loop spin without yielding.
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(never.wait(), timeout=poll_s)
+                entry = self._whisper_reservations.get(model_id)
+                if entry is None:
+                    return
+                state = self._states.get(model_id)
+                used_now = self._gpu_used_now(entry["gpu"])
+                grown = (
+                    used_now is not None
+                    and entry["used_at"] is not None
+                    and used_now - entry["used_at"] >= entry["mb"] - _GROW_MARGIN_MB
+                )
+                cause = (
+                    "grown"
+                    if grown
+                    else "requests_ended"
+                    if self._in_flight_count(model_id) == 0
+                    else "not_loaded"
+                    if state is None or state.status != ModelStatus.LOADED
+                    else "expired"
+                    if loop.time() >= entry["deadline"]
+                    else None
+                )
+                if cause is not None:
+                    await self._release_whisper_reservation(model_id, cause=cause)
+                    return
+        finally:
+            # Cancelled (shutdown): never leave the reservation behind.
+            if model_id in self._whisper_reservations and self._gpu_manager is not None:
+                entry = self._whisper_reservations.pop(model_id)
+                with suppress(Exception):
+                    await self._gpu_manager.unlock_vram(
+                        entry["gpu"], _whisper_reservation_key(model_id)
+                    )
+
+    async def _release_whisper_reservation(self, model_id: str, *, cause: str) -> None:
+        entry = self._whisper_reservations.pop(model_id, None)
+        if entry is None or self._gpu_manager is None:
+            return
+        with suppress(Exception):
+            await self._gpu_manager.unlock_vram(entry["gpu"], _whisper_reservation_key(model_id))
+        logger.info(
+            "whisper_growth_reservation_released",
+            whisper=model_id,
+            gpu_index=entry["gpu"],
+            reserved_mb=entry["mb"],
+            cause=cause,
+        )
 
     async def _make_room_for_whisper_held(
         self,
@@ -4875,7 +5028,9 @@ class ModelManager:
         concurrent: int,
     ) -> None:
         """Body of :meth:`make_room_for_whisper`; the caller holds the arbiter."""
-        free = await self._fresh_free_vram(gpu)
+        free = await self._fresh_free_vram(
+            gpu, exclude_reservation=_whisper_reservation_key(model_id)
+        )
         if free >= extra:
             return
         for candidate in self._get_pressure_eviction_candidates(model_id, gpu_indices=[gpu]):
@@ -4947,6 +5102,7 @@ class ModelManager:
         only_unshrinkable: bool,
     ) -> bool:
         gpu = int(state.current_gpu[0])
+        own_key = _whisper_reservation_key(model_id)
         needed = int(needed_mb if needed_mb is not None else settings.whisper_diarization_extra_mb)
         for candidate in self._get_pressure_eviction_candidates(model_id, gpu_indices=[gpu]):
             if candidate == model_id:
@@ -4977,9 +5133,9 @@ class ModelManager:
                 baseline_free_mb=snapshot[0] if snapshot is not None else None,
                 gpu_indices=[gpu],
             )
-            if await self._fresh_free_vram(gpu) >= needed:
+            if await self._fresh_free_vram(gpu, exclude_reservation=own_key) >= needed:
                 return True
-        free = await self._fresh_free_vram(gpu)
+        free = await self._fresh_free_vram(gpu, exclude_reservation=own_key)
         logger.info("whisper_eviction_insufficient", whisper=model_id, gpu_index=gpu, free_mb=free)
         return free >= needed
 
@@ -5814,6 +5970,7 @@ class ModelManager:
             await self._publish_event(model_id, "status_changed")
             stopping = True
             await self.stop_worker_process(state)
+            await self._release_whisper_reservation(model_id, cause="unloaded")
 
             if self._gpu_manager:
                 for gpu_idx in released_gpu_indices:

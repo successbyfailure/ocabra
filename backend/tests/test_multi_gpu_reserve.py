@@ -135,7 +135,10 @@ async def test_a_large_request_grows_it_and_idle_brings_it_back(monkeypatch):
 
     state.last_request_at = datetime.now(UTC) - timedelta(seconds=121)
     await mm.check_idle_evictions()
-    for _ in range(5):
+    # The return goes through the VRAM arbiter now: a few more loop turns.
+    for _ in range(50):
+        if ctx["n"] == 131072:
+            break
         await asyncio.sleep(0)
     assert ctx["n"] == 131072
 
@@ -200,7 +203,7 @@ async def test_a_third_concurrent_one_asks_only_for_its_share(monkeypatch):
 async def test_evict_for_whisper_unloads_the_model_on_its_card(monkeypatch):
     mm, qwen, whisper, ctx = _whisper_next_to_qwen(monkeypatch, free_gpu0=0)
     free = iter([4000])
-    mm._fresh_free_vram = AsyncMock(side_effect=lambda gpu: next(free))
+    mm._fresh_free_vram = AsyncMock(side_effect=lambda gpu, **_: next(free))
     mm.unload = AsyncMock()
     mm._wait_for_vram_released = AsyncMock()
     mm._get_vram_free_snapshot = AsyncMock(return_value=[0])

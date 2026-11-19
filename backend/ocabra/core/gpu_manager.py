@@ -40,6 +40,19 @@ class GPUState:
 #: rounding mean an empty card reads a little less free than total - reserved.
 _CEILING_SLACK_MB = 64
 
+#: Lock keys that are reservations made *ahead* of an allocation, as opposed
+#: to model locks (taken once the worker already holds the memory). Free-VRAM
+#: figures always subtract them. ``service:`` = an external service's
+#: generation (ServiceManager.reserve_gpu_vram); ``reserve:`` = growth a
+#: request is about to allocate inside a running worker (whisper's diarizer,
+#: ModelManager.make_room_for_whisper). Only ``service:`` makes a GPU
+#: off-limits to the scheduler (has_service_lock).
+RESERVATION_PREFIXES = ("service:", "reserve:")
+
+
+def is_reservation(key: str) -> bool:
+    return key.startswith(RESERVATION_PREFIXES)
+
 
 class GPUManager:
     def __init__(self) -> None:
@@ -216,7 +229,7 @@ class GPUManager:
         ceiling = state.total_vram_mb - reserved - _CEILING_SLACK_MB
         if not physical:
             locks = self._locks.get(gpu_index, {})
-            service_locked = sum(mb for key, mb in locks.items() if key.startswith("service:"))
+            service_locked = sum(mb for key, mb in locks.items() if is_reservation(key))
             ceiling -= service_locked + settings.vram_buffer_mb
         return max(0, ceiling)
 
@@ -315,8 +328,8 @@ class GPUManager:
             # allocates in an EngineCore child process).
             measured = per_pid.get(pid, 0) if pid else 0
             physical_gain += max(measured, lock_mb)
-        model_locked = sum(mb for key, mb in locks.items() if not key.startswith("service:"))
-        service_locked = sum(mb for key, mb in locks.items() if key.startswith("service:"))
+        model_locked = sum(mb for key, mb in locks.items() if not is_reservation(key))
+        service_locked = sum(mb for key, mb in locks.items() if is_reservation(key))
         free = (
             min(
                 state.free_vram_mb + physical_gain,
@@ -701,8 +714,8 @@ class GPUManager:
         # still cap free VRAM when the estimate exceeds what NVML shows in use.
         # Service locks are reservations made ahead of the service allocating,
         # so they are always subtracted.
-        model_locked = sum(mb for key, mb in locks.items() if not key.startswith("service:"))
-        service_locked = sum(mb for key, mb in locks.items() if key.startswith("service:"))
+        model_locked = sum(mb for key, mb in locks.items() if not is_reservation(key))
+        service_locked = sum(mb for key, mb in locks.items() if is_reservation(key))
         free = min(state.free_vram_mb, state.total_vram_mb - model_locked) - service_locked
         return max(0, free - settings.vram_buffer_mb)
 
@@ -715,7 +728,7 @@ class GPUManager:
         """
         state = self._states[gpu_index]
         locks = self._locks.get(gpu_index, {})
-        service_locked = sum(mb for key, mb in locks.items() if key.startswith("service:"))
+        service_locked = sum(mb for key, mb in locks.items() if is_reservation(key))
         return max(0, state.free_vram_mb - service_locked - settings.vram_buffer_mb)
 
     def has_service_lock(self, gpu_index: int) -> bool:

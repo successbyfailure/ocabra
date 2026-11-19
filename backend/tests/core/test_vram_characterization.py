@@ -661,3 +661,63 @@ async def test_ensure_vram_free_never_evicts_the_service_asking(env):
     with pytest.raises(InsufficientVRAMError):
         await env.mm.ensure_vram_free("service:trellis", 30_000, GPU_3090)
     assert services.evicted == []
+
+
+# ------------------------------------------------ whisper growth reservation
+
+
+async def test_whisper_growth_is_reserved_until_it_shows(env):
+    """make_room_for_whisper found the room; the diarizer allocates later,
+    inside the request. A load admitted in between used to take that room
+    (the 3060 then OOMed on the diarizer); now it is reserved."""
+    await env.resident("whisper", 2_000, [GPU_3060], policy=LoadPolicy.PIN)
+    env.world.publish()
+    env.mm.begin_request("whisper")
+    await env.mm.make_room_for_whisper("whisper", diarize=True)
+    key = "reserve:whisper:whisper"
+    assert env.gpu.locks_snapshot(GPU_3060)[key] == settings.whisper_diarization_extra_mb
+    # 12,288 - 2,000 - 512 = 9,776 free: an 8 GB model fitted on the 3060
+    # before; with 3,400 reserved it goes to the 3090.
+    env.configure("emb", 8_000, preferred_gpu=GPU_3060)
+    await env.mm.load("emb")
+    assert env.mm._states["emb"].current_gpu == [GPU_3090]
+    # The diarizer loads: the reservation goes once the card shows it.
+    env.world.allocate(env.backend.pids["whisper"], {GPU_3060: 3_400})
+    for _ in range(40):
+        if key not in env.gpu.locks_snapshot(GPU_3060):
+            break
+        await asyncio.sleep(0.05)
+    assert key not in env.gpu.locks_snapshot(GPU_3060)
+    assert not env.mm._whisper_reservations
+
+
+async def test_whisper_reservation_goes_when_the_requests_end(env):
+    await env.resident("whisper", 2_000, [GPU_3060], policy=LoadPolicy.PIN)
+    rid = env.mm.begin_request("whisper")
+    await env.mm.make_room_for_whisper("whisper", diarize=True)
+    assert "reserve:whisper:whisper" in env.gpu.locks_snapshot(GPU_3060)
+    env.mm.end_request("whisper", rid)
+    for _ in range(40):
+        if not env.mm._whisper_reservations:
+            break
+        await asyncio.sleep(0.05)
+    assert "reserve:whisper:whisper" not in env.gpu.locks_snapshot(GPU_3060)
+
+
+async def test_whisper_reservation_goes_with_an_unload(env):
+    await env.resident("whisper", 2_000, [GPU_3060], policy=LoadPolicy.PIN)
+    env.mm.begin_request("whisper")
+    await env.mm.make_room_for_whisper("whisper", diarize=True)
+    await env.mm.unload("whisper")
+    assert env.gpu.locks_snapshot(GPU_3060) == {}
+    assert not env.mm._whisper_reservations
+
+
+async def test_a_whisper_reservation_does_not_block_the_scheduler_like_a_service():
+    """Only service locks make a card off-limits; a growth reservation only
+    takes its MB out of the free figure."""
+    with Env() as env:
+        await env.gpu.lock_vram(GPU_3060, 3_400, "reserve:whisper:w")
+        assert not env.gpu.has_service_lock(GPU_3060)
+        assert await env.gpu.get_free_vram(GPU_3060) == 12_288 - 3_400 - 512
+        assert await env.gpu.get_physical_free_vram(GPU_3060) == 12_288 - 3_400 - 512
