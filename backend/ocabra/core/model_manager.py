@@ -4094,6 +4094,17 @@ class ModelManager:
         )
         if candidates:
             return [state.model_id for state in candidates]
+
+        # Fallback: workers the states above do not offer (a worker whose
+        # state went ERROR with its process alive, or lost its GPUs). Never a
+        # hard pin: this fallback used to return every worker on the card, so
+        # a hard pin alone on its GPU was evicted like anything else.
+        def _fallback_ok(model_id: str) -> bool:
+            state = self._states.get(model_id)
+            return state is None or not (
+                state.pin_permanent and state.load_policy == LoadPolicy.PIN
+            )
+
         return [
             model_id
             for model_id, worker in self._worker_pool._workers.items()
@@ -4102,6 +4113,7 @@ class ModelManager:
             and not self._is_reserved_by_realtime_session(model_id)
             and worker.gpu_indices
             and (gpu_indices is None or any(g in gpu_indices for g in worker.gpu_indices))
+            and _fallback_ok(model_id)
         ]
 
     async def _get_vram_free_snapshot(

@@ -167,14 +167,6 @@ async def test_busy_candidate_that_drains_in_time_is_evicted(env, monkeypatch):
     assert_quiescent(env)
 
 
-_BUG_HARD_PIN_FALLBACK = pytest.mark.xfail(
-    strict=True,
-    reason="BUG: with no LOADED candidate on a card, the worker-pool fallback of "
-    "_get_pressure_eviction_candidates returns hard pins too",
-)
-
-
-@_BUG_HARD_PIN_FALLBACK
 async def test_hard_pin_is_never_evicted(env):
     await _full_3060(env)
     await env.resident("hard", 16_000, [GPU_3090], policy=LoadPolicy.PIN, pin_permanent=True)
@@ -201,7 +193,6 @@ async def test_realtime_session_worker_is_never_evicted(env):
     assert env.backend.unloads == ["od"]
 
 
-@_BUG_HARD_PIN_FALLBACK
 async def test_preferred_card_that_cannot_be_freed_frees_the_other(env):
     """2026-11-02: preferring the 3060 must not stop the cascade from freeing
     the 3090 when only that one can give room."""
@@ -377,7 +368,6 @@ async def test_ensure_vram_free_evicts_by_pressure_order_and_reserves(env):
     assert_quiescent(env)
 
 
-@_BUG_HARD_PIN_FALLBACK
 async def test_ensure_vram_free_partial_failure_still_reserves(env):
     await _full_3060(env)
     await env.resident("hard", 16_000, [GPU_3090], policy=LoadPolicy.PIN, pin_permanent=True)
