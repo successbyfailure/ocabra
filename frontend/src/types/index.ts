@@ -643,9 +643,6 @@ export interface ServerConfig {
   openaiAudioMaxPartSizeMb: number;
   whisperStartupTimeoutSeconds: number;
   logLevel: string;
-  litellmBaseUrl: string;
-  litellmAdminKey: string;
-  litellmAutoSync: boolean;
   energyCostEurKwh: number;
   modelsDir: string;
   downloadDir: string;

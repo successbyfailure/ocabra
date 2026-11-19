@@ -515,13 +515,11 @@ y un estado 4xx/5xx representativo en error. Los logs estructurados incluyen
 ```
 GET   /ocabra/config             → ServerConfig
 PATCH /ocabra/config             → ServerConfig
-POST  /ocabra/config/litellm/sync → {"synced_models": int, "errors": list[str]}
 ```
 
 `ServerConfig` (campos relevantes):
 - `defaultGpuIndex`, `idleTimeoutSeconds`, `idleEvictionCheckIntervalSeconds`
 - `vramBufferMb`, `vramPressureThresholdPct`, `logLevel`
-- `litellmBaseUrl`, `litellmAdminKey` (enmascarada), `litellmAutoSync`
 - `energyCostEurKwh`, `modelsDir`, `downloadDir`, `maxTemperatureC`
 - `globalSchedules`: `list[EvictionSchedule]` persistida en la tabla `eviction_schedules` y reconstruida por `GET /ocabra/config`
 - `modelsDir` proviene de `MODELS_DIR` y es de solo lectura en runtime
@@ -1651,10 +1649,6 @@ HF_TOKEN=                        # Token HuggingFace (opcional, para modelos pri
 DEFAULT_GPU_INDEX=1              # GPU preferida por defecto (0=3060, 1=3090)
 WORKER_PORT_RANGE_START=18000
 WORKER_PORT_RANGE_END=19000
-
-# LiteLLM
-LITELLM_BASE_URL=http://litellm:4000
-LITELLM_ADMIN_KEY=
 
 # Energía
 ENERGY_COST_EUR_KWH=0.15        # Para estimación de coste

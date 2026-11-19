@@ -78,7 +78,6 @@ class _Harness:
 def harness(monkeypatch):
     h = _Harness(monkeypatch)
     for flag, value in (
-        ("litellm_auto_sync", False),
         ("langfuse_enabled", False),
         ("federation_enabled", False),
         ("federation_join_url", ""),

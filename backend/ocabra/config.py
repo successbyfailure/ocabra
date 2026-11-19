@@ -652,11 +652,6 @@ class Settings(BaseSettings):
     a1111_generation_grace_period_s: int = 120
     trellis2_generation_grace_period_s: int = 120
 
-    # LiteLLM
-    litellm_base_url: str = "http://litellm:4000"
-    litellm_admin_key: str = ""
-    litellm_auto_sync: bool = False
-
     # ACE-Step music generation — backend (subprocess) mode
     acestep_project_dir: str = "/docker/ACE-Step-1.5"
     acestep_startup_timeout_s: int = 300

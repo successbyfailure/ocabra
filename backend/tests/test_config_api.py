@@ -1,4 +1,3 @@
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -120,16 +119,3 @@ async def test_patch_config_rejects_models_dir_runtime_mutation() -> None:
 async def test_patch_config_rejects_legacy_snake_case_keys() -> None:
     with pytest.raises(ValidationError):
         config_api.ServerConfigPatch.model_validate({"models_dir": "/tmp/legacy-models"})
-
-
-@pytest.mark.asyncio
-async def test_sync_litellm_contract() -> None:
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=object())))
-    fake_result = SimpleNamespace(synced=4, errors=[])
-
-    with patch("ocabra.integrations.litellm_sync.LiteLLMSync.sync_all", new=AsyncMock(return_value=fake_result)):
-        response = await config_api.sync_litellm(request)
-
-    payload = json.loads(response.body)
-    assert payload["synced_models"] == 4
-    assert payload["errors"] == []

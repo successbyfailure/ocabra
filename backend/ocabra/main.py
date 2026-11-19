@@ -666,14 +666,6 @@ async def _startup(app: FastAPI, teardown: _Teardown) -> None:
     app.state.backend_installer = backend_installer
     logger.info("backend_installer_ready")
 
-    if settings.litellm_auto_sync:
-        from ocabra.integrations.litellm_sync import LiteLLMSync
-
-        litellm_syncer = LiteLLMSync(model_manager)
-        model_manager.register_event_listener(litellm_syncer.handle_model_event)
-        app.state.litellm_syncer = litellm_syncer
-        logger.info("litellm_sync_enabled")
-
     # ── Everything ModelManager's background loops use is wired BEFORE
     # model_manager.start() (BUG-26). They used to be injected afterwards,
     # up to the end of startup, and it only worked because the PIN autoload

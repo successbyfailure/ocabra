@@ -6,7 +6,6 @@ Servidor de modelos de IA de alto rendimiento compatible con las APIs de OpenAI 
 Gestiona múltiples GPUs, carga modelos bajo demanda, y sirve cualquier tipo de modelo
 (LLM, imagen, audio, TTS, multimodal). Incluye sistema de autenticación propio (JWT + API keys),
 grupos de acceso a modelos, y gateway para servicios interactivos de generación.
-LiteLLM Proxy puede usarse opcionalmente como capa adicional de enrutamiento/rate-limiting.
 
 ---
 
@@ -128,11 +127,6 @@ Ver `docs/ROADMAP.md`:
 
 ```
                     ┌─────────────────────┐
-                    │   LiteLLM Proxy     │  ← Routing/rate-limit opcional
-                    │   (externo)         │
-                    └─────────┬───────────┘
-                              │ OpenAI API
-                    ┌─────────▼───────────┐
                     │   oCabra Core API   │  FastAPI
                     │  ┌───────────────┐  │
                     │  │ OpenAI compat │  │  /v1/*
@@ -242,9 +236,6 @@ ocabra/
 │       │   ├── bitnet_registry.py
 │       │   └── local_scanner.py     # Escanear modelos locales
 │       │
-│       ├── integrations/
-│       │   └── litellm_sync.py      # Auto-actualizar config de LiteLLM Proxy
-│       │
 │       ├── stats/
 │       │   ├── collector.py         # Middleware de métricas por request
 │       │   ├── gpu_power.py         # Energía, estimación coste por petición
@@ -268,7 +259,7 @@ ocabra/
 │       │   ├── Explore.tsx          # Browser HuggingFace + Ollama
 │       │   ├── Playground.tsx       # Chat/imagen/audio de prueba
 │       │   ├── Stats.tsx            # Gráficos de uso, tokens, energía
-│       │   ├── Settings.tsx         # Config servidor, GPUs, LiteLLM sync
+│       │   ├── Settings.tsx         # Config servidor, GPUs, storage, schedules
 │       │   └── TrtllmEngines.tsx    # Engines TRT-LLM compilados
 │       ├── components/
 │       │   ├── gpu/
@@ -391,12 +382,10 @@ Reportado en `/ocabra/stats/energy` y visible en la UI.
 
 ---
 
-## Integración LiteLLM
+## Integración LiteLLM (retirada)
 
-Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
-- oCabra actualiza automáticamente el `config.yaml` de LiteLLM (vía API REST de LiteLLM o reescritura de fichero).
-- El formato generado es compatible con LiteLLM proxy model list.
-- Se puede configurar: endpoint base, api_key interna, modelo alias.
+La sincronización con LiteLLM Proxy se retiró en noviembre de 2026: oCabra usa su
+propia autenticación (JWT + API keys) y ya no publica su lista de modelos en LiteLLM.
 
 ---
 
@@ -532,7 +521,7 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 
 #### Stream D — Settings UI
 - Config global (carpeta modelos, GPU default, eviction policy)
-- LiteLLM sync: URL, api_key, toggle auto-sync, botón sync manual
+- ~~LiteLLM sync: URL, api_key, toggle auto-sync, botón sync manual~~ (retirado)
 - Gestión de schedules de pin/eviction
 - Variables de entorno cargadas (readonly)
 
@@ -540,7 +529,7 @@ Cuando se añade/elimina/activa/desactiva un modelo en oCabra:
 
 ### FASE 5 — Integrations + Polish (secuencial, requiere todo lo anterior)
 
-- [x] LiteLLM auto-sync: detectar cambios de modelo → actualizar config LiteLLM via API
+- [x] ~~LiteLLM auto-sync: detectar cambios de modelo → actualizar config LiteLLM via API~~ (retirado en 2026-11)
 - [x] Logging estructurado (structlog) con nivel configurable
 - [x] Healthcheck endpoints (`/health`, `/ready`)
 - [x] Tests de integración para API OpenAI + Ollama

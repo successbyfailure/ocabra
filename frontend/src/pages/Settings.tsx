@@ -6,7 +6,6 @@ import {
   Cpu,
   Server,
   HardDrive,
-  Link,
   Sparkles,
   GitBranch,
 } from "lucide-react"
@@ -19,7 +18,6 @@ import { GenerationServicesSettings } from "@/components/settings/GenerationServ
 import { GeneralSettings } from "@/components/settings/GeneralSettings"
 import { GlobalSchedules } from "@/components/settings/GlobalSchedules"
 import { GPUSettings } from "@/components/settings/GPUSettings"
-import { LiteLLMSettings } from "@/components/settings/LiteLLMSettings"
 import { PrioritySettings } from "@/components/settings/PrioritySettings"
 import { RoutingSettings } from "@/components/settings/RoutingSettings"
 import { StorageSettings } from "@/components/settings/StorageSettings"
@@ -39,9 +37,6 @@ const EMPTY_CONFIG: ServerConfig = {
   openaiAudioMaxPartSizeMb: 256,
   whisperStartupTimeoutSeconds: 300,
   logLevel: "info",
-  litellmBaseUrl: "",
-  litellmAdminKey: "",
-  litellmAutoSync: false,
   energyCostEurKwh: 0,
   modelsDir: "/models",
   downloadDir: "/models/downloads",
@@ -182,7 +177,7 @@ export function Settings() {
     <div className="space-y-4 pb-6">
       <div>
         <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="text-muted-foreground">Configuracion general, GPU, LiteLLM, storage y schedules.</p>
+        <p className="text-muted-foreground">Configuracion general, GPU, storage y schedules.</p>
       </div>
 
       {loading ? (
@@ -205,10 +200,6 @@ export function Settings() {
             <Tabs.Trigger value="storage" className={TAB_TRIGGER}>
               <HardDrive size={14} />
               Almacenamiento
-            </Tabs.Trigger>
-            <Tabs.Trigger value="litellm" className={TAB_TRIGGER}>
-              <Link size={14} />
-              LiteLLM
             </Tabs.Trigger>
             <Tabs.Trigger value="generation" className={TAB_TRIGGER}>
               <Sparkles size={14} />
@@ -252,12 +243,6 @@ export function Settings() {
             <div className="grid gap-4">
               <StorageSettings localModels={localModels} config={config} onSave={savePatch} />
               <GlobalSchedules config={config} onSave={savePatch} />
-            </div>
-          </Tabs.Content>
-
-          <Tabs.Content value="litellm">
-            <div className="grid gap-4">
-              <LiteLLMSettings config={config} onSave={savePatch} />
             </div>
           </Tabs.Content>
 

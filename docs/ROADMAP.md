@@ -780,7 +780,7 @@ nombres ocultos. Sustituye a la convención manual `*-ollama` (que sigue resolvi
 oculta). Hecho: migración 0034, cambio de backend por defecto, añadir/quitar despliegues,
 compatibilidad formato→backends en la búsqueda, permisos por modelo, descarga multi-backend.
 
-## ⏳ Bloque 24 — Retirada del soporte LiteLLM (PENDIENTE)
+## ✅ Bloque 24 — Retirada del soporte LiteLLM (HECHO)
 
 LiteLLM y la ruta externa `iapi` ya se han retirado de la infraestructura. oCabra usa su
 autenticación interna y el gateway de servicios, por lo que queda eliminar el soporte residual
@@ -795,6 +795,11 @@ para que configuración, UI y documentación reflejen la arquitectura desplegada
 - Actualizar `docs/PLAN.md`, documentación de streams, changelog y tests de contrato/configuración.
 - Verificar que API OpenAI/Ollama, API keys, gateway y benchmarks funcionan directamente contra
   oCabra sin dependencias ni referencias operativas a LiteLLM o `iapi`.
+
+Hecho (2026-11): integración, settings, endpoint, pestaña de Settings y variables retiradas.
+`PATCH /ocabra/config` sigue aceptando `litellmBaseUrl`, `litellmAdminKey` y
+`litellmAutoSync` (se ignoran, sin 422) y las claves `litellm_*` que queden en la tabla
+`server_config` se saltan al arrancar (no son campos de `Settings`); no hace falta borrarlas.
 
 ## Orden de ejecución
 
@@ -820,7 +825,7 @@ para que configuración, UI y documentación reflejen la arquitectura desplegada
 [🚧 En curso] Bloque 20 — Router profiles, duration estimator y session registry
 [✅ Hecho]    Bloque 21 — Presets de contexto y runtimes adaptativos
 [🚧 En curso] Bloque 22 — KV elástica y paralelismo dinámico en llama.cpp (pool fijo, admission, UI y canary completados; soak y context reinit pendientes)
-[Pendiente]   Bloque 24 — Retirada completa del soporte LiteLLM
+[✅ Hecho]    Bloque 24 — Retirada completa del soporte LiteLLM
 [Pendiente]   Revalidar paralelismo Qwen 3.8 cuando Ollama soporte qwen35 con más de un slot
 [Pendiente]   Investigación e integración de vLLM sleep mode
 [Pendiente]   Revalidar speculative decoding en Nemotron-H híbrido

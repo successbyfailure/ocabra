@@ -20,7 +20,6 @@ Si hay conflicto entre instrucciones, prioriza primero la seguridad y el alcance
 - Gestión dinámica de carga/descarga de modelos con políticas `pin`, `warm`, `on_demand`
 - Soporte para LLM, imagen, audio, TTS y modelos multimodal
 - Hardware objetivo: RTX 3060 (12 GB) + RTX 3090 (24 GB)
-- LiteLLM Proxy actúa como capa externa de autenticación
 
 **Documentación esencial:**
 - `docs/PLAN.md` — Plan completo, arquitectura, fases y estado actual

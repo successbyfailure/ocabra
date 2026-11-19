@@ -1,6 +1,5 @@
 """
 GET/PATCH /ocabra/config — Server configuration API.
-POST /ocabra/config/litellm/sync — Manual LiteLLM sync trigger.
 """
 
 from __future__ import annotations
@@ -9,7 +8,6 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ocabra.api._deps_auth import UserContext, require_role
@@ -69,9 +67,26 @@ class ServerConfigPatch(BaseModel):
         default=None, alias="whisperStartupTimeoutSeconds"
     )
     log_level: str | None = Field(default=None, alias="logLevel")
-    litellm_base_url: str | None = Field(default=None, alias="litellmBaseUrl")
-    litellm_admin_key: str | None = Field(default=None, alias="litellmAdminKey")
-    litellm_auto_sync: bool | None = Field(default=None, alias="litellmAutoSync")
+    # Retired with the LiteLLM integration. Still accepted, and ignored, so an
+    # old tab or script that sends them doesn't get a 422 from extra="forbid".
+    litellm_base_url: str | None = Field(
+        default=None,
+        alias="litellmBaseUrl",
+        description="Deprecated and ignored: LiteLLM support was removed.",
+        deprecated=True,
+    )
+    litellm_admin_key: str | None = Field(
+        default=None,
+        alias="litellmAdminKey",
+        description="Deprecated and ignored: LiteLLM support was removed.",
+        deprecated=True,
+    )
+    litellm_auto_sync: bool | None = Field(
+        default=None,
+        alias="litellmAutoSync",
+        description="Deprecated and ignored: LiteLLM support was removed.",
+        deprecated=True,
+    )
     energy_cost_eur_kwh: float | None = Field(default=None, alias="energyCostEurKwh")
     models_dir: str | None = Field(default=None, alias="modelsDir")
     download_dir: str | None = Field(default=None, alias="downloadDir")
@@ -296,10 +311,6 @@ class ServerConfigPatch(BaseModel):
     )
 
 
-def _masked_admin_key(value: str) -> str:
-    return "***" if value else ""
-
-
 def _build_config_response(request: Request) -> dict[str, Any]:
     effective_download_dir = settings.download_dir or f"{settings.models_dir.rstrip('/')}/downloads"
     return {
@@ -316,9 +327,6 @@ def _build_config_response(request: Request) -> dict[str, Any]:
         "openaiAudioMaxPartSizeMb": settings.openai_audio_max_part_size_mb,
         "whisperStartupTimeoutSeconds": settings.whisper_startup_timeout_s,
         "logLevel": settings.log_level,
-        "litellmBaseUrl": settings.litellm_base_url,
-        "litellmAdminKey": _masked_admin_key(settings.litellm_admin_key),
-        "litellmAutoSync": settings.litellm_auto_sync,
         "energyCostEurKwh": settings.energy_cost_eur_kwh,
         "modelsDir": settings.models_dir,
         "downloadDir": effective_download_dir,
@@ -411,8 +419,7 @@ async def _load_global_schedules() -> list[dict[str, Any]]:
     summary="Get server configuration",
     description=(
         "Return all server configuration values including GPU defaults, idle eviction, "
-        "backend tuning, LiteLLM integration, energy pricing, and global schedules. "
-        "Sensitive keys (e.g. litellmAdminKey) are masked."
+        "backend tuning, energy pricing, and global schedules."
     ),
 )
 async def get_config(
@@ -518,20 +525,6 @@ async def patch_config(
     if "log_level" in payload:
         settings.log_level = str(payload["log_level"])
         await _persist("log_level", settings.log_level)
-    if "litellm_base_url" in payload:
-        settings.litellm_base_url = str(payload["litellm_base_url"])
-        await _persist("litellm_base_url", settings.litellm_base_url)
-    if "litellm_admin_key" in payload:
-        new_key = str(payload["litellm_admin_key"])
-        if new_key and new_key != "***":
-            settings.litellm_admin_key = new_key
-            await _persist("litellm_admin_key", settings.litellm_admin_key)
-        elif new_key == "":
-            settings.litellm_admin_key = ""
-            await _persist("litellm_admin_key", "")
-    if "litellm_auto_sync" in payload:
-        settings.litellm_auto_sync = bool(payload["litellm_auto_sync"])
-        await _persist("litellm_auto_sync", settings.litellm_auto_sync)
     if "energy_cost_eur_kwh" in payload:
         settings.energy_cost_eur_kwh = float(payload["energy_cost_eur_kwh"])
         await _persist("energy_cost_eur_kwh", settings.energy_cost_eur_kwh)
@@ -831,34 +824,6 @@ async def patch_config(
     response = _build_config_response(request)
     response["globalSchedules"] = await _load_global_schedules()
     return response
-
-
-@router.post(
-    "/config/litellm/sync",
-    summary="Sync models to LiteLLM proxy",
-    description="Manually trigger synchronisation of all loaded models to the configured LiteLLM proxy instance.",
-)
-async def sync_litellm(
-    request: Request,
-    _user: UserContext = Depends(require_role("system_admin")),
-) -> JSONResponse:
-    """
-    Manually trigger synchronisation of all loaded models to LiteLLM proxy.
-
-    Returns the number of models synced and any errors encountered.
-    """
-    from ocabra.integrations.litellm_sync import LiteLLMSync
-
-    model_manager = request.app.state.model_manager
-    syncer = LiteLLMSync(model_manager)
-    result = await syncer.sync_all()
-
-    return JSONResponse(
-        {
-            "synced_models": result.synced,
-            "errors": result.errors,
-        }
-    )
 
 
 def _privacy_temp_status() -> dict:

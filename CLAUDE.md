@@ -179,7 +179,6 @@ ocabra/
 │   ├── core/             # GPU manager, model manager, scheduler, worker pool
 │   ├── backends/         # vLLM, Diffusers, Whisper, TTS
 │   ├── registry/         # HuggingFace, Ollama registry, scanner local
-│   ├── integrations/     # LiteLLM sync
 │   ├── stats/            # Métricas, energía, agregación
 │   └── db/               # SQLAlchemy models
 ├── frontend/src/

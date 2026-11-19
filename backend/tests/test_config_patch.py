@@ -135,23 +135,6 @@ class TestPatchConfigRuntime:
             settings.inference_request_timeout_seconds = previous
 
     @pytest.mark.asyncio
-    async def test_litellm_admin_key_masked_not_overwritten(self):
-        """Sending '***' for litellmAdminKey should NOT overwrite the key."""
-        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
-        previous = settings.litellm_admin_key
-
-        try:
-            settings.litellm_admin_key = "real-secret-key"
-            patch = ServerConfigPatch.model_validate({"litellmAdminKey": "***"})
-
-            with patch_db_and_schedules():
-                await config_api.patch_config(patch, request)
-
-            assert settings.litellm_admin_key == "real-secret-key"
-        finally:
-            settings.litellm_admin_key = previous
-
-    @pytest.mark.asyncio
     async def test_download_dir_stored_in_overrides(self):
         """download_dir is stored in request-level overrides, not settings."""
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
@@ -224,6 +207,58 @@ class TestRetiredRouterFallbackDelay:
         )
         assert fresh.idle_timeout_seconds == 123
         assert not hasattr(fresh, "router_fallback_delay_ms")
+
+
+class TestRetiredLiteLLM:
+    """LiteLLM support was removed. Its settings are gone from the settings
+    and the GET response; PATCH still accepts the old keys (ignored, not
+    persisted) so old clients don't get a 422, and values already stored in
+    server_config don't break startup."""
+
+    _KEYS = ("litellm_base_url", "litellm_admin_key", "litellm_auto_sync")
+
+    def test_not_settings_anymore(self):
+        for key in self._KEYS:
+            assert not hasattr(settings, key)
+
+    @pytest.mark.asyncio
+    async def test_patch_accepts_and_ignores_them(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        patch_body = ServerConfigPatch.model_validate(
+            {
+                "litellmBaseUrl": "http://litellm:4000",
+                "litellmAdminKey": "sk-old",
+                "litellmAutoSync": True,
+            }
+        )
+        save = AsyncMock()
+        with (
+            patch.object(config_api, "save_override", new=save),
+            patch.object(config_api, "AsyncSessionLocal", new=_FakeSessionLocal),
+            patch.object(config_api, "_load_global_schedules", new=AsyncMock(return_value=[])),
+        ):
+            result = await config_api.patch_config(patch_body, request)
+        for key in ("litellmBaseUrl", "litellmAdminKey", "litellmAutoSync"):
+            assert key not in result
+        save.assert_not_awaited()
+
+    def test_stored_overrides_are_skipped_at_startup(self):
+        from ocabra.config import Settings
+        from ocabra.db.server_config import apply_overrides_to_settings
+
+        fresh = Settings()
+        apply_overrides_to_settings(
+            fresh,
+            {
+                "litellm_base_url": '"http://litellm:4000"',
+                "litellm_admin_key": '"sk-old"',
+                "litellm_auto_sync": "true",
+                "idle_timeout_seconds": "123",
+            },
+        )
+        assert fresh.idle_timeout_seconds == 123
+        for key in self._KEYS:
+            assert not hasattr(fresh, key)
 
 
 def patch_db_and_schedules():

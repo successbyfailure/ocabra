@@ -10,7 +10,6 @@ const {
   localModelsList,
   modelsList,
   profilesListAll,
-  syncLiteLLM,
 } = vi.hoisted(() => ({
   configGet: vi.fn(),
   configPatch: vi.fn(),
@@ -18,7 +17,6 @@ const {
   localModelsList: vi.fn(),
   modelsList: vi.fn(),
   profilesListAll: vi.fn(),
-  syncLiteLLM: vi.fn(),
 }))
 
 vi.mock("sonner", () => ({
@@ -33,7 +31,6 @@ vi.mock("@/api/client", () => ({
     config: {
       get: configGet,
       patch: configPatch,
-      syncLiteLLM,
     },
     gpus: {
       list: gpusList,
@@ -70,9 +67,6 @@ describe("Settings", () => {
       openaiAudioMaxPartSizeMb: 256,
       whisperStartupTimeoutSeconds: 300,
       logLevel: "warning",
-      litellmBaseUrl: "http://litellm:4000",
-      litellmAdminKey: "***",
-      litellmAutoSync: true,
       energyCostEurKwh: 0.42,
       modelsDir: "/srv/models",
       downloadDir: "/srv/models/downloads",
@@ -149,7 +143,6 @@ describe("Settings", () => {
       },
     ])
     configPatch.mockResolvedValue({})
-    syncLiteLLM.mockResolvedValue({ syncedModels: 0 })
     localStorage.clear()
   })
 
@@ -161,8 +154,8 @@ describe("Settings", () => {
     // Settings esta repartida en pestanas y solo monta la activa, asi que hay
     // que ir a cada una antes de comprobar sus campos: modelsDir/downloadDir
     // viven en "Almacenamiento", la temperatura y la GPU por defecto en
-    // "GPUs" y la URL del proxy en "LiteLLM". El test se escribio cuando la
-    // pagina era una sola columna y comprobaba los cinco campos de golpe, asi
+    // "GPUs". El test se escribio cuando la pagina era una sola columna y
+    // comprobaba todos los campos de golpe, asi
     // que desde que hay pestanas no encontraba ninguno.
     localStorage.setItem("ocabra.modelsDir", "/legacy/models")
     localStorage.setItem("ocabra.downloadDir", "/legacy/downloads")
@@ -193,13 +186,6 @@ describe("Settings", () => {
       expect((screen.getByLabelText("Temperatura maxima alerta (C)") as HTMLInputElement).value).toBe("93")
     })
     expect((screen.getByLabelText("GPU preferida por defecto") as HTMLSelectElement).value).toBe("1")
-
-    await irA(/LiteLLM/i)
-    await waitFor(() => {
-      expect((screen.getByLabelText("URL proxy LiteLLM") as HTMLInputElement).value).toBe(
-        "http://litellm:4000",
-      )
-    })
 
     // The legacy keys must not be read. (Other storage reads are fine: e.g.
     // the remote-panel selection lives in sessionStorage, which shares

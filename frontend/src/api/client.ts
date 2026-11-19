@@ -1534,9 +1534,6 @@ function toServerConfig(raw: unknown): ServerConfig {
         300,
     ),
     logLevel: String(data.logLevel ?? "info"),
-    litellmBaseUrl: String(data.litellmBaseUrl ?? ""),
-    litellmAdminKey: String(data.litellmAdminKey ?? ""),
-    litellmAutoSync: Boolean(data.litellmAutoSync),
     energyCostEurKwh: Number(data.energyCostEurKwh ?? 0),
     modelsDir: String(data.modelsDir ?? "/models"),
     downloadDir: String(data.downloadDir ?? "/models/downloads"),
@@ -3368,13 +3365,6 @@ export const api = {
       toServerConfig(await request<unknown>("GET", "/ocabra/config")),
     patch: async (patch: Partial<ServerConfig>) =>
       toServerConfig(await request<unknown>("PATCH", "/ocabra/config", patch)),
-    syncLiteLLM: async () => {
-      const result = await request<{ synced_models: number }>(
-        "POST",
-        "/ocabra/config/litellm/sync",
-      );
-      return { syncedModels: result.synced_models };
-    },
   },
 
   trtllm: {

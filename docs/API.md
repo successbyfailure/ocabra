@@ -1126,12 +1126,10 @@ Query params comunes: `from` (ISO), `to` (ISO), `model_id`
 |--------|----------|-------------|
 | GET | `/ocabra/config` | Config actual |
 | PATCH | `/ocabra/config` | Actualizar config |
-| POST | `/ocabra/config/litellm/sync` | Sync con LiteLLM proxy |
 
 Config keys principales (camelCase en REST):
 - `defaultGpuIndex`, `idleTimeoutSeconds`, `vramBufferMb`
 - `vramPressureThresholdPct`, `logLevel`
-- `litellmBaseUrl`, `litellmAdminKey`, `litellmAutoSync`
 - `energyCostEurKwh`, `maxTemperatureC`
 - `vllmGpuMemoryUtilization`, `vllmMaxNumSeqs`, `vllmEnforceeager`
 - `sglangMemFractionStatic`, `llamaCppGpuLayers`, `bitnetCtxSize`
