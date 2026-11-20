@@ -56,3 +56,15 @@ def test_video_upscale_is_frames_per_second():
     ]
     s = _by_unit(rows)[(("video_upscale",), "frames_per_s")]
     assert s["value"] == 24.0 and s["samples"] == 1
+
+
+def test_photo_upscale_is_megapixels_per_second_without_the_load():
+    """VHS 20/11: 10 s warm vs 45 s for a 4K photo, and a cold load of 8 s
+    counted as work. The speed is the network's megapixels per second of
+    service, not per second waited."""
+    warm = _row("image_upscale", 10_000, {"n_images": 1, "model_mp": 33.178})
+    cold = _row("image_upscale", 18_000, {"n_images": 1, "model_mp": 33.178})
+    cold.runtime_telemetry = {"load_ms": 8_000}
+    s = _by_unit([warm, cold])
+    assert s[(("image_upscale",), "mp_per_s")]["value"] == 3.32
+    assert s[(("image_upscale",), "s_per_image")]["value"] == 10.0

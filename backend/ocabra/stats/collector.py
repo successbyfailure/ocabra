@@ -65,6 +65,8 @@ def _extract_work_size_meta(
 
     if request_kind == "image_upscale":
         # One photo per request; the response is the image itself (no JSON).
+        # Its size comes from the worker's headers (``request.state.upscale_meta``,
+        # merged at record time).
         return {"n_images": 1}
 
     if request_kind == "tts":
@@ -1181,6 +1183,10 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         **(work_size_meta or {}),
                         "audio_seconds": float(header_audio_s),
                     }
+            # Escalado de fotos: tamaños que el worker devolvió en sus cabeceras.
+            upscale_meta = getattr(request.state, "upscale_meta", None)
+            if request_kind == "image_upscale" and isinstance(upscale_meta, dict):
+                work_size_meta = {**(work_size_meta or {}), **upscale_meta}
             # Bloque 20 — router attribution. ``resolve_profile`` stashes
             # the router profile_id on ``request.state`` (BaseHTTPMiddleware
             # breaks contextvar propagation across ``call_next``, but

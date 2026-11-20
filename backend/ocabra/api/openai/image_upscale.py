@@ -54,6 +54,42 @@ _RESPONSE_FORMATS = {"b64_json"}
 _CLIENT_ERROR_STATUSES = {400, 413, 422}
 
 
+def _resolution(value: str | None) -> tuple[int, int] | None:
+    """``"1920x1080"`` → ``(1920, 1080)``; None if it does not parse."""
+    try:
+        w, h = (int(part) for part in str(value).lower().split("x", 1))
+    except (TypeError, ValueError):
+        return None
+    return (w, h) if w > 0 and h > 0 else None
+
+
+def upscale_work_meta(stats: dict[str, str]) -> dict[str, Any]:
+    """Size of the work, from the worker's ``x-ocabra-*`` headers, for stats.
+
+    ``model_mp`` (what the network produced, before any reduction) is what the
+    time depends on: a 1080p photo took ~10 s and a 4K one ~45 s, and with only
+    ``n_images`` the two looked the same.
+    """
+    lower = {k.lower(): v for k, v in stats.items()}
+    meta: dict[str, Any] = {}
+    for prefix, key in (
+        ("input", "input-resolution"),
+        ("model", "model-resolution"),
+        ("output", "delivered-resolution"),
+    ):
+        size = _resolution(lower.get(f"x-ocabra-{key}"))
+        if size:
+            meta[f"{prefix}_w"], meta[f"{prefix}_h"] = size
+            meta[f"{prefix}_mp"] = round(size[0] * size[1] / 1_000_000, 3)
+    try:
+        tiles = int(lower.get("x-ocabra-tiles", ""))
+    except ValueError:
+        tiles = 0
+    if tiles > 0:
+        meta["tiles"] = tiles
+    return meta
+
+
 def _invalid(message: str, param: str, status_code: int = 400) -> HTTPException:
     return _openai_error(message, "invalid_request_error", param=param, status_code=status_code)
 
@@ -348,6 +384,7 @@ async def image_upscale(
         elapsed_ms=int((time.monotonic() - started) * 1000),
     )
     headers.update(stats)
+    request.state.upscale_meta = upscale_work_meta(stats)
     if resp_format == "b64_json":
         size = next(
             (v for k, v in stats.items() if k.lower() == "x-ocabra-delivered-resolution"), None

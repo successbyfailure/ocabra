@@ -16,6 +16,21 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.122.2 — 2026-11-20
+
+### Arreglos
+
+- **Las estadísticas de `/v1/images/upscale` guardan el tamaño de cada foto.**
+  Antes solo constaba que había una imagen: una de 1080p (~10 s) y una 4K
+  (~45 s) contaban igual, y la estimación de duración no podía tenerlo en
+  cuenta. Ahora se guardan la resolución de entrada, la de la red y la
+  entregada (y las teselas), la velocidad se da también en megapíxeles por
+  segundo y la duración esperada crece con los megapíxeles. Además, la
+  velocidad de las peticiones que no se miden en tokens (transcripción, voz,
+  imágenes, escalado…) ya no cuenta la espera a que cargase el modelo.
+
+---
+
 ## 0.122.1 — 2026-11-19
 
 ### Arreglos

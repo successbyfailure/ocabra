@@ -969,7 +969,7 @@ export interface EnergyStats {
 
 export interface WorkSpeed {
   kinds: string[];
-  unit: "x_realtime" | "chars_per_s" | "inputs_per_s" | "tokens_per_s" | "documents_per_s" | "s_per_image" | string;
+  unit: "x_realtime" | "chars_per_s" | "inputs_per_s" | "tokens_per_s" | "documents_per_s" | "s_per_image" | "frames_per_s" | "mp_per_s" | string;
   value: number;
   samples: number;
 }

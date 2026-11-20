@@ -226,10 +226,14 @@ def _mp_steps(meta: dict) -> float | None:
 
 
 def _mp_frames(meta: dict) -> float | None:
-    """Megapixel-frames for video upscaling — frames × output megapixels."""
+    """Megapixel-frames for upscaling — frames × output megapixels.
+
+    A photo (``/v1/images/upscale``) is one frame of ``model_mp`` megapixels:
+    the network's own output, before any reduction to the asked size.
+    """
     frames = _pos_float(meta.get("input_frames"))
     if frames is None:
-        return None
+        return _pos_float(meta.get("model_mp"))
     w = _pos_float(meta.get("output_w")) or 1920.0
     h = _pos_float(meta.get("output_h")) or 1080.0
     return frames * w * h / 1_000_000.0

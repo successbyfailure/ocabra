@@ -43,6 +43,9 @@ _WORK_SPEEDS: tuple[tuple[tuple[str, ...], str, str, bool], ...] = (
     (("image_generation",), "s_per_image", "n_images", False),
     (("video_upscale",), "frames_per_s", "input_frames", True),
     (("image_upscale",), "s_per_image", "n_images", False),
+    # Megapíxeles que produce la red por segundo: lo que separa una foto de
+    # 1080p (~10 s) de una 4K (~45 s), que s/imagen mezcla.
+    (("image_upscale",), "mp_per_s", "model_mp", True),
     (("realtime_chat",), "tokens_per_s", "output_tokens", True),
 )
 
@@ -75,7 +78,14 @@ def work_speeds(rows: list) -> list[dict]:
             if r.status_code is not None and r.status_code >= 400:
                 continue
             amount = _work_amount(r, field)
-            ms = max(0, int(r.duration_ms or 0))
+            # Sin la espera a que cargase el modelo ni la cola: una carga en
+            # frío de 8 s convertía un escalado de 10 s en uno de 18 s.
+            ms = max(
+                0,
+                int(r.duration_ms or 0)
+                - (_telemetry_int(r, "load_ms") or 0)
+                - (_telemetry_int(r, "queue_ms") or 0),
+            )
             if amount <= 0 or ms <= 0:
                 continue
             work += amount
