@@ -2162,6 +2162,8 @@ export interface BenchmarkAttempt {
         installedVersion?: string | null;
         packages?: Record<string, string>;
         ociDigest?: string | null;
+        gitRef?: string | null;
+        sourceCommit?: string | null;
         node?: string | null;
       }>;
     };

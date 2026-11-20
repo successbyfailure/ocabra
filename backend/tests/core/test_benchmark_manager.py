@@ -195,15 +195,25 @@ def test_backend_versions_include_installed_artifact_and_mark_remote_unknown() -
     )
     installer = SimpleNamespace(get_state=lambda backend: state)
 
-    assert backend_version_observations(["llamacpp_mks"], ["local"], installer) == [{
+    assert backend_version_observations(
+        ["llamacpp_mks"],
+        ["local"],
+        installer,
+        {"llamacpp_mks": "96fff6c0123456789"},
+    ) == [{
         "type": "llamacpp_mks",
         "installedVersion": "0.9.2",
         "packages": {"llama-cpp-python": "0.3.16"},
         "ociDigest": "sha256:abc",
+        "gitRef": None,
+        "sourceCommit": "96fff6c0123456789",
         "node": "local",
     }]
-    remote = backend_version_observations(["llamacpp_mks"], ["mapache"], None)[0]
+    remote = backend_version_observations(
+        ["llamacpp_mks"], ["mapache"], installer, {"llamacpp_mks": "local-only"}
+    )[0]
     assert remote["installedVersion"] is None
+    assert remote["sourceCommit"] is None
     assert remote["node"] is None
 
 

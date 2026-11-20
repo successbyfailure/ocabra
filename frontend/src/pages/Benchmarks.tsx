@@ -83,6 +83,21 @@ function logicalModelId(profile: ModelProfile): string {
   return value.includes("/") ? value.slice(value.indexOf("/") + 1) : value
 }
 
+export function backendVersionLabel(backend: {
+  type: string
+  installedVersion?: string | null
+  sourceCommit?: string | null
+  ociDigest?: string | null
+  gitRef?: string | null
+}): string {
+  const version = backend.installedVersion
+    ?? backend.sourceCommit?.slice(0, 12)
+    ?? backend.ociDigest?.slice(0, 19)
+    ?? backend.gitRef
+    ?? "versión no informada"
+  return `${backend.type} ${version}`
+}
+
 export function benchmarkModelGroups(
   profiles: ModelProfile[], app: string, suite: string, search = "",
 ) {
@@ -514,9 +529,7 @@ function ExecutionEnvironment({ attempt }: { attempt?: BenchmarkAttempt }) {
           software.ocabra ? `oCabra ${software.ocabra}` : null,
           software.scorer ? `Scorer ${software.scorer}` : null,
           software.python ? `Python ${software.python}` : null,
-          ...(software.backends ?? []).map((backend) => (
-            `${backend.type} ${backend.installedVersion ?? "versión no informada"}`
-          )),
+          ...(software.backends ?? []).map(backendVersionLabel),
           benchmark.commit ? `Dataset ${benchmark.commit.slice(0, 12)}` : null,
         ]} />
         <EnvironmentBlock icon={<Cpu size={13} />} title="Modelo" lines={[

@@ -130,13 +130,16 @@ def execution_observations(rows, gpu_states: dict[int, object]) -> dict[str, obj
 
 
 def backend_version_observations(
-    backend_types: list[str], nodes: list[str], installer
+    backend_types: list[str],
+    nodes: list[str],
+    installer,
+    source_commits: dict[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """Describe installed backend artifacts without failing on remote/unknown modules."""
     modules: list[dict[str, object]] = []
     for backend_type in backend_types:
         state = None
-        if installer is not None:
+        if installer is not None and nodes == ["local"]:
             with suppress(KeyError):
                 state = installer.get_state(backend_type)
         modules.append(
@@ -145,6 +148,10 @@ def backend_version_observations(
                 "installedVersion": getattr(state, "installed_version", None),
                 "packages": dict(getattr(state, "packages", {}) or {}),
                 "ociDigest": getattr(state, "oci_digest", None),
+                "gitRef": getattr(state, "git_ref", None),
+                "sourceCommit": (
+                    (source_commits or {}).get(backend_type) if nodes == ["local"] else None
+                ),
                 "node": "local" if nodes == ["local"] else None,
             }
         )
@@ -846,8 +853,18 @@ class BenchmarkManager:
         hardware_observations = observed["hardware"]
         assert isinstance(model_observations, dict)
         assert isinstance(hardware_observations, dict)
+        source_commits: dict[str, str] = {}
+        if hardware_observations["nodes"] == ["local"]:
+            for backend_type in model_observations["backends"]:
+                source = Path(settings.backends_dir) / backend_type / "src"
+                commit = await self._git_value(source, "rev-parse", "HEAD")
+                if commit:
+                    source_commits[backend_type] = commit
         software["backends"] = backend_version_observations(
-            model_observations["backends"], hardware_observations["nodes"], installer
+            model_observations["backends"],
+            hardware_observations["nodes"],
+            installer,
+            source_commits,
         )
         benchmark = environment.get("benchmark")
         if isinstance(benchmark, dict) and benchmark.get("app") == "bfcl":

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { ModelProfile, ProfileCategory } from "@/types"
-import { benchmarkModelGroups } from "@/pages/Benchmarks"
+import { backendVersionLabel, benchmarkModelGroups } from "@/pages/Benchmarks"
 
 function profile(
   profileId: string,
@@ -51,5 +51,18 @@ describe("benchmark model groups", () => {
     expect(benchmarkModelGroups(profiles, "ifeval", "quick").map((group) => group.key)).toEqual(["chat"])
     expect(benchmarkModelGroups(profiles, "escriba", "stt").map((group) => group.key)).toEqual(["whisper"])
     expect(benchmarkModelGroups(profiles, "escriba", "embeddings").map((group) => group.key).sort()).toEqual(["embed", "rerank"])
+  })
+
+  it("shows the exact source revision when a native backend has no package version", () => {
+    expect(backendVersionLabel({
+      type: "llamacpp_mks",
+      installedVersion: null,
+      sourceCommit: "96fff6c0123456789abcdef",
+    })).toBe("llamacpp_mks 96fff6c01234")
+    expect(backendVersionLabel({
+      type: "vllm",
+      installedVersion: "0.12.0",
+      sourceCommit: "ignored",
+    })).toBe("vllm 0.12.0")
   })
 })

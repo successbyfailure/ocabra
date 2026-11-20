@@ -107,8 +107,12 @@ describe("benchmark result adapters", () => {
       attempts: [{
         id: "attempt-1", model: "qwen", attemptNumber: 1, status: "completed",
         environment: {
-          software: { ocabra: "0.124.0", scorer: "4.0.0" },
           model: { profile: "qwen", backends: ["llamacpp_mks"] },
+          software: {
+            ocabra: "0.124.0",
+            scorer: "4.0.0",
+            backends: [{ type: "llamacpp_mks", sourceCommit: "96fff6c0123456789" }],
+          },
           hardware: { gpus: [{ index: 0, name: "RTX 3090", totalVramMb: 24576 }] },
         },
         returnCode: 0, externalRequests: [], error: null,
@@ -122,7 +126,11 @@ describe("benchmark result adapters", () => {
     expect(exported.schemaVersion).toBe(1)
     expect(exported.results).toEqual(run.result)
     expect(exported.attempts[0].environment).toMatchObject({
-      software: { ocabra: "0.124.0", scorer: "4.0.0" },
+      software: {
+        ocabra: "0.124.0",
+        scorer: "4.0.0",
+        backends: [{ type: "llamacpp_mks", sourceCommit: "96fff6c0123456789" }],
+      },
       model: { backends: ["llamacpp_mks"] },
       hardware: { gpus: [{ index: 0, name: "RTX 3090" }] },
     })
