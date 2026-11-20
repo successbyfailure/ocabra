@@ -8,9 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import sqlalchemy as sa
 from pydantic import ValidationError
 
-from ocabra.api.internal.benchmarks import BenchmarkRunCreate, _run_payload
+from ocabra.api.internal.benchmarks import BenchmarkRunCreate, BenchmarkScheduleCreate, _run_payload
 from ocabra.benchmarks.catalog import APPS, catalog_payload
 from ocabra.benchmarks.manager import (
     BenchmarkIdentity,
@@ -19,9 +20,10 @@ from ocabra.benchmarks.manager import (
     execution_observations,
     external_active_requests,
     git_authorization_header,
+    next_schedule_occurrence,
 )
 from ocabra.database import AsyncSessionLocal
-from ocabra.db.benchmarks import BenchmarkAttempt, BenchmarkRun
+from ocabra.db.benchmarks import BenchmarkAttempt, BenchmarkRun, BenchmarkSchedule
 
 
 def test_github_token_uses_basic_header_for_git_https() -> None:
@@ -120,6 +122,40 @@ def test_run_create_rejects_duplicate_models_and_managed_arguments() -> None:
         )
 
 
+def test_schedule_validates_clock_days_and_timezone() -> None:
+    valid = BenchmarkScheduleCreate(
+        name="Nocturno",
+        app="ifeval",
+        suite="quick",
+        models=["model"],
+        weekdays=[4, 0, 4],
+        time_of_day="2:05",
+        timezone="Europe/Madrid",
+    )
+    assert valid.weekdays == [0, 4]
+    assert valid.time_of_day == "02:05"
+    for values in (
+        {"weekdays": [7]},
+        {"time_of_day": "25:00"},
+        {"timezone": "Mars/Olympus"},
+    ):
+        with pytest.raises(ValidationError):
+            BenchmarkScheduleCreate(
+                name="Inválido", app="ifeval", suite="quick", models=["model"], **values
+            )
+
+
+def test_next_schedule_occurrence_respects_weekday_and_timezone() -> None:
+    # Friday 20 November 2026 at 01:30 UTC = 02:30 in Madrid.
+    after = datetime(2026, 11, 20, 1, 30, tzinfo=UTC)
+    assert next_schedule_occurrence([4], "03:00", "Europe/Madrid", after) == datetime(
+        2026, 11, 20, 2, 0, tzinfo=UTC
+    )
+    assert next_schedule_occurrence([0], "02:00", "Europe/Madrid", after) == datetime(
+        2026, 11, 23, 1, 0, tzinfo=UTC
+    )
+
+
 def test_changed_result_requires_new_or_modified_file(tmp_path: Path) -> None:
     result_dir = tmp_path / "results_today"
     result_dir.mkdir()
@@ -200,15 +236,17 @@ def test_backend_versions_include_installed_artifact_and_mark_remote_unknown() -
         ["local"],
         installer,
         {"llamacpp_mks": "96fff6c0123456789"},
-    ) == [{
-        "type": "llamacpp_mks",
-        "installedVersion": "0.9.2",
-        "packages": {"llama-cpp-python": "0.3.16"},
-        "ociDigest": "sha256:abc",
-        "gitRef": None,
-        "sourceCommit": "96fff6c0123456789",
-        "node": "local",
-    }]
+    ) == [
+        {
+            "type": "llamacpp_mks",
+            "installedVersion": "0.9.2",
+            "packages": {"llama-cpp-python": "0.3.16"},
+            "ociDigest": "sha256:abc",
+            "gitRef": None,
+            "sourceCommit": "96fff6c0123456789",
+            "node": "local",
+        }
+    ]
     remote = backend_version_observations(
         ["llamacpp_mks"], ["mapache"], installer, {"llamacpp_mks": "local-only"}
     )[0]
@@ -224,21 +262,47 @@ def test_run_payload_exposes_phase_and_reproducible_attempt_environment() -> Non
         "hardware": {"gpus": [{"index": 1, "name": "RTX 3090"}]},
     }
     attempt = SimpleNamespace(
-        id=uuid.uuid4(), model="model", attempt_number=1, status="completed",
-        environment=environment, return_code=0, external_requests=[], error=None,
-        started_at=now, finished_at=now, result={"score": 1},
+        id=uuid.uuid4(),
+        model="model",
+        attempt_number=1,
+        status="completed",
+        environment=environment,
+        return_code=0,
+        external_requests=[],
+        error=None,
+        started_at=now,
+        finished_at=now,
+        result={"score": 1},
     )
     run = SimpleNamespace(
-        id=uuid.uuid4(), app="ifeval", suite="quick", revision="abc", models=["model"],
-        suite_args=[], status="completed", phase="completed", auto_pause=True,
-        pause_reason=None, current_model_index=1, current_model=None, result={"model": {}},
-        contaminated_attempts=0, error=None, external_activity_at=None, created_at=now,
-        started_at=now, finished_at=now, attempts=[attempt],
+        id=uuid.uuid4(),
+        app="ifeval",
+        suite="quick",
+        revision="abc",
+        models=["model"],
+        suite_args=[],
+        status="completed",
+        phase="completed",
+        auto_pause=True,
+        schedule_id=None,
+        is_baseline=True,
+        pause_reason=None,
+        current_model_index=1,
+        current_model=None,
+        result={"model": {}},
+        contaminated_attempts=0,
+        error=None,
+        external_activity_at=None,
+        created_at=now,
+        started_at=now,
+        finished_at=now,
+        attempts=[attempt],
     )
 
     payload = _run_payload(run)
 
     assert payload["phase"] == "completed"
+    assert payload["isBaseline"] is True
     assert payload["attempts"][0]["environment"] == environment
 
 
@@ -266,18 +330,20 @@ async def test_retry_keeps_completed_models_and_reuses_failed_checkpoint(tmp_pat
     async with AsyncSessionLocal() as session:
         session.add(run)
         await session.flush()
-        session.add(BenchmarkAttempt(
-            run_id=run.id,
-            model="failed",
-            attempt_number=1,
-            status="failed",
-            workspace_path=str(workspace),
-            log_path=str(workspace / "runner.log"),
-            environment={"software": {"ocabra": "0.124.0"}},
-            error="runner failed",
-            started_at=now,
-            finished_at=now,
-        ))
+        session.add(
+            BenchmarkAttempt(
+                run_id=run.id,
+                model="failed",
+                attempt_number=1,
+                status="failed",
+                workspace_path=str(workspace),
+                log_path=str(workspace / "runner.log"),
+                environment={"software": {"ocabra": "0.124.0"}},
+                error="runner failed",
+                started_at=now,
+                finished_at=now,
+            )
+        )
         await session.commit()
 
     manager = BenchmarkManager(SimpleNamespace(state=SimpleNamespace()))
@@ -296,6 +362,94 @@ async def test_retry_keeps_completed_models_and_reuses_failed_checkpoint(tmp_pat
         persisted = await session.get(BenchmarkRun, run.id)
         assert persisted is not None
         await session.delete(persisted)
+        await session.commit()
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_due_schedule_queues_once_and_advances_next_occurrence(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    schedule = BenchmarkSchedule(
+        name="Nocturno",
+        app="ifeval",
+        suite="quick",
+        revision="abc",
+        models=["model"],
+        suite_args=[],
+        auto_pause=True,
+        enabled=True,
+        weekdays=list(range(7)),
+        time_of_day="00:00",
+        timezone="UTC",
+        next_run_at=now.replace(year=now.year - 1),
+    )
+    async with AsyncSessionLocal() as session:
+        session.add(schedule)
+        await session.commit()
+
+    manager = BenchmarkManager(SimpleNamespace(state=SimpleNamespace()))
+    await manager._enqueue_due_schedules()
+    await manager._enqueue_due_schedules()
+    with pytest.raises(ValueError, match="ejecución activa"):
+        await manager.request_schedule_run(schedule.id)
+
+    async with AsyncSessionLocal() as session:
+        persisted = await session.get(BenchmarkSchedule, schedule.id)
+        assert persisted is not None
+        runs = (
+            (
+                await session.execute(
+                    sa.select(BenchmarkRun).where(BenchmarkRun.schedule_id == schedule.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(runs) == 1
+        assert runs[0].status == "queued"
+        assert runs[0].models == ["model"]
+        assert persisted.last_run_id == runs[0].id
+        assert persisted.next_run_at is not None and persisted.next_run_at > now
+        await session.delete(runs[0])
+        await session.delete(persisted)
+        await session.commit()
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_baseline_is_unique_per_application_suite(tmp_path: Path) -> None:
+    runs = [
+        BenchmarkRun(
+            app="ifeval",
+            suite="quick",
+            revision="abc",
+            models=[f"model-{index}"],
+            suite_args=[],
+            status="completed",
+            phase="completed",
+            current_model_index=1,
+            workspace_path=str(tmp_path / str(index)),
+            result={},
+            finished_at=datetime.now(UTC),
+            is_baseline=index == 0,
+        )
+        for index in range(2)
+    ]
+    async with AsyncSessionLocal() as session:
+        session.add_all(runs)
+        await session.commit()
+
+    manager = BenchmarkManager(SimpleNamespace(state=SimpleNamespace()))
+    selected = await manager.request_baseline(runs[1].id)
+    assert selected.is_baseline is True
+
+    async with AsyncSessionLocal() as session:
+        first = await session.get(BenchmarkRun, runs[0].id)
+        second = await session.get(BenchmarkRun, runs[1].id)
+        assert first is not None and first.is_baseline is False
+        assert second is not None and second.is_baseline is True
+        await session.delete(first)
+        await session.delete(second)
         await session.commit()
 
 

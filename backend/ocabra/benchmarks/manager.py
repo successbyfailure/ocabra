@@ -21,9 +21,10 @@ import sys
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import TextIO
+from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 import structlog
@@ -34,7 +35,7 @@ from ocabra.benchmarks.catalog import APPS, AppSpec, SuiteSpec
 from ocabra.config import APP_VERSION, settings
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.auth import ApiKey, User, UserRole
-from ocabra.db.benchmarks import BenchmarkAttempt, BenchmarkRun
+from ocabra.db.benchmarks import BenchmarkAttempt, BenchmarkRun, BenchmarkSchedule
 from ocabra.db.stats import RequestStat
 
 logger = structlog.get_logger(__name__)
@@ -43,6 +44,42 @@ _SERVICE_USERNAME = "__ocabra_benchmark__"
 _SERVICE_KEY_NAME = "ocabra-benchmark"
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def next_schedule_occurrence(
+    weekdays: list[int], time_of_day: str, timezone: str, after: datetime
+) -> datetime:
+    """Return the first configured weekly occurrence strictly after ``after``."""
+    zone = ZoneInfo(timezone)
+    hour, minute = (int(part) for part in time_of_day.split(":"))
+    local_after = after.astimezone(zone)
+    for offset in range(8):
+        candidate_date: date = local_after.date() + timedelta(days=offset)
+        if candidate_date.weekday() not in weekdays:
+            continue
+        candidate = datetime.combine(candidate_date, time(hour, minute), tzinfo=zone)
+        if candidate > local_after:
+            return candidate.astimezone(UTC)
+    raise ValueError("No se pudo calcular la próxima ejecución")
+
+
+def run_from_schedule(schedule: BenchmarkSchedule, *, now: datetime | None = None) -> BenchmarkRun:
+    """Create a queued run snapshot; later edits to the plan cannot mutate it."""
+    run_id = uuid.uuid4()
+    return BenchmarkRun(
+        id=run_id,
+        app=schedule.app,
+        suite=schedule.suite,
+        revision=schedule.revision,
+        models=list(schedule.models),
+        suite_args=list(schedule.suite_args),
+        auto_pause=schedule.auto_pause,
+        phase="queued",
+        schedule_id=schedule.id,
+        workspace_path=str(Path(settings.benchmark_dir).resolve() / "runs" / str(run_id)),
+        created_by=schedule.created_by,
+        created_at=now or datetime.now(UTC),
+    )
 
 
 def git_authorization_header(token: str) -> str:
@@ -109,9 +146,7 @@ def execution_observations(rows, gpu_states: dict[int, object]) -> dict[str, obj
     return {
         "model": {
             "backends": sorted({row.backend_type for row in rows if row.backend_type}),
-            "runtimePresets": sorted(
-                {row.runtime_preset for row in rows if row.runtime_preset}
-            ),
+            "runtimePresets": sorted({row.runtime_preset for row in rows if row.runtime_preset}),
             "effectiveContexts": sorted(
                 {row.effective_context for row in rows if row.effective_context}
             ),
@@ -258,9 +293,56 @@ class BenchmarkManager:
         self.notify()
         return run
 
+    async def request_schedule_run(self, schedule_id: uuid.UUID) -> BenchmarkRun:
+        """Queue a plan now unless its previous run is still active."""
+        async with AsyncSessionLocal() as session:
+            schedule = await session.scalar(
+                select(BenchmarkSchedule)
+                .where(BenchmarkSchedule.id == schedule_id)
+                .with_for_update()
+            )
+            if schedule is None:
+                raise LookupError("Plan de benchmark no encontrado")
+            active = await session.scalar(
+                select(BenchmarkRun.id)
+                .where(
+                    BenchmarkRun.schedule_id == schedule_id,
+                    BenchmarkRun.status.not_in(_TERMINAL),
+                )
+                .limit(1)
+            )
+            if active is not None:
+                raise ValueError("Este plan ya tiene una ejecución activa")
+            now = datetime.now(UTC)
+            run = run_from_schedule(schedule, now=now)
+            session.add(run)
+            schedule.last_run_at = now
+            schedule.last_run_id = run.id
+            await session.commit()
+            await session.refresh(run)
+        self.notify()
+        return run
+
+    async def request_baseline(self, run_id: uuid.UUID) -> BenchmarkRun:
+        """Make one completed run the unique reference for its application suite."""
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            if run.status != "completed":
+                raise ValueError("Solo una ejecución completada puede ser referencia")
+            await session.execute(
+                sa.update(BenchmarkRun)
+                .where(BenchmarkRun.app == run.app, BenchmarkRun.suite == run.suite)
+                .values(is_baseline=False)
+            )
+            run.is_baseline = True
+            await session.commit()
+            await session.refresh(run)
+            return run
+
     async def _worker_loop(self) -> None:
         while not self._stop.is_set():
             try:
+                await self._enqueue_due_schedules()
                 await self._resume_after_quiet_period()
                 run_id = await self._next_queued_run()
                 if run_id is not None:
@@ -277,6 +359,49 @@ class BenchmarkManager:
             except TimeoutError:
                 pass
             self._wake.clear()
+
+    async def _enqueue_due_schedules(self) -> None:
+        """Materialize due plans once and advance their clock atomically."""
+        now = datetime.now(UTC)
+        queued = False
+        async with AsyncSessionLocal() as session:
+            schedules = (
+                (
+                    await session.execute(
+                        select(BenchmarkSchedule)
+                        .where(
+                            BenchmarkSchedule.enabled.is_(True),
+                            BenchmarkSchedule.next_run_at.is_not(None),
+                            BenchmarkSchedule.next_run_at <= now,
+                        )
+                        .with_for_update(skip_locked=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for schedule in schedules:
+                schedule.next_run_at = next_schedule_occurrence(
+                    list(schedule.weekdays), schedule.time_of_day, schedule.timezone, now
+                )
+                active = await session.scalar(
+                    select(BenchmarkRun.id)
+                    .where(
+                        BenchmarkRun.schedule_id == schedule.id,
+                        BenchmarkRun.status.not_in(_TERMINAL),
+                    )
+                    .limit(1)
+                )
+                if active is not None:
+                    continue
+                run = run_from_schedule(schedule, now=now)
+                session.add(run)
+                schedule.last_run_at = now
+                schedule.last_run_id = run.id
+                queued = True
+            await session.commit()
+        if queued:
+            self.notify()
 
     async def _next_queued_run(self) -> uuid.UUID | None:
         async with AsyncSessionLocal() as session:
@@ -419,9 +544,7 @@ class BenchmarkManager:
         # write a scheduling turn before checking for fast external requests
         # that may have started and ended between active-request polls.
         await asyncio.sleep(0.1)
-        environment = await self._complete_environment(
-            environment, started_at, finished_at, source
-        )
+        environment = await self._complete_environment(environment, started_at, finished_at, source)
         historical = await self._historical_external_requests(started_at, finished_at)
         external = self._deduplicate_external([*outcome.external_requests, *historical])
 
@@ -591,8 +714,14 @@ class BenchmarkManager:
             raise RuntimeError(f"No se pudo clonar {app.repository}; consulta runner.log")
         if app.checkout_paths:
             sparse = await asyncio.create_subprocess_exec(
-                "git", "-C", str(source), "sparse-checkout", "set", *app.checkout_paths,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                "git",
+                "-C",
+                str(source),
+                "sparse-checkout",
+                "set",
+                *app.checkout_paths,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
             )
             output = await sparse.communicate()
             with log_path.open("ab") as log:
@@ -827,14 +956,18 @@ class BenchmarkManager:
         assert self._identity is not None
         async with AsyncSessionLocal() as session:
             rows = (
-                await session.execute(
-                    select(RequestStat).where(
-                        RequestStat.user_id == self._identity.user_id,
-                        RequestStat.started_at >= started_at - timedelta(hours=1),
-                        RequestStat.started_at <= finished_at,
+                (
+                    await session.execute(
+                        select(RequestStat).where(
+                            RequestStat.user_id == self._identity.user_id,
+                            RequestStat.started_at >= started_at - timedelta(hours=1),
+                            RequestStat.started_at <= finished_at,
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         rows = [
             row
             for row in rows
@@ -1187,9 +1320,9 @@ async def load_run(run_id: uuid.UUID) -> BenchmarkRun | None:
 
 
 async def list_runs(limit: int = 100) -> list[BenchmarkRun]:
-    """Load newest runs with attempts for the dashboard."""
+    """Load newest runs plus older baselines, all with attempts."""
     async with AsyncSessionLocal() as session:
-        return list(
+        recent = list(
             (
                 await session.execute(
                     select(BenchmarkRun)
@@ -1199,3 +1332,15 @@ async def list_runs(limit: int = 100) -> list[BenchmarkRun]:
                 )
             ).scalars()
         )
+        known = {run.id for run in recent}
+        baselines = list(
+            (
+                await session.execute(
+                    select(BenchmarkRun)
+                    .options(selectinload(BenchmarkRun.attempts))
+                    .where(BenchmarkRun.is_baseline.is_(True), BenchmarkRun.id.not_in(known))
+                    .order_by(BenchmarkRun.created_at.desc())
+                )
+            ).scalars()
+        )
+        return [*recent, *baselines]

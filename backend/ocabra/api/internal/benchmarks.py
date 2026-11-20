@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.benchmarks.catalog import APPS, catalog_payload
-from ocabra.benchmarks.manager import list_runs, load_run
+from ocabra.benchmarks.manager import list_runs, load_run, next_schedule_occurrence
 from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
-from ocabra.db.benchmarks import BenchmarkRun
+from ocabra.db.benchmarks import BenchmarkRun, BenchmarkSchedule
 
 router = APIRouter(prefix="/benchmarks", tags=["benchmarks"])
 
@@ -76,6 +79,51 @@ class BenchmarkRunCreate(BaseModel):
         return value
 
 
+class BenchmarkScheduleCreate(BenchmarkRunCreate):
+    name: str = Field(min_length=1, max_length=120)
+    enabled: bool = False
+    weekdays: Annotated[list[int], Field(min_length=1, max_length=7)] = Field(
+        default_factory=lambda: [0]
+    )
+    time_of_day: str = "02:00"
+    timezone: str = "Europe/Madrid"
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("El plan necesita un nombre")
+        return value
+
+    @field_validator("weekdays")
+    @classmethod
+    def validate_weekdays(cls, value: list[int]) -> list[int]:
+        if any(day < 0 or day > 6 for day in value):
+            raise ValueError("Los días deben estar entre 0 y 6")
+        return sorted(set(value))
+
+    @field_validator("time_of_day")
+    @classmethod
+    def validate_time(cls, value: str) -> str:
+        try:
+            hour, minute = (int(part) for part in value.split(":"))
+        except (ValueError, TypeError) as exc:
+            raise ValueError("La hora debe tener formato HH:MM") from exc
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ValueError("La hora debe tener formato HH:MM")
+        return f"{hour:02d}:{minute:02d}"
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("Zona horaria desconocida") from exc
+        return value
+
+
 def _attempt_payload(attempt) -> dict[str, object]:
     return {
         "id": str(attempt.id),
@@ -102,6 +150,8 @@ def _run_payload(run: BenchmarkRun, *, include_attempts: bool = True) -> dict[st
         "suiteArgs": run.suite_args,
         "status": run.status,
         "phase": run.phase,
+        "scheduleId": str(run.schedule_id) if run.schedule_id else None,
+        "isBaseline": run.is_baseline,
         "autoPause": run.auto_pause,
         "pauseReason": run.pause_reason,
         "currentModelIndex": run.current_model_index,
@@ -117,6 +167,43 @@ def _run_payload(run: BenchmarkRun, *, include_attempts: bool = True) -> dict[st
         "finishedAt": run.finished_at.isoformat() if run.finished_at else None,
         "attempts": [_attempt_payload(item) for item in run.attempts] if include_attempts else [],
     }
+
+
+def _schedule_payload(schedule: BenchmarkSchedule) -> dict[str, object]:
+    return {
+        "id": str(schedule.id),
+        "name": schedule.name,
+        "app": schedule.app,
+        "suite": schedule.suite,
+        "revision": schedule.revision or APPS[schedule.app].default_revision,
+        "models": schedule.models,
+        "suiteArgs": schedule.suite_args,
+        "autoPause": schedule.auto_pause,
+        "enabled": schedule.enabled,
+        "weekdays": schedule.weekdays,
+        "timeOfDay": schedule.time_of_day,
+        "timezone": schedule.timezone,
+        "nextRunAt": schedule.next_run_at.isoformat() if schedule.next_run_at else None,
+        "lastRunAt": schedule.last_run_at.isoformat() if schedule.last_run_at else None,
+        "lastRunId": str(schedule.last_run_id) if schedule.last_run_id else None,
+        "createdAt": schedule.created_at.isoformat(),
+        "updatedAt": schedule.updated_at.isoformat(),
+    }
+
+
+def _validate_catalog(app_name: str, suite_name: str) -> None:
+    app = APPS.get(app_name)
+    if app is None:
+        raise HTTPException(status_code=400, detail="Aplicación de benchmark desconocida")
+    if suite_name not in app.suites:
+        raise HTTPException(status_code=400, detail="Suite de benchmark desconocida")
+
+
+def _user_uuid(user: UserContext) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(user.user_id))
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def _manager(request: Request):
@@ -152,18 +239,10 @@ async def create_benchmark_run(
     Returns:
         Persisted run state. Models execute sequentially and can be resumed.
     """
-    app = APPS.get(body.app)
-    if app is None:
-        raise HTTPException(status_code=400, detail="Aplicación de benchmark desconocida")
-    if body.suite not in app.suites:
-        raise HTTPException(status_code=400, detail="Suite de benchmark desconocida")
+    _validate_catalog(body.app, body.suite)
     run_id = uuid.uuid4()
     root = Path(settings.benchmark_dir).resolve()  # noqa: ASYNC240 — cálculo local de ruta
     workspace = str(root / "runs" / str(run_id))
-    try:
-        created_by = uuid.UUID(str(user.user_id))
-    except (TypeError, ValueError, AttributeError):
-        created_by = None
     run = BenchmarkRun(
         id=run_id,
         app=body.app,
@@ -174,13 +253,138 @@ async def create_benchmark_run(
         auto_pause=body.auto_pause,
         phase="queued",
         workspace_path=workspace,
-        created_by=created_by,
+        created_by=_user_uuid(user),
     )
     async with AsyncSessionLocal() as session:
         session.add(run)
         await session.commit()
         await session.refresh(run)
     _manager(request).notify()
+    return _run_payload(run, include_attempts=False)
+
+
+@router.get("/schedules", summary="List reusable benchmark plans")
+async def get_benchmark_schedules(
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> list[dict[str, object]]:
+    """Return templates and their next/last scheduled executions."""
+    async with AsyncSessionLocal() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(BenchmarkSchedule).order_by(BenchmarkSchedule.created_at.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return [_schedule_payload(row) for row in rows]
+
+
+@router.post("/schedules", status_code=201, summary="Create a benchmark plan")
+async def create_benchmark_schedule(
+    body: BenchmarkScheduleCreate,
+    request: Request,
+    user: UserContext = Depends(require_role("model_manager")),
+) -> dict[str, object]:
+    """Create a reusable template and optionally enable its weekly schedule."""
+    _validate_catalog(body.app, body.suite)
+    now = datetime.now(UTC)
+    schedule = BenchmarkSchedule(
+        name=body.name,
+        app=body.app,
+        suite=body.suite,
+        revision=body.revision,
+        models=body.models,
+        suite_args=body.suite_args,
+        auto_pause=body.auto_pause,
+        enabled=body.enabled,
+        weekdays=body.weekdays,
+        time_of_day=body.time_of_day,
+        timezone=body.timezone,
+        next_run_at=(
+            next_schedule_occurrence(body.weekdays, body.time_of_day, body.timezone, now)
+            if body.enabled
+            else None
+        ),
+        created_by=_user_uuid(user),
+    )
+    async with AsyncSessionLocal() as session:
+        session.add(schedule)
+        await session.commit()
+        await session.refresh(schedule)
+    _manager(request).notify()
+    return _schedule_payload(schedule)
+
+
+@router.put("/schedules/{schedule_id}", summary="Replace a benchmark plan")
+async def update_benchmark_schedule(
+    schedule_id: uuid.UUID,
+    body: BenchmarkScheduleCreate,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict[str, object]:
+    """Replace a plan definition and recalculate its next occurrence."""
+    _validate_catalog(body.app, body.suite)
+    async with AsyncSessionLocal() as session:
+        schedule = await session.get(BenchmarkSchedule, schedule_id)
+        if schedule is None:
+            raise HTTPException(status_code=404, detail="Plan de benchmark no encontrado")
+        for field in (
+            "name",
+            "app",
+            "suite",
+            "revision",
+            "models",
+            "suite_args",
+            "auto_pause",
+            "enabled",
+            "weekdays",
+            "time_of_day",
+            "timezone",
+        ):
+            setattr(schedule, field, getattr(body, field))
+        schedule.next_run_at = (
+            next_schedule_occurrence(
+                body.weekdays, body.time_of_day, body.timezone, datetime.now(UTC)
+            )
+            if body.enabled
+            else None
+        )
+        await session.commit()
+        await session.refresh(schedule)
+    _manager(request).notify()
+    return _schedule_payload(schedule)
+
+
+@router.delete("/schedules/{schedule_id}", status_code=204, summary="Delete a benchmark plan")
+async def delete_benchmark_schedule(
+    schedule_id: uuid.UUID,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> None:
+    """Delete a plan without deleting its historical runs."""
+    async with AsyncSessionLocal() as session:
+        schedule = await session.get(BenchmarkSchedule, schedule_id)
+        if schedule is None:
+            raise HTTPException(status_code=404, detail="Plan de benchmark no encontrado")
+        await session.delete(schedule)
+        await session.commit()
+
+
+@router.post("/schedules/{schedule_id}/run", status_code=202, summary="Run a benchmark plan now")
+async def run_benchmark_schedule(
+    schedule_id: uuid.UUID,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict[str, object]:
+    """Queue a template immediately, rejecting overlap with its active run."""
+    manager = _manager(request)
+    try:
+        run = await manager.request_schedule_run(schedule_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _run_payload(run, include_attempts=False)
 
 
@@ -251,6 +455,16 @@ async def retry_benchmark_run(
         Requeued run, positioned at the failed model and retaining its checkpoint.
     """
     return await _control_run(run_id, request, "retry")
+
+
+@router.post("/runs/{run_id}/baseline", summary="Set a completed run as suite baseline")
+async def baseline_benchmark_run(
+    run_id: uuid.UUID,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict[str, object]:
+    """Make this run the unique historical reference for its application suite."""
+    return await _control_run(run_id, request, "baseline")
 
 
 @router.post("/runs/{run_id}/pause", summary="Pause a benchmark run")

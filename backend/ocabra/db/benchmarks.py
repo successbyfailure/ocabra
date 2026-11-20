@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -23,6 +23,13 @@ class BenchmarkRun(Base):
     suite_args: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="queued", index=True)
     phase: Mapped[str] = mapped_column(Text, nullable=False, default="queued")
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("benchmark_schedules.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    is_baseline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     auto_pause: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     pause_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_model_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -53,7 +60,16 @@ class BenchmarkRun(Base):
         order_by="BenchmarkAttempt.started_at",
     )
 
-    __table_args__ = (Index("ix_benchmark_runs_created_at", "created_at"),)
+    __table_args__ = (
+        Index("ix_benchmark_runs_created_at", "created_at"),
+        Index(
+            "uq_benchmark_runs_baseline_suite",
+            "app",
+            "suite",
+            unique=True,
+            postgresql_where=text("is_baseline"),
+        ),
+    )
 
 
 class BenchmarkAttempt(Base):
@@ -91,3 +107,40 @@ class BenchmarkAttempt(Base):
             unique=True,
         ),
     )
+
+
+class BenchmarkSchedule(Base):
+    """Reusable benchmark template, optionally enabled on a weekly schedule."""
+
+    __tablename__ = "benchmark_schedules"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    app: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    suite: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[str | None] = mapped_column(Text, nullable=True)
+    models: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    suite_args: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    auto_pause: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    weekdays: Mapped[list[int]] = mapped_column(JSONB, nullable=False, default=list)
+    time_of_day: Mapped[str] = mapped_column(Text, nullable=False, default="02:00")
+    timezone: Mapped[str] = mapped_column(Text, nullable=False, default="Europe/Madrid")
+    next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("benchmark_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (Index("ix_benchmark_schedules_due", "enabled", "next_run_at"),)
