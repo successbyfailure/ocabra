@@ -2479,6 +2479,11 @@ async def _delete_model_files(
     """Delete model files from disk based on backend type."""
     import asyncio
 
+    if backend_type == "comfyui_video":
+        # La carpeta de pesos de vídeo es compartida entre modelos de vídeo y
+        # con el ComfyUI interactivo: borrar uno solo quita su configuración.
+        return None
+
     if backend_type == "piper":
         # Piper voices are registered with explicit absolute file paths
         # (extra_config.piper.onnx_path / config_path) rather than a

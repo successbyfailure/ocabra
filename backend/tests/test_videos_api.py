@@ -448,3 +448,48 @@ async def test_un_trabajo_registra_cola_carga_y_generacion_por_separado():
     assert recorded["started_at"] == pending.submitted_wall
     meta = recorded["work_size_meta"]
     assert meta["input_frames"] == 121 and meta["generation_fps"] > 0
+
+
+# ── Nombre del modelo de vídeo independiente de la carpeta ─────────────
+
+
+@pytest.mark.asyncio
+async def test_el_alta_de_video_se_llama_como_el_modelo_y_guarda_la_carpeta(tmp_path):
+    from ocabra.api.internal import registry as reg
+
+    (tmp_path / "video" / "diffusion_models").mkdir(parents=True)
+    added = {}
+
+    async def _add_model(**kwargs):
+        added.update(kwargs)
+        return SimpleNamespace(model_id=kwargs["model_id"], to_dict=lambda: {"ok": True})
+
+    mm = MagicMock(get_state=AsyncMock(return_value=None), add_model=_add_model)
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(model_manager=mm, profile_registry=None))
+    )
+    body = reg.RegisterLocalModelRequest(
+        model_ref="ltx-2.5", path=str(tmp_path / "video"), backend_type="comfyui_video"
+    )
+    with (
+        patch.object(reg.settings, "models_dir", str(tmp_path)),
+        patch.object(reg.settings, "ollama_shared_models_dir", ""),
+    ):
+        await reg.register_local_model(body, request, _user=None)
+
+    assert added["model_id"] == "comfyui_video/ltx-2.5"
+    assert added["extra_config"]["comfyui_video"]["model_dir"] == "video"
+
+
+@pytest.mark.asyncio
+async def test_borrar_un_modelo_de_video_no_toca_la_carpeta_compartida(tmp_path):
+    from ocabra.api.internal import models as models_api
+
+    folder = tmp_path / "video"
+    (folder / "diffusion_models").mkdir(parents=True)
+    with patch.object(models_api.settings, "models_dir", str(tmp_path)):
+        deleted = await models_api._delete_model_files(
+            "comfyui_video/video", "comfyui_video", {"comfyui_video": {"model_dir": "video"}}
+        )
+    assert deleted is None
+    assert (folder / "diffusion_models").is_dir()

@@ -419,7 +419,12 @@ async def register_local_model(
     is_dir = await asyncio.to_thread(resolved.is_dir)
     if not is_dir and not await asyncio.to_thread(resolved.is_file):
         raise HTTPException(status_code=404, detail=f"No such file or folder: '{path}'")
-    if is_dir:
+    # El vídeo lee su carpeta de ``comfyui_video.model_dir``, no del nombre:
+    # la de pesos es compartida (y la monta también el ComfyUI interactivo),
+    # así que el modelo puede llamarse como el modelo (``ltx-2.5``) y no como
+    # la carpeta (``video``).
+    pins_folder = is_dir and body.backend_type == "comfyui_video"
+    if is_dir and not pins_folder:
         models_root = await asyncio.to_thread(Path(settings.models_dir).resolve)
         error = await asyncio.to_thread(
             _directory_model_ref_error, body.backend_type, body.model_ref, resolved, models_root
@@ -437,7 +442,14 @@ async def register_local_model(
     # directory/stem heuristics that cannot find an Ollama blob (its filename
     # is a sha256 digest, unrelated to the model name).
     extra_config: dict = {}
-    if is_dir:
+    if pins_folder:
+        models_root = await asyncio.to_thread(Path(settings.models_dir).resolve)
+        if not resolved.is_relative_to(models_root):
+            raise HTTPException(
+                status_code=400, detail=f"A video model folder must live under {models_root}"
+            )
+        extra_config = {"comfyui_video": {"model_dir": str(resolved.relative_to(models_root))}}
+    elif is_dir:
         # Folder backends resolve the folder from model_ref (checked above)
         # and none reads a pinned path.
         pass

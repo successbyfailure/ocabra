@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.127.1 — 2026-11-20
+
+### Corregido
+
+- **El modelo de vídeo se llama `ltx-2.5` en todas partes.** Su id canónico
+  era `comfyui_video/video` (el nombre de la carpeta de pesos) y en
+  estadísticas y en `/v1/models` salía como «video». Ahora es
+  `comfyui_video/ltx-2.5`. **Acción:** solo si usabas el id canónico; el
+  nombre `ltx-2.5` sigue funcionando igual.
+
+---
+
 ## 0.127.0 — 2026-11-20
 
 ### Nuevo
