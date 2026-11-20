@@ -6,7 +6,8 @@ de LTX-2.5 (21,5 GB el DiT + 15,4 GB el codificador de texto) solo los cargan
 los kernels de ComfyUI (``comfy-kitchen``). El camino de PyTorch exige los
 bf16 (68 GB) y convertirlos a fp8 al vuelo, que en una 3090 no acelera nada.
 Medido en una RTX 3090 con este mismo workflow: 1280x704, 5 s con audio en
-46 s en caliente y 89 s la primera vez (carga de pesos incluida).
+~65 s en caliente con un prompt nuevo (46 s si se repite: ComfyUI reutiliza
+la codificación del texto) y ~85 s la primera vez, con la carga de pesos.
 
 El worker arranca su propio ComfyUI en un puerto local, le manda el workflow
 en formato API con los parámetros de la petición y devuelve el MP4. No guarda

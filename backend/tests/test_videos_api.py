@@ -94,7 +94,7 @@ def test_el_backend_solo_acepta_nombres_de_workflow_del_directorio():
 # ── POST /v1/videos ────────────────────────────────────────────────────
 
 
-def _app(*, capable=True, profile=True):
+def _app(*, capable=True, profile=True, backend_type="comfyui_video"):
     from ocabra.api.openai import router
 
     app = FastAPI()
@@ -113,7 +113,13 @@ def _app(*, capable=True, profile=True):
     )
     manager = MagicMock()
     manager.get_state = AsyncMock(
-        return_value=SimpleNamespace(capabilities=SimpleNamespace(video_generation=capable))
+        return_value=SimpleNamespace(
+            capabilities=SimpleNamespace(video_generation=capable),
+            backend_type=backend_type,
+            backend_model_id="video",
+            model_id="comfyui_video/video",
+            extra_config={},
+        )
     )
     jobs = MagicMock()
     jobs.submit = AsyncMock()
@@ -185,8 +191,16 @@ def test_rechaza_parametros_invalidos(body, param):
     jobs.submit.assert_not_awaited()
 
 
-def test_un_modelo_que_no_genera_video_da_400():
+def test_un_modelo_de_video_sin_cargar_se_acepta():
+    # Sin cargar, sus capacidades están vacías: vale lo que declara el backend.
     app, jobs = _app(capable=False)
+    resp, _ = _post(app, {"model": "ltx-2.5", "prompt": "x"})
+    assert resp.status_code == 200, resp.text
+    jobs.submit.assert_awaited_once()
+
+
+def test_un_modelo_que_no_genera_video_da_400():
+    app, jobs = _app(capable=False, backend_type="llamacpp_mks")
     resp, _ = _post(app, {"model": "ltx-2.5", "prompt": "x"})
     assert resp.status_code == 400
     assert resp.json()["detail"]["error"]["code"] == "model_not_capable"

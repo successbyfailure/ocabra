@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.125.2 — 2026-11-20
+
+### Corregido
+
+- **`POST /v1/videos` con el modelo de vídeo sin cargar.** Respondía 400
+  `model_not_capable` porque un modelo que nunca se ha cargado no publica aún
+  sus capacidades, y ese es el estado normal del modelo de vídeo (ocupa una
+  GPU entera y solo se carga para generar). Ahora se encola y el modelo se
+  carga cuando le llega el turno.
+
+---
+
 ## 0.125.0 — 2026-11-20
 
 ### Nuevo
@@ -27,7 +39,7 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   `completed` (MP4 H.264 + AAC; `?variant=thumbnail` da un JPEG). También
   `GET /v1/videos` y `DELETE /v1/videos/{id}`. El primer modelo es
   **LTX-2.5** (backend `comfyui_video`): un vídeo de 5 s a 1280x704 tarda
-  unos 45 s con el modelo cargado. Diferencias con OpenAI: `seconds` es
+  ~65 s con el modelo cargado (~85 s si hay que cargarlo). Diferencias con OpenAI: `seconds` es
   cualquier entero de 1 a 10, `size` se redondea a múltiplos de 64
   (`1280x720` sale `1280x704`), y `seed`/`negative_prompt` son extensiones.
   Se genera un vídeo a la vez por nodo y el fichero se borra a las 24 h. No

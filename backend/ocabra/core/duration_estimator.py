@@ -85,7 +85,7 @@ FAMILY_DEFAULT_S: dict[str, dict[str, float]] = {
     "acestep":      {"p50": 240.0, "p95": 900.0},
     "upscaler":     {"p50":  5.0, "p95":  30.0},
     "flashvsr":     {"p50": 300.0, "p95": 2700.0},
-    # LTX-2.5 en una 3090: 46 s (720p, 5 s) en caliente, ~90 s en frío.
+    # LTX-2.5 en una 3090: ~65 s (720p, 5 s) en caliente, ~85 s en frío.
     "comfyui_video": {"p50": 60.0, "p95": 240.0},
     # Realtime sessions are intentionally not here — they're not estimable
     # and consumers must go through SessionRegistry instead.

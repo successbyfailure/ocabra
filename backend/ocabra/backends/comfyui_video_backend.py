@@ -9,7 +9,7 @@ ver con el servicio interactivo ``comfyui``.
 Se usa ComfyUI y no ``ltx-pipelines``/Diffusers porque los pesos int8
 «convrot» (37 GB entre DiT y codificador) solo los entiende ComfyUI; el camino
 de PyTorch necesita los bf16 (68 GB). Medido en una RTX 3090: 1280x704 y 5 s
-con audio en 46 s en caliente.
+con audio en ~65 s en caliente y ~85 s en frío.
 
 ``extra_config.comfyui_video``:
   model_dir   carpeta relativa a MODELS_DIR (por defecto ``video``)

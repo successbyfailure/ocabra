@@ -37,6 +37,7 @@ from ocabra.api.openai._deps import (
     get_profile_registry,
 )
 from ocabra.config import settings
+from ocabra.core.model_manager import declared_capabilities
 from ocabra.core.video_jobs import PendingVideo, normalize_size
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.videos import VideoJob
@@ -211,7 +212,12 @@ async def create_video(
             code="model_not_found",
             status_code=404,
         )
-    if state is not None and not getattr(state.capabilities, "video_generation", False):
+    # Las capacidades de un modelo sin cargar están vacías: las que declara
+    # su backend sirven para validar antes de la primera carga.
+    if state is not None and not (
+        getattr(state.capabilities, "video_generation", False)
+        or declared_capabilities(state).video_generation
+    ):
         raise _openai_error(
             f"The model '{model}' does not generate video.",
             "invalid_request_error",

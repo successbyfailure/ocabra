@@ -1171,7 +1171,7 @@ modelo en `/v1/images/generations` y edita con otro en `/v1/images/edits`.
 Diferencias: `seconds` es cualquier entero de 1 a 10; `size` se redondea a
 multiplos de 64 (`1280x720` sale `1280x704`); `seed` y `negative_prompt` son
 extensiones. Se genera un video a la vez en todo el nodo; uno de 5 s a 720p
-tarda ~45 s con el modelo cargado y ~90 s si hay que cargarlo. El fichero se
+tarda ~65 s con el modelo cargado y ~85 s si hay que cargarlo. El fichero se
 borra a las 24 h. No disponible en nodos `zero_data`.
 
 ## Imagen al estilo OpenAI
