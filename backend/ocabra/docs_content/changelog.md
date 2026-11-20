@@ -16,6 +16,32 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.124.0 — 2026-11-20
+
+### Nuevo
+
+- **Benchmarks reproducibles y comparables por backend.** El selector agrupa
+  perfiles por modelo y muestra cada backend como una opción independiente.
+  Cada intento conserva commit de dataset, versiones de oCabra, Python,
+  scorer y módulo de backend, preset/contexto efectivos, nodo y todas las GPU
+  utilizadas. La descarga JSON incluye esa evidencia además de las métricas.
+- **Reintento desde checkpoint.** Una ejecución fallida se puede reanudar en
+  el modelo que falló sin repetir los ya aceptados. La interfaz muestra además
+  la fase exacta de preparación o ejecución y el historial de hardware.
+
+### Arreglos
+
+- **Ningún intento contaminado se acepta como resultado.** Si se desactiva la
+  pausa automática, el mismo modelo se reencola inmediatamente; si está
+  activa, espera el periodo sin tráfico. Los fallos inesperados cierran el
+  intento en curso para que también pueda reanudarse con seguridad.
+- **IFEval puede ejecutar el scorer oficial hasta el final.** El adaptador
+  prepara en su caché persistente el recurso `punkt_tab` que NLTK requiere
+  pero el proyecto oficial no descarga. Un intento ya generado reutiliza sus
+  respuestas y solo repite la puntuación.
+
+---
+
 ## 0.123.1 — 2026-11-20
 
 ### Arreglos

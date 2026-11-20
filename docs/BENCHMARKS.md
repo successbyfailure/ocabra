@@ -11,11 +11,13 @@ declarado y conserva su resultado sin recalcular la puntuación.
 
 ## Ejecución desde la UI
 
-La página **Benchmarks** (rol `model_manager`) permite buscar y seleccionar
-perfiles de ejecución, filtrar el historial, repetir una configuración y
+La página **Benchmarks** (rol `model_manager`) agrupa los perfiles por modelo y
+permite seleccionar sus backends como burbujas independientes, filtrar el
+historial, reintentar desde el modelo fallido, repetir una configuración y
 consultar resultados, intentos y logs. Los resultados conocidos de Escriba y
 Corrala se normalizan solo para presentarlos en una tabla comparativa; el JSON
-bruto siempre se conserva y puede descargarse. Un resultado con un esquema
+bruto siempre se conserva y puede descargarse junto con el entorno de cada
+intento. Un resultado con un esquema
 nuevo muestra como alternativa sus métricas escalares, sin ocultar los datos.
 
 La unidad de trabajo es `aplicación + suite + modelo`: los modelos se ejecutan
@@ -38,6 +40,15 @@ identidad se considera tráfico real. Con la pausa automática activa:
 cortas que hayan empezado y acabado entre dos sondeos. Solo un intento sin
 solapes entra en los resultados limpios. Una pausa manual usa el mismo
 checkpoint, pero nunca se reanuda sola.
+
+Cada intento anota el commit exacto del dataset, las versiones de oCabra,
+Python, scorer y módulos de backend disponibles, el perfil/preset/contexto
+efectivos, el nodo y todas las tarjetas que sirvieron las llamadas (modelo y
+VRAM). También conserva número de peticiones, errores y tokens. Si un runner
+falla, **Reintentar modelo** reutiliza su workspace y checkpoint; **Repetir
+todo** crea una ejecución nueva. Un intento contaminado nunca entra en el
+resultado aceptado: con pausa automática espera tráfico cero y sin ella se
+reencola inmediatamente.
 
 Corrala requiere `uv` (incluido en la imagen API) y una PostgreSQL desechable.
 Por defecto oCabra crea `<base principal>_bench`; se puede indicar otra con
@@ -81,6 +92,8 @@ aceptan `--skip-done`; por tanto una pausa continúa por el primer caso pendient
 La primera ejecución crea entornos aislados con `uv` dentro del cache de
 benchmarks. BFCL instala el proyecto oficial completo y ese primer arranque es
 sensiblemente más lento; no modifica el entorno Python de la API.
+IFEval descarga una sola vez `punkt_tab`, requerido por el tokenizer NLTK de
+su scorer oficial, en la misma caché persistente.
 
 ## Ejecutar Escriba
 

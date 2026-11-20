@@ -532,16 +532,29 @@ JSONL de entrada: `{"custom_id", "method": "POST", "url", "body"}`.
 
 Rutas internas (rol `model_manager`) en `api/internal/benchmarks.py`:
 `GET /ocabra/benchmarks/catalog`, `POST/GET /ocabra/benchmarks/runs`, detalle,
-log y acciones `pause|resume|cancel`. Los estados persistidos son
+log y acciones `pause|resume|cancel|retry`. `retry` solo admite ejecuciones
+fallidas y continúa en el modelo actual reutilizando su checkpoint. Los estados persistidos son
 `queued|running|pausing|paused|cancelling|completed|failed|cancelled`.
+`phase` detalla el trabajo dentro del estado (`checkout|preparing|running|finalizing`
+y las fases terminales o de espera) para no presentar una preparación larga como
+si el proceso estuviera bloqueado.
 
 `BenchmarkManager` ejecuta una sola unidad `app + suite + model` a la vez. Usa
 un usuario/API key internos para distinguir sus peticiones en
 `ModelManager.active_requests_snapshot()` y `request_stats`. Tráfico de otra
 identidad termina el subprocess, marca el intento y pausa la ejecución; tras
 `benchmark_quiet_period_s` sin tráfico la reencola. Un intento terminado con
-solape se repite desde un checkout limpio. Un intento interrumpido reutiliza
-su workspace y los argumentos de reanudación del runner.
+solape se repite desde un checkout limpio, incluso si `auto_pause=false` (en
+ese caso se reencola inmediatamente). Un intento interrumpido o fallido
+reutiliza su workspace y los argumentos de reanudación del runner.
+
+Cada `benchmark_attempt` conserva `environment`: versión de oCabra, Python,
+scorer cuando existe, commit real del dataset, revisión solicitada, perfil,
+backend y versión instalada del módulo, preset/contexto efectivos, nodo y
+todas las GPU físicas que atendieron sus peticiones (índice, modelo y VRAM),
+además de recuentos de peticiones, errores y tokens. El JSON descargado desde
+la UI incluye el resultado bruto y esta evidencia reproducible de todos los
+intentos, no solo la puntuación aceptada.
 
 El catálogo combina suites mantenidas por aplicaciones (Escriba y Corrala)
 con benchmarks públicos fijados a revisión (BFCL e IFEval). Estos últimos usan
@@ -964,7 +977,8 @@ opcionales:
   "physical_slots": 4,
   "admission_limit": 2,
   "admission_concurrency": 2,
-  "admission_lease_id": 37
+  "admission_lease_id": 37,
+  "gpu_indices": [0, 1]
 }
 ```
 
@@ -972,7 +986,9 @@ opcionales:
 espera explícita del runtime en los caminos que cargan desde el stream;
 ``ttft_ms`` se mide desde la entrada HTTP hasta el primer token visible.
 ``prefill_ms`` y ``slot_id`` sólo aparecen cuando llama.cpp los entrega en su
-bloque ``timings``. ``GET /ocabra/stats/recent`` expone el objeto sin
+bloque ``timings``. ``gpu_indices`` contiene todas las tarjetas que sirvieron
+la petición (incluidos modelos partidos); `gpu_index` conserva la primera por
+compatibilidad. ``GET /ocabra/stats/recent`` expone el objeto sin
 reinterpretarlo.
 
 Detalles adicionales del gate KV:

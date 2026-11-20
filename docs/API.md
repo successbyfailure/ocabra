@@ -349,6 +349,7 @@ como resultado limpio.
 | GET | `/ocabra/benchmarks/runs` | List benchmark runs | `model_manager` |
 | GET | `/ocabra/benchmarks/runs/{run_id}` | Get one benchmark run | `model_manager` |
 | GET | `/ocabra/benchmarks/runs/{run_id}/log` | Read the current benchmark log | `model_manager` |
+| POST | `/ocabra/benchmarks/runs/{run_id}/retry` | Retry a failed benchmark from its current model | `model_manager` |
 | POST | `/ocabra/benchmarks/runs/{run_id}/pause` | Pause a benchmark run | `model_manager` |
 | POST | `/ocabra/benchmarks/runs/{run_id}/resume` | Resume a benchmark run | `model_manager` |
 | POST | `/ocabra/benchmarks/runs/{run_id}/cancel` | Cancel a benchmark run | `model_manager` |

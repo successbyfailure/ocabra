@@ -221,8 +221,10 @@ Implementado:
   adaptador ejecuta las suites LLM, STT, diarización y embeddings mantenidas por
   Escriba, además del benchmark agéntico de Corrala y las baterías públicas
   BFCL v4 e IFEval fijadas a revisión. La UI permite
-  encolar por modelo, ver resultados, pausar/reanudar y repetir automáticamente
-  intentos contaminados por tráfico interactivo. Uso y contrato en
+  encolar cada backend de un modelo, ver resultados y fases, pausar/reanudar,
+  reintentar fallos desde checkpoint y repetir automáticamente intentos
+  contaminados por tráfico interactivo. Cada intento registra versiones,
+  backend, nodo y todas las GPU usadas. Uso y contrato en
   `docs/BENCHMARKS.md`.
 
 ---
