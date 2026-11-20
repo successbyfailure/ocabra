@@ -28,8 +28,10 @@ function deltaLabel(metric: BenchmarkMetric, baseline: BenchmarkMetric | undefin
   return `${good === true ? "▲" : good === false ? "▼" : "Δ"} ${amount}`
 }
 
-function runFingerprint(run: BenchmarkRun): string {
-  const attempt = [...run.attempts].reverse().find((item) => item.status === "completed")
+export function runFingerprint(run: BenchmarkRun, model: string): string {
+  const attempt = [...run.attempts].reverse().find(
+    (item) => item.status === "completed" && item.model === model,
+  )
   const software = attempt?.environment.software
   const backend = attempt?.environment.model?.backends?.[0]
   const gpu = attempt?.environment.hardware?.gpus?.map((item) => `GPU${item.index}`).join("+")
@@ -85,7 +87,7 @@ export function BenchmarkHistory({ runs }: { runs: BenchmarkRun[] }) {
             const baseline = baselineRows.find((candidate) => candidate.model === row.model && candidate.scope === row.scope)
             const baselineValues = new Map((baseline?.metrics ?? []).map((metric) => [metric.key, metric]))
             return <tr key={`${row.run.id}-${row.model}-${row.scope}-${index}`} className="border-t border-border/60">
-              <td className="px-3 py-2">{row.run.isBaseline && <Star size={11} className="mr-1 inline fill-amber-400 text-amber-400" />}{row.run.id.slice(0, 8)}<span className="block text-[10px] text-muted-foreground">{runFingerprint(row.run)}</span></td><td className="px-3 py-2 font-mono">{row.model}</td><td className="px-3 py-2 text-muted-foreground">{row.scope}</td>
+              <td className="px-3 py-2">{row.run.isBaseline && <Star size={11} className="mr-1 inline fill-amber-400 text-amber-400" />}{row.run.id.slice(0, 8)}<span className="block text-[10px] text-muted-foreground">{runFingerprint(row.run, row.model)}</span></td><td className="px-3 py-2 font-mono">{row.model}</td><td className="px-3 py-2 text-muted-foreground">{row.scope}</td>
               {definitions.map((definition) => { const metric = values.get(definition.key); const delta = metric && !row.run.isBaseline ? deltaLabel(metric, baselineValues.get(definition.key)) : null; return <td key={definition.key} className="px-3 py-2 text-right"><span>{metric ? formatMetric(metric) : "—"}</span>{delta && <span className="ml-1 text-[10px] text-muted-foreground">{delta}</span>}</td> })}
             </tr>
           })}</tbody>
