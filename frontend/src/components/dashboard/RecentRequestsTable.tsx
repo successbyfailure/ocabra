@@ -147,7 +147,13 @@ function Row({ r, error }: { r: RecentRequest; error: boolean }) {
           <TimingBreakdown r={r} />
         </td>
         <td className="px-3 py-2 text-right align-top tabular-nums text-muted-foreground">
-          {r.audioSeconds && r.durationMs ? (
+          {r.videoFps ? (
+            // Vídeo generado: fotogramas por segundo de generación.
+            <span className="block text-fuchsia-300" title="Fotogramas generados por segundo, sin cola ni carga" data-testid="video-speed">
+              {r.videoFps.toFixed(2)} fps
+              {r.videoFrames ? <span className="block text-[10.5px] text-muted-foreground">{r.videoFrames} fotogramas</span> : null}
+            </span>
+          ) : r.audioSeconds && r.durationMs ? (
             // Transcripción: velocidad respecto al tiempo real del audio.
             <span
               className="block text-sky-300"

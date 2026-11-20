@@ -540,3 +540,30 @@ describe("últimas peticiones: velocidad de transcripción", () => {
     expect(cell.textContent).toContain("2:30 de audio")
   })
 })
+
+describe("últimas peticiones: vídeo generado", () => {
+  it("muestra los fps de generación, los fotogramas y el desglose cola/carga/generación", async () => {
+    const { api } = await import("@/api/client")
+    ;(api.stats as unknown as { recent: unknown }).recent = vi.fn().mockResolvedValue({
+      requests: [
+        {
+          id: "v", modelId: "video", backendType: "comfyui_video", requestKind: "video_generation",
+          endpointPath: "/v1/videos", statusCode: 200, startedAt: new Date().toISOString(),
+          durationMs: 95_000, inputTokens: null, outputTokens: null, error: null, userId: null, username: "ana",
+          groupId: null, groupName: null, apiKeyName: null, clientAddr: null, userAgent: null, inFlight: false,
+          generationMs: 60_000, videoFps: 2.02, videoFrames: 121,
+          runtimeTelemetry: { queue_ms: 10_000, load_ms: 25_000 },
+        },
+      ],
+    })
+    const { RecentRequestsTable } = await import("@/components/dashboard/RecentRequestsTable")
+    render(<RecentRequestsTable />)
+    const cell = await screen.findByTestId("video-speed")
+    expect(cell.textContent).toContain("2.02 fps")
+    expect(cell.textContent).toContain("121 fotogramas")
+    const timing = screen.getByTestId("timing-breakdown")
+    expect(timing.title).toContain("cola: 10 s")
+    expect(timing.title).toContain("carga: 25 s")
+    expect(timing.title).toContain("generación: 1m00s")
+  })
+})

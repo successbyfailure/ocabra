@@ -29,6 +29,21 @@ def _audio_seconds(meta: object) -> float | None:
     return None
 
 
+def video_speed(meta: object) -> tuple[float | None, int | None]:
+    """``(fps generados, fotogramas)`` de un vídeo generado, si los hay.
+
+    La velocidad de un vídeo son los fotogramas que produce por segundo de
+    generación (``generation_fps``, sin cola ni carga del modelo).
+    """
+    if not isinstance(meta, dict):
+        return None, None
+    fps = meta.get("generation_fps")
+    frames = meta.get("input_frames")
+    fps_out = round(float(fps), 2) if isinstance(fps, (int, float)) and fps > 0 else None
+    frames_out = int(frames) if isinstance(frames, (int, float)) and frames > 0 else None
+    return fps_out, frames_out
+
+
 # Speed of the requests that are not measured in generated tokens, in the
 # unit of what they do. Each entry: request kinds, unit, how to read the work
 # of one row (from work_size_meta / tokens) and whether the value is work per
@@ -42,6 +57,8 @@ _WORK_SPEEDS: tuple[tuple[tuple[str, ...], str, str, bool], ...] = (
     (("rerank", "score", "classify", "pooling"), "documents_per_s", "n_documents", True),
     (("image_generation",), "s_per_image", "n_images", False),
     (("video_upscale",), "frames_per_s", "input_frames", True),
+    # Vídeo generado: fotogramas producidos por segundo (sin cola ni carga).
+    (("video_generation",), "frames_per_s", "input_frames", True),
     (("image_upscale",), "s_per_image", "n_images", False),
     # Megapíxeles que produce la red por segundo: lo que separa una foto de
     # 1080p (~10 s) de una 4K (~45 s), que s/imagen mezcla.
@@ -937,6 +954,9 @@ def _rendimiento_de_la_peticion(r) -> dict:
         # Duración del audio de una transcripción: con duration_ms da el
         # factor de tiempo real (×N) en el dashboard.
         "audioSeconds": _audio_seconds(getattr(r, "work_size_meta", None)),
+        # Vídeo generado: fotogramas por segundo de generación y fotogramas.
+        "videoFps": video_speed(getattr(r, "work_size_meta", None))[0],
+        "videoFrames": video_speed(getattr(r, "work_size_meta", None))[1],
     }
 
 

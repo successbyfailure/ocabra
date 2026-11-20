@@ -344,3 +344,107 @@ def test_el_backend_da_los_tres_modos_por_defecto():
     assert sorted(paths) == ["flf2v", "i2v", "t2v"]
     with pytest.raises(ValueError):
         ComfyUIVideoBackend.workflow_paths({"workflows": {"v2v": "ltx25_t2v"}})
+
+
+# ── Tiempos y velocidad en las estadísticas ────────────────────────────
+
+
+def test_la_velocidad_de_un_video_son_los_fps_generados():
+    from ocabra.stats.aggregator import video_speed, work_speeds
+
+    row = SimpleNamespace(
+        request_kind="video_generation",
+        error=None,
+        status_code=200,
+        duration_ms=90_000,
+        runtime_telemetry={"queue_ms": 10_000, "load_ms": 20_000},
+        work_size_meta={"input_frames": 121, "generation_fps": 2.017},
+    )
+    speeds = work_speeds([row])
+    fps = next(s for s in speeds if s["unit"] == "frames_per_s")
+    # 121 fotogramas en 60 s: sin la cola ni la carga.
+    assert fps["value"] == round(121 / 60, 2)
+    assert video_speed(row.work_size_meta) == (2.02, 121)
+    assert video_speed({"audio_seconds": 3}) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_un_trabajo_registra_cola_carga_y_generacion_por_separado():
+    import time as _time
+    import uuid as _uuid
+
+    from ocabra.core.request_telemetry import RequestRuntimeTelemetry
+    from ocabra.core.video_jobs import PendingVideo, VideoJobManager
+
+    state = SimpleNamespace(
+        model_id="comfyui_video/video",
+        backend_type="comfyui_video",
+        backend_model_id="video",
+        capabilities=SimpleNamespace(video_generation=True),
+        current_gpu=[1],
+    )
+    backend = MagicMock()
+
+    async def _generate(*_a, **_k):
+        await __import__("asyncio").sleep(0.05)
+        return b"MP4", {"x-ocabra-generation-s": "60"}
+
+    backend.generate_video = _generate
+    backend.get_progress = AsyncMock(return_value=None)
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            model_manager=MagicMock(begin_request=MagicMock(return_value="r1")),
+            worker_pool=MagicMock(get_backend=AsyncMock(return_value=backend)),
+            profile_registry=MagicMock(),
+            router_resolver=None,
+        )
+    )
+
+    class _S:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def execute(self, *_a, **_k):
+            return None
+
+        async def commit(self):
+            return None
+
+    manager = VideoJobManager(app, lambda: _S())
+    request = SimpleNamespace(state=SimpleNamespace())
+    pending = PendingVideo(
+        job_id=_uuid.uuid4(),
+        model="ltx-2.5",
+        params={"prompt": "x", "width": 1280, "height": 704, "seconds": 5, "fps": 24},
+        user=None,
+        request=request,
+    )
+    pending.submitted_at = _time.monotonic() - 3.0  # 3 s en cola
+
+    recorded = {}
+
+    async def _record(req, **kwargs):
+        recorded.update(kwargs, telemetry=req.state.runtime_telemetry)
+
+    with (
+        patch(
+            "ocabra.api.openai._deps.resolve_profile",
+            AsyncMock(return_value=(SimpleNamespace(), state)),
+        ),
+        patch("ocabra.stats.collector.record_direct_request", _record),
+        patch("ocabra.core.video_jobs.videos_dir", lambda: Path(__import__("tempfile").mkdtemp())),
+    ):
+        await manager._run(pending)
+
+    telemetry = recorded["telemetry"]
+    assert isinstance(telemetry, RequestRuntimeTelemetry)
+    assert telemetry.queue_ms >= 3000
+    assert telemetry.load_ms is not None and telemetry.gpu_indices == [1]
+    assert recorded["generation_ms"] is not None
+    assert recorded["duration_ms"] >= 3000  # cuenta desde el POST
+    assert recorded["started_at"] == pending.submitted_wall
+    meta = recorded["work_size_meta"]
+    assert meta["input_frames"] == 121 and meta["generation_fps"] > 0

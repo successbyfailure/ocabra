@@ -1636,6 +1636,7 @@ async def _record_stat(
         # Nunca con IP ni user agent: lo ve cualquier usuario.
         try:
             from ocabra.stats import live_feed
+            from ocabra.stats.aggregator import video_speed
 
             telemetry_now = getattr(request.state, "runtime_telemetry", None)
             live_feed.record_finished(
@@ -1675,6 +1676,9 @@ async def _record_stat(
                         and isinstance(work_size_meta.get("audio_seconds"), (int, float))
                         else None
                     ),
+                    "videoFps": video_speed(work_size_meta)[0],
+                    "videoFrames": video_speed(work_size_meta)[1],
+                    "generationMs": generation_ms,
                 }
             )
         except Exception:  # noqa: BLE001 — el feed nunca rompe el registro
@@ -1861,6 +1865,7 @@ async def record_direct_request(
     status_code: int,
     error_message: str | None = None,
     work_size_meta: dict | None = None,
+    generation_ms: int | None = None,
 ) -> None:
     """Record one request from its endpoint, for paths the middleware skips.
 
@@ -1880,6 +1885,7 @@ async def record_direct_request(
         input_tokens=None,
         output_tokens=None,
         work_size_meta=work_size_meta,
+        generation_ms=generation_ms,
     )
 
 
@@ -1943,5 +1949,3 @@ def _federation_fields(
     elif info.get("reason") and (remote_node_id or info.get("reason") != "local_loaded"):
         route = str(info["reason"])[:64]
     return name, inbound, route
-
-

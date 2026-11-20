@@ -265,6 +265,13 @@ function FinishedRow({ item, models }: { item: FinishedRequest; models: Record<s
           title="Duración del audio y velocidad respecto al tiempo real"
         />
       ) : null}
+      {item.videoFps ? (
+        <Stat
+          label="vídeo"
+          value={`${item.videoFrames ?? "?"} fot. · ${item.videoFps.toFixed(2)} fps`}
+          title="Fotogramas generados y fotogramas por segundo de generación"
+        />
+      ) : null}
       {item.queueMs ? <Stat label="cola" value={fmtDuration(item.queueMs)} /> : null}
       <Stat label="duró" value={fmtDuration(item.durationMs)} />
       <span className="ml-auto text-muted-foreground">hace {Math.round((item.endedAgoMs ?? 0) / 1000)} s</span>

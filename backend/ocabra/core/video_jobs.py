@@ -62,6 +62,7 @@ class PendingVideo:
     user: Any
     request: Any  # Request original: solo para la fila de estadísticas.
     submitted_at: float = field(default_factory=time.monotonic)
+    submitted_wall: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class VideoJobManager:
@@ -154,6 +155,15 @@ class VideoJobManager:
         job_id = pending.job_id
         started_at = datetime.now(UTC)
         started = time.monotonic()
+        # Tiempos como los de cualquier petición: la cola es lo que esperó
+        # detrás de otros vídeos, la carga lo que tardó en tener el modelo
+        # listo (incluida la expulsión de lo que ocupaba la GPU) y la
+        # generación lo que tardó el worker. La duración total cuenta desde el
+        # POST, como la del resto de peticiones.
+        queue_ms = int((started - pending.submitted_at) * 1000)
+        load_ms: int | None = None
+        generation_ms: int | None = None
+        serving_gpus: list[int] = []
         await self._set(job_id, status="in_progress", started_at=started_at, progress=1)
 
         status_code, error_message = 200, None
@@ -168,6 +178,7 @@ class VideoJobManager:
         inflight_id = None
         try:
             # Carga (y expulsa lo necesario) igual que cualquier petición /v1.
+            load_started = time.monotonic()
             profile, state = await resolve_profile(
                 pending.model,
                 model_manager,
@@ -180,16 +191,20 @@ class VideoJobManager:
                 raise _JobError(
                     "model_not_capable", f"'{pending.model}' does not generate video", 400
                 )
+            load_ms = int((time.monotonic() - load_started) * 1000)
             worker_key = state.model_id
+            serving_gpus = list(getattr(state, "current_gpu", None) or [])
             backend = await worker_pool.get_backend(state.backend_type)
             inflight_id = model_manager.begin_request(worker_key, user=pending.user)
             progress_task = asyncio.create_task(
                 self._follow_progress(job_id, backend, state.backend_model_id)
             )
+            generation_started = time.monotonic()
             try:
                 body, stats = await backend.generate_video(
                     state.backend_model_id, {**pending.params, "job_id": job_id.hex}
                 )
+                generation_ms = int((time.monotonic() - generation_started) * 1000)
             finally:
                 progress_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -211,7 +226,16 @@ class VideoJobManager:
                 seed=seed,
                 stats=clean,
             )
-            work.update({"output_bytes": len(body), "generation_s": clean.get("generation-s")})
+            work.update(
+                {
+                    "output_bytes": len(body),
+                    "generation_s": clean.get("generation-s"),
+                    # Velocidad: fotogramas generados por segundo de generación.
+                    "generation_fps": round(work["input_frames"] / (generation_ms / 1000), 3)
+                    if generation_ms
+                    else None,
+                }
+            )
             logger.info("video_job_completed", job_id=str(job_id), model=pending.model, **clean)
         except _JobError as exc:
             status_code, error_message = exc.status, exc.message
@@ -240,11 +264,20 @@ class VideoJobManager:
                 model_manager.end_request(worker_key, inflight_id)
             if pending.request is not None:
                 with contextlib.suppress(Exception):
+                    from ocabra.core.request_telemetry import RequestRuntimeTelemetry
+
+                    pending.request.state.runtime_telemetry = RequestRuntimeTelemetry(
+                        started_monotonic=pending.submitted_at,
+                        queue_ms=queue_ms,
+                        load_ms=load_ms,
+                        gpu_indices=serving_gpus or None,
+                    )
                     await record_direct_request(
                         pending.request,
                         model_id=pending.model,
-                        started_at=started_at,
-                        duration_ms=(time.monotonic() - started) * 1000,
+                        started_at=pending.submitted_wall,
+                        duration_ms=(time.monotonic() - pending.submitted_at) * 1000,
+                        generation_ms=generation_ms,
                         endpoint_path="/v1/videos",
                         request_kind="video_generation",
                         status_code=status_code,

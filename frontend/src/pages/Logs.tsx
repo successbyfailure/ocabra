@@ -105,6 +105,11 @@ function ExpandedRow({ request, isManager }: { request: RecentRequest; isManager
                 prefill {prefillSpeedText(r, fmtTps) ?? "—"} · generación {fmtTps(r.predictedTokensPerSecond)}
               </Field>
             )}
+            {r.videoFps ? (
+              <Field label="Vídeo">
+                {r.videoFrames ?? "?"} fotogramas a {r.videoFps.toFixed(2)} fps
+              </Field>
+            ) : null}
             {r.audioSeconds && r.durationMs ? (
               <Field label="Audio">
                 {fmtClock(r.audioSeconds)} transcritos a {fmtRealtime(r.audioSeconds / (r.durationMs / 1000))} tiempo real

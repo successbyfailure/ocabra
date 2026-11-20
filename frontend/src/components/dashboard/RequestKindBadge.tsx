@@ -1,4 +1,4 @@
-import { AudioLines, Binary, Bot, Film, Image as ImageIcon, Maximize2, MessageSquare, Radio, Volume2 } from "lucide-react"
+import { AudioLines, Binary, Bot, Clapperboard, Film, Image as ImageIcon, Maximize2, MessageSquare, Radio, Volume2 } from "lucide-react"
 
 const META: Record<string, { icon: React.ElementType; label: string; className: string }> = {
   chat: { icon: MessageSquare, label: "chat", className: "border-sky-500/30 bg-sky-500/10 text-sky-300" },
@@ -11,6 +11,7 @@ const META: Record<string, { icon: React.ElementType; label: string; className: 
   image_generation: { icon: ImageIcon, label: "imagen", className: "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-300" },
   image_upscale: { icon: Maximize2, label: "escalado", className: "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-300" },
   video_upscale: { icon: Film, label: "vídeo", className: "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-300" },
+  video_generation: { icon: Clapperboard, label: "vídeo gen", className: "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-300" },
   audio_transcription: { icon: AudioLines, label: "transcripción", className: "border-amber-500/30 bg-amber-500/10 text-amber-300" },
   tts: { icon: Volume2, label: "tts", className: "border-amber-500/30 bg-amber-500/10 text-amber-300" },
   realtime_session: { icon: Radio, label: "realtime", className: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" },

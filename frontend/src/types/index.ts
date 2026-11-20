@@ -821,6 +821,9 @@ export interface FinishedRequest {
   queueMs: number | null;
   /** Transcripciones: duración del audio (con durationMs, el ×N final). */
   audioSeconds?: number | null;
+  /** Vídeo generado: fotogramas por segundo de generación y fotogramas. */
+  videoFps?: number | null;
+  videoFrames?: number | null;
   /** Epoch en segundos. */
   endedAt: number;
   endedAgoMs: number;
@@ -1091,6 +1094,9 @@ export interface RecentRequest {
   gpuIndex?: number | null;
   /** Transcripciones: duración del audio (con durationMs, el ×N final). */
   audioSeconds?: number | null;
+  /** Vídeo generado: fotogramas por segundo de generación y fotogramas. */
+  videoFps?: number | null;
+  videoFrames?: number | null;
   runtimeTelemetry?: {
     prompt_tokens_estimate?: number;
     kv_tokens_reserved?: number;
