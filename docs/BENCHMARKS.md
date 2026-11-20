@@ -51,6 +51,22 @@ todo** crea una ejecución nueva. Un intento contaminado nunca entra en el
 resultado aceptado: con pausa automática espera tráfico cero y sin ella se
 reencola inmediatamente.
 
+### Planes, horarios e histórico
+
+El mismo formulario puede guardarse como plan reutilizable. Un plan fija la
+suite, revisión, argumentos y selección exacta de perfiles/backends, y puede
+programarse uno o varios días de la semana a una hora en una zona horaria IANA.
+La tarjeta del plan muestra próxima y última ejecución, permite lanzarlo ahora,
+editarlo, activarlo o eliminarlo. Dos disparos del mismo plan nunca se solapan:
+si su ejecución anterior sigue en cola, pausada o corriendo, el vencimiento se
+avanza sin duplicarla.
+
+Las ejecuciones terminadas de una suite pueden compararse de cuatro en cuatro.
+Una de ellas puede marcarse como referencia única; la tabla histórica muestra
+el valor y su delta por modelo y prueba, junto con la versión de oCabra, backend
+y GPU registrados. La referencia se devuelve aunque sea más antigua que el
+límite normal del historial.
+
 Corrala requiere `uv` (incluido en la imagen API) y una PostgreSQL desechable.
 Por defecto oCabra crea `<base principal>_bench`; se puede indicar otra con
 `BENCHMARK_CORRALA_DATABASE_URL`, cuyo nombre debe contener

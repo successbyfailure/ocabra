@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.127.0 — 2026-11-20
+
+### Nuevo
+
+- **Planes programables de benchmarks.** La API interna permite guardar una
+  configuración completa, ejecutarla al momento o programarla por días de la
+  semana, hora y zona horaria. No crea otra ejecución si el mismo plan conserva
+  una activa.
+- **Referencias para comparar resultados.** Una ejecución terminada puede ser
+  la referencia única de su aplicación y suite. El listado conserva esa
+  referencia aunque quede fuera del límite de ejecuciones recientes; la UI
+  presenta los deltas de calidad y rendimiento junto a versiones, backend y
+  GPU.
+
+---
+
 ## 0.126.1 — 2026-11-20
 
 ### Corregido

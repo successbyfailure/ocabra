@@ -362,9 +362,15 @@ como resultado limpio.
 | GET | `/ocabra/benchmarks/runs/{run_id}` | Get one benchmark run | `model_manager` |
 | GET | `/ocabra/benchmarks/runs/{run_id}/log` | Read the current benchmark log | `model_manager` |
 | POST | `/ocabra/benchmarks/runs/{run_id}/retry` | Retry a failed benchmark from its current model | `model_manager` |
+| POST | `/ocabra/benchmarks/runs/{run_id}/baseline` | Set the suite comparison baseline | `model_manager` |
 | POST | `/ocabra/benchmarks/runs/{run_id}/pause` | Pause a benchmark run | `model_manager` |
 | POST | `/ocabra/benchmarks/runs/{run_id}/resume` | Resume a benchmark run | `model_manager` |
 | POST | `/ocabra/benchmarks/runs/{run_id}/cancel` | Cancel a benchmark run | `model_manager` |
+| GET | `/ocabra/benchmarks/schedules` | List reusable benchmark plans | `model_manager` |
+| POST | `/ocabra/benchmarks/schedules` | Create a reusable benchmark plan | `model_manager` |
+| PUT | `/ocabra/benchmarks/schedules/{schedule_id}` | Replace a benchmark plan | `model_manager` |
+| DELETE | `/ocabra/benchmarks/schedules/{schedule_id}` | Delete a benchmark plan | `model_manager` |
+| POST | `/ocabra/benchmarks/schedules/{schedule_id}/run` | Run a benchmark plan now | `model_manager` |
 
 ## Daemon Ollama
 

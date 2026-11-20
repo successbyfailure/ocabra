@@ -224,7 +224,9 @@ Implementado:
   encolar cada backend de un modelo, ver resultados y fases, pausar/reanudar,
   reintentar fallos desde checkpoint y repetir automáticamente intentos
   contaminados por tráfico interactivo. Cada intento registra versiones,
-  backend, nodo y todas las GPU usadas. Uso y contrato en
+  backend, nodo y todas las GPU usadas. También permite guardar planes
+  reutilizables, programarlos por días/hora/zona sin solapes y comparar hasta
+  cuatro ejecuciones contra una referencia histórica por suite. Uso y contrato en
   `docs/BENCHMARKS.md`.
 
 ---

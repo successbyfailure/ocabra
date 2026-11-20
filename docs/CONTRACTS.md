@@ -532,7 +532,7 @@ JSONL de entrada: `{"custom_id", "method": "POST", "url", "body"}`.
 
 Rutas internas (rol `model_manager`) en `api/internal/benchmarks.py`:
 `GET /ocabra/benchmarks/catalog`, `POST/GET /ocabra/benchmarks/runs`, detalle,
-log y acciones `pause|resume|cancel|retry`. `retry` solo admite ejecuciones
+log y acciones `pause|resume|cancel|retry|baseline`. `retry` solo admite ejecuciones
 fallidas y continúa en el modelo actual reutilizando su checkpoint. Los estados persistidos son
 `queued|running|pausing|paused|cancelling|completed|failed|cancelled`.
 `phase` detalla el trabajo dentro del estado (`checkout|preparing|running|finalizing`
@@ -566,6 +566,18 @@ oficial. Cada adaptador escribe checkpoint por caso antes de atender una pausa.
 Workspaces y logs viven bajo `benchmark_dir` (`/data/benchmarks` por defecto,
 volumen persistente). Corrala usa una base separada cuyo nombre contiene
 `bench/test/scratch/tmp`; nunca la base de producción.
+
+Los planes reutilizables viven en `benchmark_schedules` y se gestionan con
+`GET/POST /ocabra/benchmarks/schedules`, `PUT/DELETE
+/ocabra/benchmarks/schedules/{id}` y `POST .../{id}/run`. Guardan una copia de
+aplicación, suite, revisión, modelos/backends, argumentos y pausa automática,
+además de días de la semana, hora y zona IANA. Al vencer, el worker avanza
+`next_run_at` y crea una ejecución con snapshot del plan; un bloqueo de fila y
+la comprobación de una ejecución no terminal evitan solapes del mismo plan.
+`schedule_id` conserva la procedencia histórica aunque después se edite el
+plan. Solo puede existir un `benchmark_run.is_baseline` por `app + suite`; las
+comparaciones de la UI calculan deltas contra esa referencia sin modificar el
+resultado bruto.
 
 ---
 
@@ -631,7 +643,7 @@ columnas, en el código.
 | `agents`, `agent_mcp_servers` | `db/agents.py` | Agentes |
 | `mcp_servers` | `db/mcp.py` | Servidores MCP |
 | `trtllm_compile_jobs` | `db/trtllm.py` | Compilaciones TensorRT-LLM |
-| `benchmark_runs`, `benchmark_attempts` | `db/benchmarks.py` | Cola, checkpoints, contaminación y resultados de benchmarks |
+| `benchmark_runs`, `benchmark_attempts`, `benchmark_schedules` | `db/benchmarks.py` | Cola, planes semanales, checkpoints, contaminación, referencias y resultados de benchmarks |
 
 ---
 
