@@ -132,6 +132,36 @@ async def test_whisper_load_uses_base_model_id_and_diarization_flags():
 
 
 @pytest.mark.asyncio
+async def test_el_modelo_de_diarizacion_llega_aunque_la_diarizacion_no_este_activa_al_cargar():
+    """La diarización se decide por petición y ``diarization_enabled`` ya no
+    forma parte de la identidad del worker: el modelo configurado tiene que
+    llegar igual. Antes solo se pasaba con --diarize y un perfil con
+    pyannote community-1 diarizaba con la 3.1 (2026-11-20)."""
+    backend = WhisperBackend()
+
+    with (
+        patch(
+            "ocabra.backends.whisper_backend.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=_FakeProcess()),
+        ) as create_proc,
+        patch.object(backend, "_wait_until_healthy", new=AsyncMock(return_value=True)),
+    ):
+        await backend.load(
+            "openai/whisper-large-v3",
+            [0],
+            port=18013,
+            extra_config={
+                "whisper": {"diarization_model_id": "pyannote/speaker-diarization-community-1"}
+            },
+        )
+
+    args = list(create_proc.await_args.args)
+    assert "--diarize" not in args
+    i = args.index("--diarization-model-id")
+    assert args[i + 1] == "pyannote/speaker-diarization-community-1"
+
+
+@pytest.mark.asyncio
 async def test_whisper_load_accepts_nested_whisper_config():
     backend = WhisperBackend()
 

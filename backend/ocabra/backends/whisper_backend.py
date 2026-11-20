@@ -234,7 +234,14 @@ class WhisperBackend(BackendInterface):
             str(num_workers),
         ]
         if diarization_enabled:
-            args.extend(["--diarize", "--diarization-model-id", diarization_model_id])
+            args.append("--diarize")
+        # Siempre, no solo con --diarize: la diarización se decide por
+        # petición y el worker carga el diarizador al vuelo. Pasarlo solo con
+        # diarization_enabled (que ya no forma parte de la identidad del
+        # worker) hacía que cualquier diarization_model_id configurado se
+        # ignorase y se usara siempre pyannote 3.1 (2026-11-20, community-1
+        # medido idéntico a 3.1 hasta el último decimal).
+        args.extend(["--diarization-model-id", diarization_model_id])
         args.extend(
             ["--diarizer-idle-unload-s", str(float(settings.whisper_diarizer_idle_unload_s))]
         )
