@@ -162,6 +162,9 @@ export function Playground() {
     }
   }, [fetchAgents])
 
+  // Temperatura, max_tokens y system prompt no aplican al vídeo.
+  const paramsVisible = showParams && tab !== "video"
+
   const selectedModel = useMemo(
     () => models.find((item) => item.modelId === selectedModelId) ?? null,
     [models, selectedModelId],
@@ -277,6 +280,7 @@ export function Playground() {
                     Nueva conversacion
                   </button>
                 )}
+                {activeTab !== "video" && (
                 <button
                   type="button"
                   onClick={() => setShowParams((p) => !p)}
@@ -290,6 +294,7 @@ export function Playground() {
                   <SlidersHorizontal size={14} />
                   <span className="hidden sm:inline">Params</span>
                 </button>
+                )}
               </div>
 
               {selectedAgent && activeTab === "text" && (
@@ -358,7 +363,7 @@ export function Playground() {
                 </div>
               )}
 
-              <div className={`grid gap-4 transition-all duration-200 ${showParams ? "xl:grid-cols-[minmax(0,1fr)_320px]" : ""}`}>
+              <div className={`grid gap-4 transition-all duration-200 ${paramsVisible ? "xl:grid-cols-[minmax(0,1fr)_320px]" : ""}`}>
                 <section className="h-[calc(100vh-16rem)] min-h-[400px]">
                   {activeTab === "text" && (
                     <ChatInterface
@@ -400,7 +405,7 @@ export function Playground() {
                     />
                   )}
                 </section>
-                {showParams && (
+                {paramsVisible && (
                   <ParamsPanel
                     params={params}
                     onChange={setParams}
