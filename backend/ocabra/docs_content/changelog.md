@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.123.0 — 2026-11-20
+
+### Nuevo
+
+- **BFCL v4 e IFEval en la cola de benchmarks.** El catálogo interno ofrece
+  ahora las suites públicas `bfcl/simple_python`, `bfcl/core`, `ifeval/quick`
+  e `ifeval/full`. Usan revisiones oficiales fijadas, conservan checkpoints
+  por caso y pasan por la misma pausa y repetición automática cuando hay
+  tráfico interactivo. La primera ejecución prepara sus dependencias aisladas
+  en el cache persistente de benchmarks.
+
+---
+
 ## 0.122.3 — 2026-11-20
 
 ### Arreglos

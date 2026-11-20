@@ -274,7 +274,11 @@ class BenchmarkManager:
         workspace.mkdir(parents=True, exist_ok=True)
         await self._ensure_checkout(source, app, await self._run_revision(run_id), log_path)
         dataset_root = source / app.dataset_root
-        script = dataset_root / suite.script
+        script = (
+            Path(__file__).with_name("runners") / suite.local_runner
+            if suite.local_runner
+            else dataset_root / str(suite.script)
+        )
         if not script.is_file():
             raise RuntimeError(f"La revisión no contiene el runner esperado: {script}")
 
@@ -296,7 +300,10 @@ class BenchmarkManager:
 
         attempt = await self._create_attempt(run_id, model, attempt_number, workspace, log_path)
         before = self._result_snapshot(dataset_root, suite.result_glob)
-        command = [sys.executable, "-I", str(script), suite.models_flag, model]
+        command = [sys.executable, "-I", str(script)]
+        if suite.local_runner:
+            command.extend(("--source-root", str(source)))
+        command.extend((suite.models_flag, model, *suite.default_args))
         command.extend(await self._suite_args(run_id))
         if resume:
             command.extend(suite.resume_args)
@@ -461,6 +468,7 @@ class BenchmarkManager:
             "git",
             "clone",
             "--filter=blob:none",
+            *(("--no-checkout",) if app.checkout_paths else ()),
             app.repository,
             str(source),
             stdout=asyncio.subprocess.PIPE,
@@ -471,6 +479,16 @@ class BenchmarkManager:
         await asyncio.to_thread(log_path.write_bytes, output[0] or b"")
         if clone.returncode != 0:
             raise RuntimeError(f"No se pudo clonar {app.repository}; consulta runner.log")
+        if app.checkout_paths:
+            sparse = await asyncio.create_subprocess_exec(
+                "git", "-C", str(source), "sparse-checkout", "set", *app.checkout_paths,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            output = await sparse.communicate()
+            with log_path.open("ab") as log:
+                log.write(output[0] or b"")
+            if sparse.returncode != 0:
+                raise RuntimeError("No se pudo preparar el checkout parcial del benchmark")
         checkout = await asyncio.create_subprocess_exec(
             "git", "-C", str(source), "checkout", "--detach", revision,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,

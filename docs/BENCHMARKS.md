@@ -64,6 +64,24 @@ python3 -m benchmark.app_benchmarks list
 subagentes y bucles, con perfiles `quick` (34), `standard` (54), `full` (83)
 y `final` (83 × 3 pasadas).
 
+**BFCL v4** usa el scorer oficial de Berkeley y la interfaz OpenAI de tools:
+
+- `simple_python`: llamadas simples a funciones Python.
+- `core`: todo el bloque no-live (simple Python/Java/JavaScript, múltiple,
+  paralela, paralela múltiple e irrelevancia).
+
+**IFEval** usa los prompts y el scorer oficial de Google:
+
+- `quick`: los primeros 50 prompts, útil para iterar.
+- `full`: los 541 prompts oficiales.
+
+Las revisiones de BFCL e IFEval están fijadas a un commit, no a una rama
+móvil. Sus adaptadores viven en oCabra, guardan una respuesta tras cada caso y
+aceptan `--skip-done`; por tanto una pausa continúa por el primer caso pendiente.
+La primera ejecución crea entornos aislados con `uv` dentro del cache de
+benchmarks. BFCL instala el proyecto oficial completo y ese primer arranque es
+sensiblemente más lento; no modifica el entorno Python de la API.
+
 ## Ejecutar Escriba
 
 La URL nunca tiene un valor por defecto para evitar medir accidentalmente el
@@ -161,6 +179,13 @@ Se crea un JSON en `benchmark/apps/<aplicación>.json` con:
 - raíz del dataset dentro de ese repositorio;
 - por cada suite: script, patrón del resultado y opción de modelos;
 - opcionalmente, un script de preparación de assets.
+
+Los benchmarks públicos cuyo repositorio no ofrece una CLI compatible pueden
+declarar `local_runner` en lugar de `script`. El adaptador se incluye en
+`backend/ocabra/benchmarks/runners/`, recibe `--source-root` y debe escribir el
+resultado dentro del checkout conforme a `result_glob`. Solo se usa para
+adaptar transporte y salida: el dataset y el cálculo de la puntuación siguen
+siendo los de la revisión oficial fijada.
 
 Las rutas deben ser relativas y no pueden salir del repositorio. El runner usa
 `python -I`, pero eso **no es un sandbox**: tanto el manifiesto como la revisión

@@ -219,7 +219,8 @@ Implementado:
 - Benchmark harness de motores en `benchmark/run_benchmark.py` y runner manual
   de datasets externos por aplicación en `benchmark/app_benchmarks.py`. El
   adaptador ejecuta las suites LLM, STT, diarización y embeddings mantenidas por
-  Escriba, además del benchmark agéntico de Corrala. La primera UI permite
+  Escriba, además del benchmark agéntico de Corrala y las baterías públicas
+  BFCL v4 e IFEval fijadas a revisión. La UI permite
   encolar por modelo, ver resultados, pausar/reanudar y repetir automáticamente
   intentos contaminados por tráfico interactivo. Uso y contrato en
   `docs/BENCHMARKS.md`.

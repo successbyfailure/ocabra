@@ -41,10 +41,12 @@ class BenchmarkError(RuntimeError):
 class SuiteConfig:
     name: str
     description: str
-    script: Path
+    script: Path | None
     result_glob: str
     models_flag: str | None = None
     prepare_script: Path | None = None
+    local_runner: Path | None = None
+    default_args: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,7 @@ class AppConfig:
     dataset_root: Path
     suites: dict[str, SuiteConfig]
     manifest_path: Path
+    checkout_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -100,7 +103,22 @@ def load_app_config(path: Path) -> AppConfig:
     for name, value in raw_suites.items():
         if not isinstance(name, str) or not name or not isinstance(value, dict):
             raise BenchmarkError("Cada suite debe tener un nombre y configuracion validos")
-        script = _safe_relative_path(value.get("script"), f"suites.{name}.script")
+        script_value = value.get("script")
+        runner_value = value.get("local_runner")
+        if (script_value is None) == (runner_value is None):
+            raise BenchmarkError(
+                f"suites.{name} debe declarar exactamente script o local_runner"
+            )
+        script = (
+            _safe_relative_path(script_value, f"suites.{name}.script")
+            if script_value is not None
+            else None
+        )
+        local_runner = (
+            _safe_relative_path(runner_value, f"suites.{name}.local_runner")
+            if runner_value is not None
+            else None
+        )
         result_glob = value.get("result_glob")
         if not isinstance(result_glob, str) or not result_glob.strip():
             raise BenchmarkError(f"suites.{name}.result_glob no puede estar vacio")
@@ -117,6 +135,11 @@ def load_app_config(path: Path) -> AppConfig:
             not isinstance(models_flag, str) or not models_flag.startswith("--")
         ):
             raise BenchmarkError(f"suites.{name}.models_flag debe ser una opcion --larga")
+        raw_default_args = value.get("default_args", [])
+        if not isinstance(raw_default_args, list) or not all(
+            isinstance(item, str) for item in raw_default_args
+        ):
+            raise BenchmarkError(f"suites.{name}.default_args debe ser una lista de strings")
         suites[name] = SuiteConfig(
             name=name,
             description=str(value.get("description", "")),
@@ -124,7 +147,13 @@ def load_app_config(path: Path) -> AppConfig:
             result_glob=result_glob,
             models_flag=models_flag,
             prepare_script=prepare_script,
+            local_runner=local_runner,
+            default_args=tuple(raw_default_args),
         )
+
+    raw_checkout_paths = raw.get("checkout_paths", [])
+    if not isinstance(raw_checkout_paths, list):
+        raise BenchmarkError("checkout_paths debe ser una lista de rutas relativas")
 
     return AppConfig(
         app=raw["app"],
@@ -134,6 +163,10 @@ def load_app_config(path: Path) -> AppConfig:
         dataset_root=dataset_root,
         suites=suites,
         manifest_path=path,
+        checkout_paths=tuple(
+            _safe_relative_path(item, "checkout_paths")
+            for item in raw_checkout_paths
+        ),
     )
 
 
@@ -200,13 +233,30 @@ def acquire_source(
     requested_revision = revision or config.default_revision
     with tempfile.TemporaryDirectory(prefix=f"ocabra-{config.app}-") as temp_dir:
         root = Path(temp_dir) / config.app
+        clone_command = ["git", "clone", "--quiet", "--filter=blob:none"]
+        if config.checkout_paths:
+            clone_command.append("--no-checkout")
+        clone_command.extend((config.repository, str(root)))
         clone = subprocess.run(
-            ["git", "clone", "--quiet", "--filter=blob:none", config.repository, str(root)],
+            clone_command,
             text=True,
             capture_output=True,
         )
         if clone.returncode != 0:
             raise BenchmarkError(f"No se pudo clonar {config.repository}: {clone.stderr.strip()}")
+        if config.checkout_paths:
+            sparse = subprocess.run(
+                [
+                    "git", "-C", str(root), "sparse-checkout", "set",
+                    *(path.as_posix() for path in config.checkout_paths),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            if sparse.returncode != 0:
+                raise BenchmarkError(
+                    f"No se pudo preparar el checkout parcial: {sparse.stderr.strip()}"
+                )
         checkout = subprocess.run(
             ["git", "-C", str(root), "checkout", "--quiet", "--detach", requested_revision],
             text=True,
@@ -330,17 +380,24 @@ def execute_benchmark(
 
     with acquire_source(config, source, revision) as checkout:
         dataset_root = checkout.root / config.dataset_root
-        script = dataset_root / suite.script
+        script = (
+            PROJECT_ROOT / "backend" / "ocabra" / "benchmarks" / "runners" / suite.local_runner
+            if suite.local_runner
+            else dataset_root / suite.script  # type: ignore[operator]
+        )
         if not dataset_root.is_dir():
             raise BenchmarkError(f"No existe el dataset esperado: {dataset_root}")
         if not script.is_file():
             raise BenchmarkError(f"No existe el runner de la suite: {script}")
 
         command = [sys.executable, "-I", str(script)]
+        if suite.local_runner:
+            command.extend(("--source-root", str(checkout.root)))
         if models:
             if not suite.models_flag:
                 raise BenchmarkError(f"La suite {suite_name} no admite --models")
             command.extend([suite.models_flag, models])
+        command.extend(suite.default_args)
         command.extend(suite_args)
 
         prepare_command: list[str] | None = None

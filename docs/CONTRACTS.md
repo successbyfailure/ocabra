@@ -543,6 +543,12 @@ identidad termina el subprocess, marca el intento y pausa la ejecución; tras
 solape se repite desde un checkout limpio. Un intento interrumpido reutiliza
 su workspace y los argumentos de reanudación del runner.
 
+El catálogo combina suites mantenidas por aplicaciones (Escriba y Corrala)
+con benchmarks públicos fijados a revisión (BFCL e IFEval). Estos últimos usan
+un checkout parcial y un `local_runner` de oCabra para adaptar la API OpenAI y
+normalizar la salida, pero ejecutan el dataset y el scorer de la revisión
+oficial. Cada adaptador escribe checkpoint por caso antes de atender una pausa.
+
 Workspaces y logs viven bajo `benchmark_dir` (`/data/benchmarks` por defecto,
 volumen persistente). Corrala usa una base separada cuyo nombre contiene
 `bench/test/scratch/tmp`; nunca la base de producción.

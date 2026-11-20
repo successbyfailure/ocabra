@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "app": "ifeval",
+  "description": "IFEval oficial de Google: cumplimiento verificable de instrucciones.",
+  "repository": "https://github.com/google-research/google-research.git",
+  "default_revision": "c878a53ec1764bcb91a6178dc5c315202a3b5fa2",
+  "dataset_root": "instruction_following_eval",
+  "checkout_paths": ["instruction_following_eval"],
+  "suites": {
+    "quick": {
+      "description": "Primeros 50 prompts de IFEval para una comparación rápida.",
+      "local_runner": "ifeval.py",
+      "default_args": ["--limit", "50"],
+      "result_glob": "ocabra_results_*/results.json",
+      "models_flag": "--models"
+    },
+    "full": {
+      "description": "Los 541 prompts del dataset oficial IFEval.",
+      "local_runner": "ifeval.py",
+      "result_glob": "ocabra_results_*/results.json",
+      "models_flag": "--models"
+    }
+  }
+}

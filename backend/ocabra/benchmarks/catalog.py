@@ -13,11 +13,13 @@ from dataclasses import dataclass
 class SuiteSpec:
     name: str
     description: str
-    script: str
+    script: str | None
     result_glob: str
     models_flag: str
     prepare_script: str | None = None
     resume_args: tuple[str, ...] = ("--skip-done",)
+    local_runner: str | None = None
+    default_args: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -28,9 +30,38 @@ class AppSpec:
     default_revision: str
     dataset_root: str
     suites: dict[str, SuiteSpec]
+    checkout_paths: tuple[str, ...] = ()
 
 
 APPS: dict[str, AppSpec] = {
+    "bfcl": AppSpec(
+        name="bfcl",
+        description="Berkeley Function Calling Leaderboard: selección y argumentos de herramientas.",
+        repository="https://github.com/ShishirPatil/gorilla.git",
+        default_revision="f7cf7359b7ac615a0b294831c5ba2bc95ee4a000",
+        dataset_root="berkeley-function-call-leaderboard",
+        checkout_paths=("berkeley-function-call-leaderboard",),
+        suites={
+            "simple_python": SuiteSpec(
+                name="simple_python",
+                description="BFCL v4: llamadas simples a funciones Python mediante tools OpenAI.",
+                script=None,
+                local_runner="bfcl.py",
+                default_args=("--categories", "simple_python"),
+                result_glob="ocabra_results_*/results.json",
+                models_flag="--models",
+            ),
+            "core": SuiteSpec(
+                name="core",
+                description="BFCL v4 no-live: simple, múltiple, paralela e irrelevancia.",
+                script=None,
+                local_runner="bfcl.py",
+                default_args=("--categories", "non_live"),
+                result_glob="ocabra_results_*/results.json",
+                models_flag="--models",
+            ),
+        },
+    ),
     "corrala": AppSpec(
         name="corrala",
         description=(
@@ -85,6 +116,33 @@ APPS: dict[str, AppSpec] = {
                 description="Recuperación, clustering y reranking sobre reuniones.",
                 script="embeddings/benchmark_embeddings.py",
                 result_glob="embeddings/results_*/results.json",
+                models_flag="--models",
+            ),
+        },
+    ),
+    "ifeval": AppSpec(
+        name="ifeval",
+        description="IFEval oficial de Google: cumplimiento verificable de instrucciones.",
+        repository="https://github.com/google-research/google-research.git",
+        default_revision="c878a53ec1764bcb91a6178dc5c315202a3b5fa2",
+        dataset_root="instruction_following_eval",
+        checkout_paths=("instruction_following_eval",),
+        suites={
+            "quick": SuiteSpec(
+                name="quick",
+                description="Primeros 50 prompts de IFEval para una comparación rápida.",
+                script=None,
+                local_runner="ifeval.py",
+                default_args=("--limit", "50"),
+                result_glob="ocabra_results_*/results.json",
+                models_flag="--models",
+            ),
+            "full": SuiteSpec(
+                name="full",
+                description="Los 541 prompts del dataset oficial IFEval.",
+                script=None,
+                local_runner="ifeval.py",
+                result_glob="ocabra_results_*/results.json",
                 models_flag="--models",
             ),
         },

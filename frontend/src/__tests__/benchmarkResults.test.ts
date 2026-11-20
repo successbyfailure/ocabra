@@ -73,4 +73,24 @@ describe("benchmark result adapters", () => {
     expect(bestMetricValues(comparable).get("speed_tok_s")).toBe(20)
     expect(bestMetricValues(comparable).get("coverage")).toBe(0.8)
   })
+
+  it("renders official BFCL and IFEval scores as comparable percentages", () => {
+    const bfcl = parseBenchmarkResults({
+      modelA: {
+        benchmark: "bfcl_v4", model: "modelA", status: "completed",
+        metrics: { simple_accuracy: 0.82, parallel_accuracy: 0.61 },
+      },
+    })[0]
+    const ifeval = parseBenchmarkResults({
+      modelB: {
+        benchmark: "ifeval", model: "modelB", status: "completed", cases: 50,
+        metrics: { strict_prompt_accuracy: 0.7, loose_prompt_accuracy: 0.76 },
+      },
+    })[0]
+
+    expect(bfcl.scope).toBe("bfcl_v4")
+    expect(formatMetric(bfcl.metrics[0])).toBe("82.0%")
+    expect(ifeval.scope).toBe("ifeval · 50 casos")
+    expect(formatMetric(ifeval.metrics[0])).toBe("70.0%")
+  })
 })

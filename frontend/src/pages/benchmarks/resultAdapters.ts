@@ -101,6 +101,44 @@ function parseEscriba(
   return rows
 }
 
+const PUBLIC_METRICS: Record<string, [string, MetricFormat, ("higher" | "lower")?]> = {
+  strict_prompt_accuracy: ["Strict · prompts", "percent", "higher"],
+  strict_instruction_accuracy: ["Strict · instrucciones", "percent", "higher"],
+  loose_prompt_accuracy: ["Loose · prompts", "percent", "higher"],
+  loose_instruction_accuracy: ["Loose · instrucciones", "percent", "higher"],
+  non_live_accuracy: ["Non-live", "percent", "higher"],
+  simple_accuracy: ["Simple", "percent", "higher"],
+  multiple_accuracy: ["Múltiple", "percent", "higher"],
+  parallel_accuracy: ["Paralela", "percent", "higher"],
+  parallel_multiple_accuracy: ["Paralela múltiple", "percent", "higher"],
+  irrelevance_accuracy: ["Irrelevancia", "percent", "higher"],
+  latency_s_p50: ["Latencia p50", "seconds", "lower"],
+  input_tokens: ["Tokens entrada", "integer"],
+  output_tokens: ["Tokens salida", "integer"],
+}
+
+function parsePublic(
+  outerModel: string,
+  result: Record<string, unknown>,
+): BenchmarkResultRow[] {
+  if (typeof result.benchmark !== "string") return []
+  const values = asRecord(result.metrics)
+  if (!values) return []
+  const metrics = Object.entries(values).flatMap(([key, value]) => {
+    const definition = PUBLIC_METRICS[key]
+    if (!definition) return []
+    const parsed = metric(key, definition[0], value, definition[1], definition[2])
+    return parsed ? [parsed] : []
+  })
+  return [{
+    model: typeof result.model === "string" ? result.model : outerModel,
+    scope: `${result.benchmark}${typeof result.cases === "number" ? ` · ${result.cases} casos` : ""}`,
+    status: typeof result.status === "string" ? result.status : null,
+    metrics,
+    raw: result,
+  }]
+}
+
 function flattenScalars(
   value: Record<string, unknown>,
   prefix = "",
@@ -133,6 +171,8 @@ export function parseBenchmarkResults(
   results: Record<string, Record<string, unknown>>,
 ): BenchmarkResultRow[] {
   return Object.entries(results).flatMap(([model, result]) => {
+    const publicBenchmark = parsePublic(model, result)
+    if (publicBenchmark.length > 0) return publicBenchmark
     const corrala = parseCorrala(model, result)
     if (corrala.length > 0) return corrala
     const escriba = parseEscriba(model, result)

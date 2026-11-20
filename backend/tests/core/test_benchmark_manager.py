@@ -33,9 +33,13 @@ def test_catalog_matches_cli_manifests() -> None:
         raw = json.loads((root / "benchmark" / "apps" / f"{name}.json").read_text())
         assert raw["repository"] == app.repository
         assert raw["dataset_root"] == app.dataset_root
+        assert raw.get("checkout_paths", []) == list(app.checkout_paths)
         assert set(raw["suites"]) == set(app.suites)
         for suite_name, suite in app.suites.items():
-            assert raw["suites"][suite_name]["script"] == suite.script
+            if suite.local_runner:
+                assert raw["suites"][suite_name]["local_runner"] == suite.local_runner
+            else:
+                assert raw["suites"][suite_name]["script"] == suite.script
             assert raw["suites"][suite_name]["result_glob"] == suite.result_glob
 
 
@@ -46,6 +50,16 @@ def test_catalog_exposes_resume_and_preparation() -> None:
     assert corrala["resumable"] is True
     assert corrala["needsPreparation"] is False
     assert escriba_stt["needsPreparation"] is True
+
+
+def test_public_benchmarks_are_pinned_and_use_bundled_resumable_runners() -> None:
+    for app_name in ("bfcl", "ifeval"):
+        app = APPS[app_name]
+        assert len(app.default_revision) == 40
+        assert app.default_revision != "main"
+        for suite in app.suites.values():
+            assert suite.local_runner
+            assert suite.resume_args == ("--skip-done",)
 
 
 def test_external_activity_excludes_internal_benchmark_user() -> None:

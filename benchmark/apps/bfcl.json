@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "app": "bfcl",
+  "description": "Berkeley Function Calling Leaderboard: selección y argumentos de herramientas.",
+  "repository": "https://github.com/ShishirPatil/gorilla.git",
+  "default_revision": "f7cf7359b7ac615a0b294831c5ba2bc95ee4a000",
+  "dataset_root": "berkeley-function-call-leaderboard",
+  "checkout_paths": ["berkeley-function-call-leaderboard"],
+  "suites": {
+    "simple_python": {
+      "description": "BFCL v4: llamadas simples a funciones Python mediante tools OpenAI.",
+      "local_runner": "bfcl.py",
+      "default_args": ["--categories", "simple_python"],
+      "result_glob": "ocabra_results_*/results.json",
+      "models_flag": "--models"
+    },
+    "core": {
+      "description": "BFCL v4 no-live: simple, múltiple, paralela e irrelevancia.",
+      "local_runner": "bfcl.py",
+      "default_args": ["--categories", "non_live"],
+      "result_glob": "ocabra_results_*/results.json",
+      "models_flag": "--models"
+    }
+  }
+}
