@@ -18,6 +18,7 @@ import ocabra.db.openai_batches  # noqa: F401  (OpenAIFile + OpenAIBatch)
 import ocabra.db.server_config  # noqa: F401
 import ocabra.db.stats  # noqa: F401  (RequestStat, ToolCallStat, ...)
 import ocabra.db.trtllm  # noqa: F401
+import ocabra.db.videos  # noqa: F401  (VideoJob)
 from alembic import context
 from ocabra.config import settings
 from ocabra.database import Base

@@ -85,6 +85,7 @@ export type BackendType =
   | "piper"
   | "upscaler"
   | "flashvsr"
+  | "comfyui_video"
   | "voxtral"
   | "ollama"
   | "tensorrt_llm"

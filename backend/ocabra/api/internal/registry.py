@@ -265,6 +265,7 @@ _DIRECTORY_LAYOUTS: dict[str, tuple[str, ...]] = {
     "mage": ("direct",),
     "upscaler": ("direct",),
     "flashvsr": ("direct",),
+    "comfyui_video": ("direct",),
 }
 
 

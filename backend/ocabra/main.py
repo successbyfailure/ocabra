@@ -580,6 +580,7 @@ async def _startup(app: FastAPI, teardown: _Teardown) -> None:
     from ocabra.backends.acestep_backend import AceStepBackend
     from ocabra.backends.bitnet_backend import BitnetBackend
     from ocabra.backends.chatterbox_backend import ChatterboxBackend
+    from ocabra.backends.comfyui_video_backend import ComfyUIVideoBackend
     from ocabra.backends.diffusers_backend import DiffusersBackend
     from ocabra.backends.flashvsr_backend import FlashVSRBackend
     from ocabra.backends.llama_cpp_backend import LlamaCppBackend
@@ -620,6 +621,7 @@ async def _startup(app: FastAPI, teardown: _Teardown) -> None:
     worker_pool.register_backend("piper", PiperBackend())
     worker_pool.register_backend("upscaler", UpscalerBackend())
     worker_pool.register_backend("flashvsr", FlashVSRBackend())
+    worker_pool.register_backend("comfyui_video", ComfyUIVideoBackend())
     worker_pool.register_backend("voxtral", VoxtralBackend())
     worker_pool.register_backend("vllm", VLLMBackend())
     tensorrt_llm_backend = TensorRTLLMBackend()
@@ -864,6 +866,13 @@ async def _startup(app: FastAPI, teardown: _Teardown) -> None:
     teardown.loop(
         "files-retention-loop", lambda stop: _files_retention_loop(stop, _files_session_factory)
     )
+    # /v1/videos: cola de trabajos de vídeo, un trabajo a la vez (core/video_jobs.py).
+    from ocabra.core.video_jobs import VideoJobManager
+
+    video_job_manager = VideoJobManager(app, _files_session_factory)
+    await video_job_manager.start()
+    app.state.video_job_manager = video_job_manager
+    teardown.push("video-job-manager", video_job_manager.stop)
     teardown.loop(
         "ollama-inventory-loop",
         lambda stop: _ollama_inventory_loop(model_manager, stop, profile_registry),
@@ -1030,6 +1039,7 @@ Consulta `GET /v1/models` para ver los modelos disponibles.
 | **Edicion de imagenes** | `/v1/images/edits` | diffusers |
 | **Escalado de fotos** | `/v1/images/upscale` (multipart; devuelve la imagen o `b64_json`) | upscaler (Real-ESRGAN, UltraSharp, Remacri…) |
 | **Generacion de musica** | `/v1/audio/generate` | acestep |
+| **Generacion de video (con audio)** | `/v1/videos` (asincrono) | comfyui_video (LTX-2.5) |
 | **Reranking** | `/v1/rerank` | vllm |
 | **Scoring de pares** | `/v1/score` | vllm |
 | **Pooling** | `/v1/pooling` | vllm |
@@ -1145,6 +1155,24 @@ router anuncia `vision`, `tools`, `audio_input`, `video_input`,
 `image_generation` e `image_editing` si alguno de sus destinos la tiene.
 `recomendado-imagen` sirve para los dos endpoints de imagen: genera con un
 modelo en `/v1/images/generations` y edita con otro en `/v1/images/edits`.
+
+## Video al estilo OpenAI
+
+`/v1/videos` funciona como la API de video de OpenAI: es **asincrona**.
+
+1. `POST /v1/videos` con `model`, `prompt`, `seconds` y `size` (JSON o
+   multipart) devuelve el objeto `video` en `queued`.
+2. `GET /v1/videos/{id}` hasta que `status` sea `completed` o `failed`;
+   `progress` va de 0 a 100 y `queue_position` dice cuantos tienes delante.
+3. `GET /v1/videos/{id}/content` descarga el MP4 (H.264 + AAC: el modelo
+   genera tambien el sonido; describelo en el prompt). `?variant=thumbnail`
+   da un JPEG del primer fotograma.
+
+Diferencias: `seconds` es cualquier entero de 1 a 10; `size` se redondea a
+multiplos de 64 (`1280x720` sale `1280x704`); `seed` y `negative_prompt` son
+extensiones. Se genera un video a la vez en todo el nodo; uno de 5 s a 720p
+tarda ~45 s con el modelo cargado y ~90 s si hay que cargarlo. El fichero se
+borra a las 24 h. No disponible en nodos `zero_data`.
 
 ## Imagen al estilo OpenAI
 

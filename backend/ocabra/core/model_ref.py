@@ -21,6 +21,7 @@ KNOWN_BACKEND_TYPES = {
     "ollama",
     "upscaler",
     "flashvsr",
+    "comfyui_video",
 }
 
 

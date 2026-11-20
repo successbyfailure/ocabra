@@ -62,6 +62,7 @@ KIND_BY_BACKEND = {
     "voxtral": "hf_repo",
     "upscaler": "esrgan",
     "flashvsr": "flashvsr",
+    "comfyui_video": "comfyui_workflow",
     "acestep": "acestep",
     "vibeasr": "gguf_pair",
 }

@@ -85,6 +85,8 @@ FAMILY_DEFAULT_S: dict[str, dict[str, float]] = {
     "acestep":      {"p50": 240.0, "p95": 900.0},
     "upscaler":     {"p50":  5.0, "p95":  30.0},
     "flashvsr":     {"p50": 300.0, "p95": 2700.0},
+    # LTX-2.5 en una 3090: 46 s (720p, 5 s) en caliente, ~90 s en frío.
+    "comfyui_video": {"p50": 60.0, "p95": 240.0},
     # Realtime sessions are intentionally not here — they're not estimable
     # and consumers must go through SessionRegistry instead.
 }
@@ -196,6 +198,8 @@ _WORK_UNIT_EXTRACTORS: dict[str, tuple[str, callable[[dict], float | None]]] = {
     "upscaler":   ("mp_frames",       lambda m: _mp_frames(m)),
     # FlashVSR: pure frame count divided by a fitted fps.
     "flashvsr":   ("input_frames",    lambda m: _pos_float(m.get("input_frames"))),
+    # Vídeo generado: fotogramas por megapíxel de salida.
+    "comfyui_video": ("mp_frames",    lambda m: _mp_frames(m)),
 }
 
 

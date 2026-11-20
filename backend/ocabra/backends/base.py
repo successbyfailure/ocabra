@@ -79,6 +79,7 @@ class ModalityType(StrEnum):
     AUDIO_SPEECH = "audio_speech"
     RERANKING = "reranking"
     VIDEO_UPSCALING = "video_upscaling"
+    VIDEO_GENERATION = "video_generation"
 
 
 @dataclass
@@ -120,6 +121,8 @@ class BackendCapabilities:
     # ``video_upscaling`` because not every video model can take a still:
     # FlashVSR is temporal and only has a video path.
     image_upscaling: bool = False
+    # Text-to-video generation (/v1/videos), e.g. LTX-2.5 through ComfyUI.
+    video_generation: bool = False
     streaming: bool = False
     context_length: int = 0
     # Native context length the model was trained/configured for, independent

@@ -16,6 +16,36 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.125.0 — 2026-11-20
+
+### Nuevo
+
+- **Generación de vídeo con audio: `/v1/videos`**, compatible con la API de
+  vídeo de OpenAI. Es asíncrona: `POST /v1/videos` encola y devuelve el objeto
+  `video` en `queued`; consulta `GET /v1/videos/{id}` (`status`, `progress`,
+  `queue_position`) y descarga `GET /v1/videos/{id}/content` cuando esté en
+  `completed` (MP4 H.264 + AAC; `?variant=thumbnail` da un JPEG). También
+  `GET /v1/videos` y `DELETE /v1/videos/{id}`. El primer modelo es
+  **LTX-2.5** (backend `comfyui_video`): un vídeo de 5 s a 1280x704 tarda
+  unos 45 s con el modelo cargado. Diferencias con OpenAI: `seconds` es
+  cualquier entero de 1 a 10, `size` se redondea a múltiplos de 64
+  (`1280x720` sale `1280x704`), y `seed`/`negative_prompt` son extensiones.
+  Se genera un vídeo a la vez por nodo y el fichero se borra a las 24 h. No
+  está disponible en nodos `zero_data`.
+
+### Corregido
+
+- **`/ocabra/video/upscale` con modelos recién descargados.** Tenía el mismo
+  fallo que la 0.124.1 arregló en `/v1/*`: con un preset de runtime buscaba el
+  worker con otra clave y respondía 503 aunque el modelo estuviera cargado.
+- **El modelo de diarización configurado se ignoraba.** Un perfil de Whisper
+  con `diarization_model_id` (por ejemplo pyannote community-1) diarizaba
+  siempre con pyannote 3.1, porque el modelo solo llegaba al worker si la
+  diarización estaba activada al cargarlo, y ahora se decide en cada
+  petición. Ahora llega siempre.
+
+---
+
 ## 0.124.1 — 2026-11-20
 
 ### Corregido

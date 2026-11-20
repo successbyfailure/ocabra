@@ -244,6 +244,10 @@ TRACKED_API_PATHS = {
 
 
 def should_track(path: str) -> bool:
+    if path.startswith("/v1/videos"):
+        # Asíncrono: el POST solo encola. Cada trabajo registra su propia
+        # fila al terminar (core/video_jobs.py), con la duración de verdad.
+        return False
     if path.startswith("/v1/"):
         return True
     return path in TRACKED_API_PATHS

@@ -7241,6 +7241,8 @@ def declared_capabilities(state: "ModelState") -> BackendCapabilities:
         caps.video_upscaling = caps.image_upscaling = True
     elif backend_type == "flashvsr":
         caps.video_upscaling = True
+    elif backend_type == "comfyui_video":
+        caps.video_generation = True
 
     if backend_type == "strata":
         section = extra.get("strata")

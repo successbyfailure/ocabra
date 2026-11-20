@@ -67,6 +67,7 @@ _NON_KV_BACKENDS = {
     "chatterbox",
     "piper",
     "comfyui",
+    "comfyui_video",
     "a1111",
 }
 

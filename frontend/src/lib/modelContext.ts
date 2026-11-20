@@ -174,7 +174,12 @@ export function categorizeModel(model: ModelState): ModelCategory {
   if (c.tts) return "tts"
   if (c.musicGeneration) return "music"
   if (c.imageGeneration || c.imageEditing) return "image"
-  if (model.backendType === "upscaler" || model.backendType === "flashvsr") return "video"
+  if (
+    model.backendType === "upscaler" ||
+    model.backendType === "flashvsr" ||
+    model.backendType === "comfyui_video"
+  )
+    return "video"
   if (c.embeddings || c.pooling || c.rerank || c.classification || c.score) return "embeddings"
   if (c.chat || c.completion) return "chat"
   return "other"

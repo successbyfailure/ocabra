@@ -30,6 +30,7 @@ const FAMILY: Record<string, LucideIcon> = {
   mage: ImageIcon,
   upscaler: ImageIcon,
   flashvsr: ImageIcon,
+  comfyui_video: ImageIcon,
   acestep: Music,
 }
 

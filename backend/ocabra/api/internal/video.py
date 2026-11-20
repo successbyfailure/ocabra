@@ -25,7 +25,6 @@ from fastapi.responses import Response
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.api.openai._deps import (
     check_capability,
-    compute_worker_key,
     get_model_manager,
     get_profile_registry,
     resolve_profile,
@@ -166,7 +165,9 @@ async def upscale_video(
     )
     check_capability(state, "video_upscaling", "video upscaling")
 
-    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    # El worker que resolve_profile ha cargado: su clave incluye el preset de
+    # runtime, que compute_worker_key(base, load_overrides) no ve.
+    worker_key = state.model_id
     request.state.stats_model_id = worker_key
 
     worker_pool = request.app.state.worker_pool

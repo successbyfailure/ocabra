@@ -13,6 +13,7 @@ from .images import router as images_router
 from .models import router as models_router
 from .pooling import router as pooling_router
 from .realtime import router as realtime_router
+from .videos import router as videos_router
 
 router = APIRouter(tags=["OpenAI"])
 router.include_router(models_router)
@@ -27,3 +28,5 @@ router.include_router(realtime_router)
 # Zero-data nodes store nothing about requests: no files, no batches.
 router.include_router(files_router, dependencies=[Depends(require_storage_allowed)])
 router.include_router(batches_router, dependencies=[Depends(require_storage_allowed)])
+# Los vídeos se guardan en disco hasta que caducan: tampoco en zero-data.
+router.include_router(videos_router, dependencies=[Depends(require_storage_allowed)])

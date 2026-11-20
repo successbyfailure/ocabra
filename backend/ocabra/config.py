@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.124.1"
+APP_VERSION = "0.125.0"
 
 
 class Settings(BaseSettings):
@@ -812,6 +812,15 @@ class Settings(BaseSettings):
     # Batch input/output files and loose uploads are deleted this long after
     # their batch finishes (or after upload, if no batch uses them). 0 = keep.
     openai_files_retention_hours: int = 168
+
+    # /v1/videos (core/video_jobs.py). Los MP4 van a <openai_files_dir>/videos
+    # y se borran a las ``video_retention_hours`` de terminar, como en OpenAI.
+    video_retention_hours: int = 24
+    video_default_seconds: int = 5
+    video_max_seconds: int = 10
+    video_default_size: str = "1280x704"
+    # Píxeles por fotograma: 1280x704 cabe en una 3090 con 23,7 GB de pico.
+    video_max_pixels: int = 1_048_576
 
     # OpenAI Images API: URL response_format support
     # Generated PNGs are written here and served via GET /v1/images/files/{name}

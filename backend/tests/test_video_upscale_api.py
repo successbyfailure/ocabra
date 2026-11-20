@@ -21,7 +21,10 @@ def _app(backend_upscale):
     app.dependency_overrides[get_current_user] = lambda: UserContext(
         user_id="u1", username="vhs", role="user"
     )
-    state = SimpleNamespace(backend_type="flashvsr", backend_model_id="flashvsr-v1")
+    # resolve_profile devuelve el estado del worker cargado: model_id es su clave.
+    state = SimpleNamespace(
+        model_id="flashvsr/flashvsr-v1", backend_type="flashvsr", backend_model_id="flashvsr-v1"
+    )
     backend = MagicMock()
     backend.health_check = AsyncMock(return_value=True)
     backend.upscale_video = backend_upscale

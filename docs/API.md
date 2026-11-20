@@ -141,6 +141,18 @@ curl -H "Authorization: Bearer sk-…" http://localhost:8484/v1/models
 | POST | `/v1/audio/speech` | Generate speech | clave |
 | POST | `/v1/audio/generate` | Generate music | clave |
 
+## OpenAI — vídeo (`/v1/videos`)
+
+Asíncrona, como la de OpenAI: `POST` encola y devuelve el objeto `video` en `queued`; se consulta hasta `completed` y se descarga el MP4 (con audio). No disponible en nodos `zero_data`.
+
+| Método | Ruta | Qué hace | Acceso |
+|---|---|---|---|
+| POST | `/v1/videos` | Create a video | clave |
+| GET | `/v1/videos` | List videos | clave |
+| GET | `/v1/videos/{video_id}` | Retrieve a video | clave |
+| GET | `/v1/videos/{video_id}/content` | Download video content | clave |
+| DELETE | `/v1/videos/{video_id}` | Delete a video | clave |
+
 ## OpenAI — Realtime (`/v1/realtime`)
 
 WebSocket con el protocolo de eventos de OpenAI Realtime. La clave va en `Authorization: Bearer` o en el subprotocolo que usa OpenAI.
