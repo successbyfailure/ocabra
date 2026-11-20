@@ -121,24 +121,26 @@ def test_b64_json_devuelve_el_formato_de_openai():
 
 
 @pytest.mark.parametrize(
-    "data, files, param",
+    "data, files, param, code",
     [
-        ({}, {"other": ("x", b"x", "text/plain")}, "image"),
-        ({"model": ""}, None, "model"),
-        ({"output_format": "gif"}, None, "output_format"),
-        ({"response_format": "url"}, None, "response_format"),
-        ({"scale": "0"}, None, "scale"),
-        ({"target_height": "-3"}, None, "target_height"),
-        ({"output_quality": "101"}, None, "output_quality"),
-        ({}, {"image": ("p.png", b"", "image/png")}, "image"),
+        ({}, {"other": ("x", b"x", "text/plain")}, "image", "missing_required_parameter"),
+        ({"model": ""}, None, "model", "missing_required_parameter"),
+        ({"output_format": "gif"}, None, "output_format", "invalid_output_format"),
+        ({"response_format": "url"}, None, "response_format", "invalid_response_format"),
+        ({"scale": "0"}, None, "scale", "invalid_value"),
+        ({"target_height": "-3"}, None, "target_height", "invalid_value"),
+        ({"output_quality": "101"}, None, "output_quality", "invalid_value"),
+        ({}, {"image": ("p.png", b"", "image/png")}, "image", "empty_image"),
     ],
 )
-def test_peticiones_invalidas_dan_400_sin_tocar_el_modelo(data, files, param):
+def test_peticiones_invalidas_dan_400_sin_tocar_el_modelo(data, files, param, code):
     app, backend = _app()
     resp, resolve = _post(app, data=data, files=files)
 
     assert resp.status_code == 400, resp.text
     assert resp.json()["detail"]["error"]["param"] == param
+    # Con code: VHS solo podía reconocer los errores por el status (20/11).
+    assert _code(resp) == code
     resolve.assert_not_awaited()
     backend.upscale_image.assert_not_awaited()
 
@@ -177,8 +179,10 @@ def test_flashvsr_solo_hace_video_y_da_model_not_capable():
     backend.upscale_image.assert_not_awaited()
 
 
-@pytest.mark.parametrize("status", [400, 413])
-def test_los_errores_de_cliente_del_worker_se_propagan(status):
+@pytest.mark.parametrize(
+    "status, code", [(400, "invalid_image"), (413, "image_too_large"), (422, "invalid_value")]
+)
+def test_los_errores_de_cliente_del_worker_se_propagan(status, code):
     req = httpx.Request("POST", "http://worker/upscale/image")
     err = httpx.HTTPStatusError(
         "x",
@@ -190,6 +194,7 @@ def test_los_errores_de_cliente_del_worker_se_propagan(status):
 
     assert resp.status_code == status
     assert resp.json()["detail"]["error"]["message"] == "La imagen es enorme"
+    assert _code(resp) == code
     app.state.model_manager.begin_request.assert_called_once()
     app.state.model_manager.end_request.assert_called_once_with("upscaler/realesrgan-x4plus", "r1")
 

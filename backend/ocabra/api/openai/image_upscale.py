@@ -90,8 +90,16 @@ def upscale_work_meta(stats: dict[str, str]) -> dict[str, Any]:
     return meta
 
 
-def _invalid(message: str, param: str, status_code: int = 400) -> HTTPException:
-    return _openai_error(message, "invalid_request_error", param=param, status_code=status_code)
+def _invalid(message: str, param: str, code: str, status_code: int = 400) -> HTTPException:
+    """Client error with a ``code``: VHS could only tell a 413 by its status."""
+    return _openai_error(
+        message, "invalid_request_error", param=param, code=code, status_code=status_code
+    )
+
+
+# Worker status -> code: 413 is the input pixel cap, 400 an image it cannot
+# read or an output too big for the format, 422 a bad numeric field.
+_WORKER_ERROR_CODES = {400: "invalid_image", 413: "image_too_large", 422: "invalid_value"}
 
 
 def _worker_detail(exc: httpx.HTTPStatusError) -> str:
@@ -213,30 +221,31 @@ async def image_upscale(
         ``image_upscale``.
 
     Raises:
-        HTTPException 400: missing ``image``/``model``, empty or unreadable
-            image, out-of-range ``scale``/``target_*``/``output_quality``,
-            unknown ``output_format``/``response_format``, output too large for
-            the chosen format, or ``model_not_capable`` when the model is not
-            an upscaler (FlashVSR included: it only upscales video).
+        HTTPException 400: with ``error.code`` ``missing_required_parameter``
+            (no ``image``/``model``), ``empty_image``, ``invalid_value``
+            (out-of-range ``scale``/``target_*``/``output_quality``),
+            ``invalid_output_format``, ``invalid_response_format``,
+            ``invalid_image`` (unreadable, or output too large for the chosen
+            format) or ``model_not_capable`` when the model is not an upscaler
+            (FlashVSR included: it only upscales video).
         HTTPException 404: unknown model, or not accessible to the caller.
-        HTTPException 413: upload above the size limit, or more input pixels
-            than the worker accepts.
+        HTTPException 413: ``file_too_large`` (upload above the size limit) or
+            ``image_too_large`` (more input pixels than the worker accepts).
         HTTPException 422: a numeric field that is not a number.
         HTTPException 503: upscaler worker unavailable (``Retry-After``).
         HTTPException 507: not enough VRAM even with the smallest tiles.
     """
     if image is None:
-        raise _invalid("The 'image' field is required.", "image")
+        raise _invalid("The 'image' field is required.", "image", "missing_required_parameter")
     model_id = str(model or "").strip()
     if not model_id:
-        raise _openai_error(
-            "The 'model' field is required.", "invalid_request_error", param="model"
-        )
+        raise _invalid("The 'model' field is required.", "model", "missing_required_parameter")
     fmt = _OUTPUT_FORMATS.get(str(output_format or "png").strip().lower())
     if fmt is None:
         raise _invalid(
             f"Invalid output_format '{output_format}'. Must be one of: png, jpeg, webp.",
             "output_format",
+            "invalid_output_format",
         )
     resp_format = str(response_format).strip().lower() if response_format else None
     if resp_format is not None and resp_format not in _RESPONSE_FORMATS:
@@ -244,21 +253,28 @@ async def image_upscale(
             f"Invalid response_format '{response_format}'. Omit it for the raw image "
             "or use 'b64_json'.",
             "response_format",
+            "invalid_response_format",
         )
     if scale is not None and not 0 < scale <= 16:
-        raise _invalid("'scale' must be greater than 0 and at most 16.", "scale")
+        raise _invalid("'scale' must be greater than 0 and at most 16.", "scale", "invalid_value")
     for name, value in (("target_width", target_width), ("target_height", target_height)):
         if value is not None and value <= 0:
-            raise _invalid(f"'{name}' must be a positive number of pixels.", name)
+            raise _invalid(
+                f"'{name}' must be a positive number of pixels.", name, "invalid_value"
+            )
     if output_quality is not None and not 1 <= output_quality <= 100:
-        raise _invalid("'output_quality' must be between 1 and 100.", "output_quality")
+        raise _invalid(
+            "'output_quality' must be between 1 and 100.", "output_quality", "invalid_value"
+        )
 
     max_mb = max(1, int(settings.openai_image_max_part_size_mb))
     payload = await image.read()
     if not payload:
-        raise _invalid("The uploaded image is empty.", "image")
+        raise _invalid("The uploaded image is empty.", "image", "empty_image")
     if len(payload) > max_mb * 1024 * 1024:
-        raise _invalid(f"The image exceeds the {max_mb} MB upload limit.", "image", 413)
+        raise _invalid(
+            f"The image exceeds the {max_mb} MB upload limit.", "image", "file_too_large", 413
+        )
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
@@ -371,7 +387,9 @@ async def image_upscale(
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 if status in _CLIENT_ERROR_STATUSES:
-                    raise _invalid(_worker_detail(exc), "image", status) from exc
+                    raise _invalid(
+                        _worker_detail(exc), "image", _WORKER_ERROR_CODES[status], status
+                    ) from exc
                 raise_upstream_http_error(exc)
     finally:
         inflight.release()
@@ -384,7 +402,13 @@ async def image_upscale(
         elapsed_ms=int((time.monotonic() - started) * 1000),
     )
     headers.update(stats)
-    request.state.upscale_meta = upscale_work_meta(stats)
+    # Bytes delivered too: the same photo weighed 10.3 MB in PNG and 0.7 MB
+    # in WebP (VHS, 20/11).
+    request.state.upscale_meta = {
+        **upscale_work_meta(stats),
+        "output_bytes": len(body),
+        "output_format": fmt,
+    }
     if resp_format == "b64_json":
         size = next(
             (v for k, v in stats.items() if k.lower() == "x-ocabra-delivered-resolution"), None

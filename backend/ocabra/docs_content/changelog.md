@@ -16,6 +16,24 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.122.3 — 2026-11-20
+
+### Arreglos
+
+- **Los errores de `/v1/images/upscale` traen `error.code`.** Antes llegaban
+  con `code: null` y solo se distinguían por el status. Ahora: 413
+  `image_too_large` (más píxeles de entrada de los admitidos) o
+  `file_too_large` (fichero por encima del límite en MB); 400
+  `invalid_image` (ilegible, o salida demasiado grande para el formato),
+  `empty_image`, `invalid_value`, `invalid_output_format`,
+  `invalid_response_format` y `missing_required_parameter`. Lee `error.code`
+  y `error.message` de la raíz del cuerpo: `detail` se mantiene por
+  compatibilidad (ver 0.121.0).
+- Las estadísticas de un escalado guardan también los bytes entregados y el
+  formato: la misma foto pesaba 10,3 MB en PNG y 0,7 MB en WebP.
+
+---
+
 ## 0.122.2 — 2026-11-20
 
 ### Arreglos
