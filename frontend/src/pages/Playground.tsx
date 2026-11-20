@@ -9,6 +9,7 @@ import {
   Radio,
   SlidersHorizontal,
   Sparkles,
+  Clapperboard,
 } from "lucide-react"
 import { Link } from "react-router"
 import * as Tooltip from "@radix-ui/react-tooltip"
@@ -23,9 +24,10 @@ import { ParamsPanel, type PlaygroundParams } from "@/components/playground/Para
 import { PoolingInterface } from "@/components/playground/PoolingInterface"
 import { RealtimeInterface } from "@/components/playground/RealtimeInterface"
 import { NodeSelector } from "@/components/playground/NodeSelector"
+import { VideoInterface } from "@/components/playground/VideoInterface"
 import type { ModelState } from "@/types"
 
-type TaskTab = "text" | "image" | "audio" | "embeddings" | "realtime"
+type TaskTab = "text" | "image" | "video" | "audio" | "embeddings" | "realtime"
 
 const TAB_DEFS: Array<{
   id: TaskTab
@@ -47,6 +49,14 @@ const TAB_DEFS: Array<{
     icon: ImageIcon,
     matches: (m) => m.capabilities.imageGeneration || m.capabilities.imageEditing,
     emptyHint: "No hay modelos de imagen disponibles. Instala qwen-image-2.1 o qwen-image-edit-plus.",
+  },
+  {
+    id: "video",
+    label: "Vídeo",
+    icon: Clapperboard,
+    // Por backend también: un modelo que nunca se ha cargado aún no publica capacidades.
+    matches: (m) => Boolean(m.capabilities.videoGeneration) || m.backendType === "comfyui_video",
+    emptyHint: "No hay modelos de vídeo disponibles. Instala el backend comfyui_video y LTX-2.5.",
   },
   {
     id: "audio",
@@ -74,6 +84,7 @@ const TAB_DEFS: Array<{
 function suggestInitialTab(model: ModelState | null): TaskTab {
   if (!model) return "text"
   if (model.capabilities.imageGeneration || model.capabilities.imageEditing) return "image"
+  if (model.capabilities.videoGeneration || model.backendType === "comfyui_video") return "video"
   if (model.capabilities.audioTranscription || model.capabilities.tts) return "audio"
   if (model.capabilities.embeddings || model.capabilities.pooling || model.capabilities.rerank) return "embeddings"
   return "text"
@@ -379,6 +390,7 @@ export function Playground() {
                       onSendToEdit={(url, prompt) => setImageDraft({ url, prompt })}
                     />
                   )}
+                  {activeTab === "video" && <VideoInterface modelId={selectedModelId} />}
                   {activeTab === "audio" && (
                     <AudioInterface
                       modelId={selectedModelId}

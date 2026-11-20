@@ -129,6 +129,8 @@ export interface ModelCapabilities {
   audioInput: boolean;
   audioOutput: boolean;
   videoInput: boolean;
+  /** Generación de vídeo (/v1/videos). Opcional: los fixtures antiguos no lo traen. */
+  videoGeneration?: boolean;
   streaming: boolean;
   contextLength: number;
   nativeContextLength: number;
