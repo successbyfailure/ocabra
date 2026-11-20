@@ -130,6 +130,20 @@ describe("api client mappings", () => {
     )
   })
 
+  it("retries a failed benchmark through the dedicated checkpoint endpoint", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "run/id", status: "queued" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    )
+
+    await api.benchmarks.retry("run/id")
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("/ocabra/benchmarks/runs/run%2Fid/retry")
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST")
+  })
+
   it("maps snake_case estimate payloads to the camelCase shape used by the UI", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(

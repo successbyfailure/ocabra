@@ -2149,6 +2149,44 @@ export interface BenchmarkAttempt {
   model: string;
   attemptNumber: number;
   status: "running" | "interrupted" | "contaminated" | "completed" | "failed";
+  environment: {
+    software?: {
+      ocabra?: string;
+      python?: string;
+      scorer?: string;
+      backends?: Array<{
+        type: string;
+        installedVersion?: string | null;
+        packages?: Record<string, string>;
+        ociDigest?: string | null;
+        node?: string | null;
+      }>;
+    };
+    benchmark?: {
+      app?: string;
+      suite?: string;
+      requestedRevision?: string;
+      commit?: string | null;
+      repository?: string;
+      runner?: string;
+    };
+    model?: {
+      profile?: string;
+      backends?: string[];
+      runtimePresets?: string[];
+      effectiveContexts?: number[];
+    };
+    hardware?: {
+      gpus?: Array<{ index: number; name?: string | null; totalVramMb?: number | null }>;
+      nodes?: string[];
+    };
+    requests?: {
+      count?: number;
+      errors?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+    };
+  };
   returnCode: number | null;
   externalRequests: Array<Record<string, unknown>>;
   error: string | null;
@@ -2165,6 +2203,7 @@ export interface BenchmarkRun {
   models: string[];
   suiteArgs: string[];
   status: BenchmarkRunStatus;
+  phase: string;
   autoPause: boolean;
   pauseReason: "manual" | "external_traffic" | null;
   currentModelIndex: number;

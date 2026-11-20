@@ -6,8 +6,39 @@ import {
   parseBenchmarkResults,
 } from "./resultAdapters"
 
+export function benchmarkExport(run: BenchmarkRun) {
+  return {
+    schemaVersion: 1,
+    run: {
+      id: run.id,
+      app: run.app,
+      suite: run.suite,
+      revision: run.revision,
+      models: run.models,
+      suiteArgs: run.suiteArgs,
+      status: run.status,
+      createdAt: run.createdAt,
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+    },
+    results: run.result,
+    attempts: run.attempts.map((attempt) => ({
+      model: attempt.model,
+      attemptNumber: attempt.attemptNumber,
+      status: attempt.status,
+      returnCode: attempt.returnCode,
+      startedAt: attempt.startedAt,
+      finishedAt: attempt.finishedAt,
+      environment: attempt.environment,
+      externalRequests: attempt.externalRequests,
+      error: attempt.error,
+      result: attempt.result,
+    })),
+  }
+}
+
 function downloadJson(run: BenchmarkRun) {
-  const blob = new Blob([JSON.stringify(run.result, null, 2)], { type: "application/json" })
+  const blob = new Blob([JSON.stringify(benchmarkExport(run), null, 2)], { type: "application/json" })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement("a")
   anchor.href = url

@@ -3060,6 +3060,11 @@ export const api = {
         "POST",
         `/ocabra/benchmarks/runs/${encodeURIComponent(runId)}/resume`,
       ),
+    retry: (runId: string) =>
+      request<BenchmarkRun>(
+        "POST",
+        `/ocabra/benchmarks/runs/${encodeURIComponent(runId)}/retry`,
+      ),
     cancel: (runId: string) =>
       request<BenchmarkRun>(
         "POST",

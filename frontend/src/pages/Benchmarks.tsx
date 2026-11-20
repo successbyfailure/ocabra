@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import {
   Activity, AlertTriangle, Ban, BarChart3, CheckCircle2, ChevronDown, CircleDot,
-  Clipboard, Clock3, Copy, Loader2, Pause, Play, Plus, RefreshCw, RotateCcw,
-  Search, Terminal, X, XCircle,
+  Clipboard, Clock3, Copy, Cpu, GitCommit, Loader2, Pause, Play, Plus, RefreshCw,
+  RotateCcw, Search, Server, Terminal, X, XCircle,
 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
@@ -28,6 +28,21 @@ const ATTEMPT_LABEL: Record<BenchmarkAttempt["status"], string> = {
   completed: "Completado", failed: "Fallido",
 }
 
+const PHASE_LABEL: Record<string, string> = {
+  queued: "Esperando turno",
+  checkout: "Preparando checkout",
+  preparing: "Preparando dataset",
+  running: "Ejecutando runner",
+  finalizing: "Consolidando resultados",
+  pausing: "Deteniendo runner",
+  paused: "Pausa manual",
+  paused_external_traffic: "Esperando tráfico cero",
+  cancelling: "Cancelando",
+  cancelled: "Cancelado",
+  completed: "Finalizado",
+  failed: "Fallido",
+}
+
 function statusClass(status: BenchmarkRunStatus): string {
   if (status === "completed") return "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
   if (status === "failed") return "border-destructive/40 bg-destructive/10 text-destructive"
@@ -51,6 +66,41 @@ function formatDuration(start: string | null, end: string | null): string {
 
 function suiteProfileArgs(app: string, profile: string): string[] {
   return app === "corrala" ? ["--profile", profile] : []
+}
+
+function benchmarkCategories(app: string, suite: string): Set<ModelProfile["category"]> {
+  if (app === "escriba" && suite === "embeddings") return new Set(["embedding", "rerank"])
+  if (app === "escriba" && (suite === "stt" || suite === "stt_diarization")) return new Set(["stt"])
+  return new Set(["llm"])
+}
+
+function profileBackend(profile: ModelProfile): string {
+  return profile.baseModelId?.split("/", 1)[0] ?? "sin backend"
+}
+
+function logicalModelId(profile: ModelProfile): string {
+  const value = profile.baseModelId ?? profile.profileId
+  return value.includes("/") ? value.slice(value.indexOf("/") + 1) : value
+}
+
+export function benchmarkModelGroups(
+  profiles: ModelProfile[], app: string, suite: string, search = "",
+) {
+  const needle = search.trim().toLocaleLowerCase()
+  const categories = benchmarkCategories(app, suite)
+  const groups = new Map<string, ModelProfile[]>()
+  profiles.filter((item) => categories.has(item.category)).forEach((item) => {
+    const key = logicalModelId(item)
+    groups.set(key, [...(groups.get(key) ?? []), item])
+  })
+  return [...groups.entries()]
+    .map(([key, options]) => ({
+      key,
+      name: options.find((item) => item.isDefault)?.displayName ?? options[0].displayName ?? key,
+      options: options.sort((a, b) => profileBackend(a).localeCompare(profileBackend(b)) || a.profileId.localeCompare(b.profileId)),
+    }))
+    .filter((group) => !needle || `${group.key} ${group.name} ${group.options.map((item) => `${item.profileId} ${profileBackend(item)}`).join(" ")}`.toLocaleLowerCase().includes(needle))
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 export function Benchmarks() {
@@ -99,12 +149,10 @@ export function Benchmarks() {
 
   const selectedApp = catalog.find((item) => item.app === appName)
   const selectedSuite = selectedApp?.suites.find((item) => item.name === suiteName)
-  const modelOptions = useMemo(() => {
-    const needle = modelSearch.trim().toLocaleLowerCase()
-    return [...profiles]
-      .sort((a, b) => a.profileId.localeCompare(b.profileId))
-      .filter((item) => !needle || `${item.profileId} ${item.displayName ?? ""}`.toLocaleLowerCase().includes(needle))
-  }, [modelSearch, profiles])
+  const modelGroups = useMemo(() => {
+    return benchmarkModelGroups(profiles, appName, suiteName, modelSearch)
+  }, [appName, modelSearch, profiles, suiteName])
+  const visibleProfileIds = useMemo(() => modelGroups.flatMap((group) => group.options.map((item) => item.profileId)), [modelGroups])
 
   const visibleRuns = useMemo(() => {
     const needle = runSearch.trim().toLocaleLowerCase()
@@ -121,6 +169,7 @@ export function Benchmarks() {
     setSuiteName(app?.suites[0]?.name ?? "")
     setRevision(app?.defaultRevision ?? "")
     setProfile("standard")
+    setModels([])
   }
 
   const toggleModel = (model: string) => {
@@ -173,6 +222,19 @@ export function Benchmarks() {
       await refresh()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "No se pudo repetir la ejecución")
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const retry = async (run: BenchmarkRun) => {
+    setBusyId(run.id)
+    try {
+      await api.benchmarks.retry(run.id)
+      toast.success(`Reintentando desde ${run.models[run.currentModelIndex] ?? "el modelo fallido"}`)
+      await refresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo reintentar")
     } finally {
       setBusyId(null)
     }
@@ -263,7 +325,7 @@ export function Benchmarks() {
               <div className="flex items-center justify-between gap-2">
                 <label className="text-sm font-medium">Modelos</label>
                 <div className="flex gap-2 text-xs">
-                  <button type="button" onClick={() => setModels((current) => Array.from(new Set([...current, ...modelOptions.map((item) => item.profileId)])))} className="text-primary hover:underline">Seleccionar visibles</button>
+                  <button type="button" onClick={() => setModels((current) => Array.from(new Set([...current, ...visibleProfileIds])))} className="text-primary hover:underline">Seleccionar visibles</button>
                   <button type="button" onClick={() => setModels([])} className="text-muted-foreground hover:underline">Limpiar</button>
                 </div>
               </div>
@@ -271,17 +333,21 @@ export function Benchmarks() {
                 <Search size={14} className="absolute left-3 top-2.5 text-muted-foreground" />
                 <input value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="Buscar perfil de ejecución…" className="w-full rounded-md border border-border bg-background py-2 pl-9 pr-3 text-sm" />
               </div>
-              <div className="max-h-64 overflow-y-auto rounded-lg border border-border bg-background p-1">
-                {modelOptions.map((item) => (
-                  <label key={item.profileId} className="flex cursor-pointer items-start gap-3 rounded-md px-2 py-2 hover:bg-muted/60">
-                    <input type="checkbox" checked={models.includes(item.profileId)} onChange={() => toggleModel(item.profileId)} className="mt-0.5" />
-                    <span className="min-w-0">
-                      <span className="block truncate font-mono text-xs">{item.profileId}</span>
-                      {item.displayName && <span className="block truncate text-xs text-muted-foreground">{item.displayName}</span>}
-                    </span>
-                  </label>
+              <div className="max-h-72 space-y-1 overflow-y-auto rounded-lg border border-border bg-background p-1.5">
+                {modelGroups.map((group) => (
+                  <div key={group.key} className="rounded-md border border-transparent px-2 py-2 hover:border-border hover:bg-muted/40">
+                    <div className="min-w-0"><span className="block truncate text-sm font-medium">{group.name}</span><span className="block truncate font-mono text-[11px] text-muted-foreground">{group.key}</span></div>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {group.options.map((item) => {
+                        const backend = profileBackend(item)
+                        const sameBackend = group.options.filter((candidate) => profileBackend(candidate) === backend).length > 1
+                        const selected = models.includes(item.profileId)
+                        return <button key={item.profileId} type="button" onClick={() => toggleModel(item.profileId)} title={`${item.profileId} · ${item.baseModelId ?? ""}`} className={`rounded-full border px-2 py-1 text-[11px] transition-colors ${selected ? "border-primary bg-primary text-primary-foreground" : "border-border bg-card text-muted-foreground hover:border-primary/60 hover:text-foreground"}`}>{backend}{sameBackend ? ` · ${item.profileId}` : ""}</button>
+                      })}
+                    </div>
+                  </div>
                 ))}
-                {modelOptions.length === 0 && <p className="p-4 text-center text-xs text-muted-foreground">Sin coincidencias.</p>}
+                {modelGroups.length === 0 && <p className="p-4 text-center text-xs text-muted-foreground">No hay modelos compatibles con esta suite.</p>}
               </div>
               {models.length > 0 && (
                 <div className="flex flex-wrap gap-1.5">
@@ -297,7 +363,7 @@ export function Benchmarks() {
             <div className="space-y-4">
               <label className="block space-y-1 text-sm">
                 <span className="font-medium">Suite</span>
-                <select value={suiteName} onChange={(event) => setSuiteName(event.target.value)} className="w-full rounded-md border border-border bg-background px-3 py-2">
+                <select value={suiteName} onChange={(event) => { setSuiteName(event.target.value); setModels([]) }} className="w-full rounded-md border border-border bg-background px-3 py-2">
                   {selectedApp?.suites.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
                 </select>
                 <span className="block text-xs text-muted-foreground">{selectedSuite?.description} {selectedSuite?.resumable ? "Admite reanudación." : ""}</span>
@@ -346,7 +412,7 @@ export function Benchmarks() {
         {visibleRuns.map((run) => (
           <RunCard key={run.id} run={run} busy={busyId === run.id} log={logs[run.id]} logOpen={openLogs.has(run.id)}
             onPause={() => void control(run, "pause")} onResume={() => void control(run, "resume")} onCancel={() => void control(run, "cancel")}
-            onRerun={() => void rerun(run)} onToggleLog={() => toggleLog(run.id)} onRefreshLog={() => void loadLog(run.id, false)} />
+            onRetry={() => void retry(run)} onRerun={() => void rerun(run)} onToggleLog={() => toggleLog(run.id)} onRefreshLog={() => void loadLog(run.id, false)} />
         ))}
       </section>
     </div>
@@ -358,9 +424,9 @@ function SummaryCard({ icon, label, value, tone }: { icon: ReactNode; label: str
   return <div className="flex items-center gap-3 rounded-xl border border-border bg-card p-3"><span className={`rounded-lg p-2 ${colors[tone]}`}>{icon}</span><div><p className="text-xl font-semibold tabular-nums">{value}</p><p className="text-xs text-muted-foreground">{label}</p></div></div>
 }
 
-function RunCard({ run, busy, log, logOpen, onPause, onResume, onCancel, onRerun, onToggleLog, onRefreshLog }: {
+function RunCard({ run, busy, log, logOpen, onPause, onResume, onCancel, onRetry, onRerun, onToggleLog, onRefreshLog }: {
   run: BenchmarkRun; busy: boolean; log?: string[]; logOpen: boolean; onPause: () => void; onResume: () => void;
-  onCancel: () => void; onRerun: () => void; onToggleLog: () => void; onRefreshLog: () => void
+  onCancel: () => void; onRetry: () => void; onRerun: () => void; onToggleLog: () => void; onRefreshLog: () => void
 }) {
   const progress = run.models.length > 0 ? Math.round((run.currentModelIndex / run.models.length) * 100) : 0
   const terminal = ["completed", "failed", "cancelled"].includes(run.status)
@@ -392,13 +458,17 @@ function RunCard({ run, busy, log, logOpen, onPause, onResume, onCancel, onRerun
             {run.status === "paused" ? <button type="button" onClick={onResume} disabled={busy} className={ACTION_BUTTON}><Play size={13} /> Reanudar</button>
               : ACTIVE_STATUSES.includes(run.status) && run.status !== "cancelling" ? <button type="button" onClick={onPause} disabled={busy} className={ACTION_BUTTON}><Pause size={13} /> Pausar</button> : null}
             {ACTIVE_STATUSES.includes(run.status) && run.status !== "cancelling" && <button type="button" onClick={onCancel} disabled={busy} className={`${ACTION_BUTTON} text-destructive`}><Ban size={13} /> Cancelar</button>}
-            {terminal && <button type="button" onClick={onRerun} disabled={busy} className={ACTION_BUTTON}><RotateCcw size={13} /> Repetir</button>}
+            {run.status === "failed" && <button type="button" onClick={onRetry} disabled={busy} className={ACTION_BUTTON}><RotateCcw size={13} /> Reintentar modelo</button>}
+            {terminal && <button type="button" onClick={onRerun} disabled={busy} className={ACTION_BUTTON}><RotateCcw size={13} /> Repetir todo</button>}
             {run.attempts.length > 0 && <button type="button" onClick={onToggleLog} className={ACTION_BUTTON}><Terminal size={13} /> {logOpen ? "Ocultar log" : "Log"}</button>}
           </div>
         </div>
 
         <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted"><div className={`h-full transition-all ${run.status === "failed" ? "bg-destructive" : "bg-primary"}`} style={{ width: `${progress}%` }} /></div>
         <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-muted-foreground"><span>{run.currentModelIndex}/{run.models.length} modelos aceptados · {progress}%</span><span className="font-mono">{run.currentModel ? `Ahora: ${run.currentModel}` : run.models.join(", ")}</span></div>
+        {run.phase && <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-sky-500/10 px-2 py-1 text-xs text-sky-300"><Loader2 size={11} className={ACTIVE_STATUSES.includes(run.status) && run.status !== "paused" ? "animate-spin" : ""} />{PHASE_LABEL[run.phase] ?? run.phase}</div>}
+
+        <ExecutionEnvironment attempt={[...run.attempts].reverse().find((attempt) => Object.keys(attempt.environment ?? {}).length > 0)} />
 
         {run.pauseReason && <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"><Activity size={14} className="mt-0.5 shrink-0" />{run.pauseReason === "external_traffic" ? "Pausado por tráfico externo. Se reanudará automáticamente cuando el servidor quede libre." : "Pausado manualmente. Usa Reanudar cuando quieras continuar."}</div>}
         {run.error && <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{run.error}</div>}
@@ -416,10 +486,61 @@ function Attempts({ attempts }: { attempts: BenchmarkAttempt[] }) {
     <details className="mt-3 rounded-lg border border-border px-3 py-2 text-xs">
       <summary className="flex cursor-pointer list-none items-center justify-between text-muted-foreground"><span className="inline-flex items-center gap-1.5"><Clipboard size={13} /> Historial de intentos ({attempts.length})</span><ChevronDown size={13} /></summary>
       <div className="mt-2 overflow-x-auto">
-        <table className="w-full min-w-[680px] text-left"><thead className="text-muted-foreground"><tr><th className="py-2">Modelo</th><th>Intento</th><th>Estado</th><th>Duración</th><th>Tráfico externo</th><th>Error</th></tr></thead>
-          <tbody>{[...attempts].reverse().map((attempt) => <tr key={attempt.id} className="border-t border-border/60"><td className="py-2 font-mono">{attempt.model}</td><td>#{attempt.attemptNumber}</td><td className={attempt.status === "completed" ? "text-emerald-400" : attempt.status === "failed" ? "text-destructive" : attempt.status === "interrupted" || attempt.status === "contaminated" ? "text-amber-400" : ""}>{ATTEMPT_LABEL[attempt.status]}</td><td>{formatDuration(attempt.startedAt, attempt.finishedAt)}</td><td>{attempt.externalRequests.length || "—"}</td><td className="max-w-72 truncate text-muted-foreground" title={attempt.error ?? undefined}>{attempt.error ?? "—"}</td></tr>)}</tbody>
+        <table className="w-full min-w-[760px] text-left"><thead className="text-muted-foreground"><tr><th className="py-2">Modelo</th><th>Intento</th><th>Estado</th><th>Duración</th><th>GPU</th><th>Peticiones</th><th>Tráfico externo</th><th>Error</th></tr></thead>
+          <tbody>{[...attempts].reverse().map((attempt) => {
+            const gpus = attempt.environment?.hardware?.gpus ?? []
+            return <tr key={attempt.id} className="border-t border-border/60"><td className="py-2 font-mono">{attempt.model}</td><td>#{attempt.attemptNumber}</td><td className={attempt.status === "completed" ? "text-emerald-400" : attempt.status === "failed" ? "text-destructive" : attempt.status === "interrupted" || attempt.status === "contaminated" ? "text-amber-400" : ""}>{ATTEMPT_LABEL[attempt.status]}</td><td>{formatDuration(attempt.startedAt, attempt.finishedAt)}</td><td>{gpus.length ? gpus.map((gpu) => `#${gpu.index}`).join(" + ") : "—"}</td><td>{attempt.environment?.requests?.count ?? "—"}</td><td>{attempt.externalRequests.length || "—"}</td><td className="max-w-72 truncate text-muted-foreground" title={attempt.error ?? undefined}>{attempt.error ?? "—"}</td></tr>
+          })}</tbody>
         </table>
       </div>
     </details>
   )
+}
+
+function ExecutionEnvironment({ attempt }: { attempt?: BenchmarkAttempt }) {
+  if (!attempt) return null
+  const environment = attempt.environment
+  const software = environment.software ?? {}
+  const benchmark = environment.benchmark ?? {}
+  const model = environment.model ?? {}
+  const hardware = environment.hardware ?? {}
+  const requests = environment.requests ?? {}
+  const gpus = hardware.gpus ?? []
+  return (
+    <details className="mt-3 rounded-lg border border-border bg-muted/20 px-3 py-2 text-xs">
+      <summary className="flex cursor-pointer list-none items-center justify-between text-muted-foreground"><span className="inline-flex items-center gap-1.5"><Cpu size={13} /> Entorno reproducible · intento #{attempt.attemptNumber}</span><ChevronDown size={13} /></summary>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <EnvironmentBlock icon={<GitCommit size={13} />} title="Versiones" lines={[
+          software.ocabra ? `oCabra ${software.ocabra}` : null,
+          software.scorer ? `Scorer ${software.scorer}` : null,
+          software.python ? `Python ${software.python}` : null,
+          ...(software.backends ?? []).map((backend) => (
+            `${backend.type} ${backend.installedVersion ?? "versión no informada"}`
+          )),
+          benchmark.commit ? `Dataset ${benchmark.commit.slice(0, 12)}` : null,
+        ]} />
+        <EnvironmentBlock icon={<Cpu size={13} />} title="Modelo" lines={[
+          model.profile ?? attempt.model,
+          ...(model.backends ?? []).map((backend) => `Backend ${backend}`),
+          ...(model.runtimePresets ?? []).map((preset) => `Preset ${preset}`),
+          ...(model.effectiveContexts ?? []).map((context) => `Contexto ${context.toLocaleString()}`),
+        ]} />
+        <EnvironmentBlock icon={<Server size={13} />} title="Hardware" lines={[
+          ...gpus.map((gpu) => `GPU ${gpu.index}: ${gpu.name ?? "desconocida"}${gpu.totalVramMb ? ` · ${(gpu.totalVramMb / 1024).toFixed(0)} GB` : ""}`),
+          ...(hardware.nodes ?? []).map((node) => `Nodo ${node}`),
+        ]} />
+        <EnvironmentBlock icon={<Activity size={13} />} title="Carga medida" lines={[
+          `${requests.count ?? 0} peticiones`,
+          `${(requests.inputTokens ?? 0).toLocaleString()} tokens entrada`,
+          `${(requests.outputTokens ?? 0).toLocaleString()} tokens salida`,
+          requests.errors ? `${requests.errors} errores` : "Sin errores HTTP",
+        ]} />
+      </div>
+    </details>
+  )
+}
+
+function EnvironmentBlock({ icon, title, lines }: { icon: ReactNode; title: string; lines: Array<string | null> }) {
+  const visible = lines.filter((line): line is string => Boolean(line))
+  return <div><p className="mb-1 inline-flex items-center gap-1 font-medium">{icon}{title}</p>{visible.length > 0 ? visible.map((line) => <p key={line} className="truncate text-muted-foreground" title={line}>{line}</p>) : <p className="text-muted-foreground">Sin datos</p>}</div>
 }

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
+import { benchmarkExport } from "@/pages/benchmarks/BenchmarkResults"
 import { bestMetricValues, formatMetric, parseBenchmarkResults } from "@/pages/benchmarks/resultAdapters"
+import type { BenchmarkRun } from "@/types"
 
 describe("benchmark result adapters", () => {
   it("shows the quality and speed persisted by Escriba", () => {
@@ -92,5 +94,37 @@ describe("benchmark result adapters", () => {
     expect(formatMetric(bfcl.metrics[0])).toBe("82.0%")
     expect(ifeval.scope).toBe("ifeval · 50 casos")
     expect(formatMetric(ifeval.metrics[0])).toBe("70.0%")
+  })
+
+  it("exports results together with versions, backend and every observed GPU", () => {
+    const run = {
+      id: "run-1", app: "ifeval", suite: "quick", revision: "abc", models: ["qwen"],
+      suiteArgs: [], status: "completed", phase: "completed", autoPause: true,
+      pauseReason: null, currentModelIndex: 1, currentModel: null,
+      result: { qwen: { score: 1 } }, contaminatedAttempts: 0, error: null,
+      externalActivityAt: null, createdAt: "2026-01-01T00:00:00Z",
+      startedAt: "2026-01-01T00:00:01Z", finishedAt: "2026-01-01T00:01:00Z",
+      attempts: [{
+        id: "attempt-1", model: "qwen", attemptNumber: 1, status: "completed",
+        environment: {
+          software: { ocabra: "0.124.0", scorer: "4.0.0" },
+          model: { profile: "qwen", backends: ["llamacpp_mks"] },
+          hardware: { gpus: [{ index: 0, name: "RTX 3090", totalVramMb: 24576 }] },
+        },
+        returnCode: 0, externalRequests: [], error: null,
+        startedAt: "2026-01-01T00:00:01Z", finishedAt: "2026-01-01T00:01:00Z",
+        result: { score: 1 },
+      }],
+    } satisfies BenchmarkRun
+
+    const exported = benchmarkExport(run)
+
+    expect(exported.schemaVersion).toBe(1)
+    expect(exported.results).toEqual(run.result)
+    expect(exported.attempts[0].environment).toMatchObject({
+      software: { ocabra: "0.124.0", scorer: "4.0.0" },
+      model: { backends: ["llamacpp_mks"] },
+      hardware: { gpus: [{ index: 0, name: "RTX 3090" }] },
+    })
   })
 })
