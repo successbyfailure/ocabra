@@ -1,44 +1,31 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import {
-  Activity,
-  AlertTriangle,
-  Ban,
-  BarChart3,
-  Loader2,
-  Pause,
-  Play,
-  Plus,
-  RefreshCw,
-  Terminal,
+  Activity, AlertTriangle, Ban, BarChart3, CheckCircle2, ChevronDown, CircleDot,
+  Clipboard, Clock3, Copy, Loader2, Pause, Play, Plus, RefreshCw, RotateCcw,
+  Search, Terminal, X, XCircle,
 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import type {
-  BenchmarkAppCatalog,
-  BenchmarkRun,
-  BenchmarkRunStatus,
+  BenchmarkAppCatalog, BenchmarkAttempt, BenchmarkRun, BenchmarkRunStatus,
   ModelProfile,
 } from "@/types"
+import { BenchmarkResults } from "./benchmarks/BenchmarkResults"
 
 const ACTIVE_STATUSES: BenchmarkRunStatus[] = [
-  "queued",
-  "running",
-  "pausing",
-  "paused",
-  "cancelling",
+  "queued", "running", "pausing", "paused", "cancelling",
 ]
 
-const ACTION_BUTTON = "inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
+const ACTION_BUTTON = "inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
 
 const STATUS_LABEL: Record<BenchmarkRunStatus, string> = {
-  queued: "En cola",
-  running: "Ejecutando",
-  pausing: "Pausando",
-  paused: "Pausado",
-  cancelling: "Cancelando",
-  completed: "Completado",
-  failed: "Fallido",
-  cancelled: "Cancelado",
+  queued: "En cola", running: "Ejecutando", pausing: "Pausando", paused: "Pausado",
+  cancelling: "Cancelando", completed: "Completado", failed: "Fallido", cancelled: "Cancelado",
+}
+
+const ATTEMPT_LABEL: Record<BenchmarkAttempt["status"], string> = {
+  running: "Ejecutando", interrupted: "Interrumpido", contaminated: "Contaminado",
+  completed: "Completado", failed: "Fallido",
 }
 
 function statusClass(status: BenchmarkRunStatus): string {
@@ -53,25 +40,17 @@ function formatDate(value: string | null): string {
   return value ? new Date(value).toLocaleString() : "—"
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null
-    ? value as Record<string, unknown>
-    : null
+function formatDuration(start: string | null, end: string | null): string {
+  if (!start) return "—"
+  const seconds = Math.max(0, Math.round((new Date(end ?? Date.now()).getTime() - new Date(start).getTime()) / 1_000))
+  if (seconds < 60) return `${seconds} s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} min ${seconds % 60} s`
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`
 }
 
-function metricRows(result: Record<string, unknown>): Array<Record<string, unknown>> {
-  const metrics = result.metrics
-  return Array.isArray(metrics)
-    ? metrics.map(asRecord).filter((row): row is Record<string, unknown> => row !== null)
-    : []
-}
-
-function pct(value: unknown): string {
-  return typeof value === "number" ? `${Math.round(value * 100)}%` : "—"
-}
-
-function number(value: unknown, suffix = ""): string {
-  return typeof value === "number" ? `${value.toFixed(1)}${suffix}` : "—"
+function suiteProfileArgs(app: string, profile: string): string[] {
+  return app === "corrala" ? ["--profile", profile] : []
 }
 
 export function Benchmarks() {
@@ -83,23 +62,21 @@ export function Benchmarks() {
   const [appName, setAppName] = useState("")
   const [suiteName, setSuiteName] = useState("")
   const [models, setModels] = useState<string[]>([])
+  const [modelSearch, setModelSearch] = useState("")
   const [revision, setRevision] = useState("")
   const [profile, setProfile] = useState("standard")
   const [autoPause, setAutoPause] = useState(true)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [logs, setLogs] = useState<Record<string, string[]>>({})
+  const [openLogs, setOpenLogs] = useState<Set<string>>(new Set())
+  const [runSearch, setRunSearch] = useState("")
+  const [statusFilter, setStatusFilter] = useState<"all" | BenchmarkRunStatus>("all")
+  const [appFilter, setAppFilter] = useState("all")
 
-  const refresh = async () => {
-    const next = await api.benchmarks.list()
-    setRuns(next)
-  }
+  const refresh = useCallback(async () => setRuns(await api.benchmarks.list()), [])
 
   useEffect(() => {
-    void Promise.all([
-      api.benchmarks.catalog(),
-      api.profiles.listAll(),
-      api.benchmarks.list(),
-    ])
+    void Promise.all([api.benchmarks.catalog(), api.profiles.listAll(), api.benchmarks.list()])
       .then(([nextCatalog, nextProfiles, nextRuns]) => {
         setCatalog(nextCatalog)
         setProfiles(nextProfiles.filter((item) => item.enabled && item.profileKind === "execution"))
@@ -110,48 +87,58 @@ export function Benchmarks() {
           setRevision(nextCatalog[0].defaultRevision)
         }
       })
-      .catch((error) => toast.error(error instanceof Error ? error.message : "No se pudo cargar benchmarks"))
+      .catch((error) => toast.error(error instanceof Error ? error.message : "No se pudieron cargar los benchmarks"))
       .finally(() => setLoading(false))
   }, [])
 
   const hasActive = runs.some((run) => ACTIVE_STATUSES.includes(run.status))
   useEffect(() => {
-    const timer = window.setInterval(
-      () => void refresh().catch(() => undefined),
-      hasActive ? 2_000 : 10_000,
-    )
+    const timer = window.setInterval(() => void refresh().catch(() => undefined), hasActive ? 2_000 : 10_000)
     return () => window.clearInterval(timer)
-  }, [hasActive])
+  }, [hasActive, refresh])
 
   const selectedApp = catalog.find((item) => item.app === appName)
   const selectedSuite = selectedApp?.suites.find((item) => item.name === suiteName)
-  const modelOptions = useMemo(
-    () => [...profiles].sort((a, b) => a.profileId.localeCompare(b.profileId)),
-    [profiles],
-  )
+  const modelOptions = useMemo(() => {
+    const needle = modelSearch.trim().toLocaleLowerCase()
+    return [...profiles]
+      .sort((a, b) => a.profileId.localeCompare(b.profileId))
+      .filter((item) => !needle || `${item.profileId} ${item.displayName ?? ""}`.toLocaleLowerCase().includes(needle))
+  }, [modelSearch, profiles])
+
+  const visibleRuns = useMemo(() => {
+    const needle = runSearch.trim().toLocaleLowerCase()
+    return runs.filter((run) => (
+      (statusFilter === "all" || run.status === statusFilter)
+      && (appFilter === "all" || run.app === appFilter)
+      && (!needle || `${run.app} ${run.suite} ${run.models.join(" ")} ${run.revision}`.toLocaleLowerCase().includes(needle))
+    ))
+  }, [appFilter, runSearch, runs, statusFilter])
 
   const changeApp = (value: string) => {
     const app = catalog.find((item) => item.app === value)
     setAppName(value)
     setSuiteName(app?.suites[0]?.name ?? "")
     setRevision(app?.defaultRevision ?? "")
+    setProfile("standard")
+  }
+
+  const toggleModel = (model: string) => {
+    setModels((current) => current.includes(model)
+      ? current.filter((item) => item !== model)
+      : [...current, model])
   }
 
   const createRun = async () => {
     if (!appName || !suiteName || models.length === 0) {
-      toast.error("Selecciona aplicación, suite y al menos un modelo")
+      toast.error("Selecciona una batería, una suite y al menos un modelo")
       return
     }
     setCreating(true)
     try {
-      const suiteArgs = appName === "corrala" ? ["--profile", profile] : []
       await api.benchmarks.create({
-        app: appName,
-        suite: suiteName,
-        models,
-        revision,
-        suiteArgs,
-        autoPause,
+        app: appName, suite: suiteName, models, revision,
+        suiteArgs: suiteProfileArgs(appName, profile), autoPause,
       })
       toast.success("Benchmark añadido a la cola")
       setModels([])
@@ -175,328 +162,264 @@ export function Benchmarks() {
     }
   }
 
-  const loadLog = async (runId: string) => {
+  const rerun = async (run: BenchmarkRun) => {
+    setBusyId(run.id)
     try {
-      const response = await api.benchmarks.log(runId)
+      await api.benchmarks.create({
+        app: run.app, suite: run.suite, models: run.models, revision: run.revision,
+        suiteArgs: run.suiteArgs, autoPause: run.autoPause,
+      })
+      toast.success("Configuración añadida de nuevo a la cola")
+      await refresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo repetir la ejecución")
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const loadLog = async (runId: string, open = true) => {
+    try {
+      const response = await api.benchmarks.log(runId, 2_000)
       setLogs((current) => ({ ...current, [runId]: response.lines }))
+      if (open) setOpenLogs((current) => new Set(current).add(runId))
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "No se pudo leer el log")
     }
   }
 
+  const toggleLog = (runId: string) => {
+    if (openLogs.has(runId)) {
+      setOpenLogs((current) => {
+        const next = new Set(current)
+        next.delete(runId)
+        return next
+      })
+    } else {
+      void loadLog(runId)
+    }
+  }
+
+  const summary = {
+    active: runs.filter((run) => ACTIVE_STATUSES.includes(run.status)).length,
+    completed: runs.filter((run) => run.status === "completed").length,
+    failed: runs.filter((run) => run.status === "failed").length,
+    contaminated: runs.reduce((total, run) => total + run.contaminatedAttempts, 0),
+  }
+
   return (
-    <div className="space-y-5">
-      <div className="flex items-start justify-between gap-4">
+    <div className="space-y-6">
+      <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-semibold">
             <BarChart3 size={22} className="text-primary" /> Benchmarks
           </h1>
           <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-            Ejecuta datasets reales por modelo. Si entra tráfico interactivo, oCabra pausa el
-            runner, descarta los intentos contaminados y los reanuda tras un periodo sin actividad.
+            Ejecuta, compara y audita modelos con datasets reales. El tráfico interactivo pausa
+            automáticamente el runner y los intentos solapados se descartan.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          className="rounded-md border border-border p-2 text-muted-foreground hover:bg-muted"
-          title="Actualizar"
-        >
-          <RefreshCw size={16} />
+        <button type="button" onClick={() => void refresh()} className={ACTION_BUTTON}>
+          <RefreshCw size={14} /> Actualizar
         </button>
+      </header>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <SummaryCard icon={<CircleDot size={16} />} label="En curso" value={summary.active} tone="sky" />
+        <SummaryCard icon={<CheckCircle2 size={16} />} label="Completadas" value={summary.completed} tone="emerald" />
+        <SummaryCard icon={<XCircle size={16} />} label="Fallidas" value={summary.failed} tone="red" />
+        <SummaryCard icon={<AlertTriangle size={16} />} label="Intentos descartados" value={summary.contaminated} tone="amber" />
       </div>
 
-      <section className="rounded-lg border border-border bg-card p-4">
-        <div className="mb-4 flex items-center gap-2">
+      <section className="rounded-xl border border-border bg-card">
+        <div className="flex items-center gap-2 border-b border-border px-4 py-3">
           <Plus size={17} className="text-primary" />
-          <h2 className="font-medium">Nueva ejecución</h2>
-        </div>
-        <div className="grid gap-4 lg:grid-cols-2">
-          <label className="space-y-1 text-sm">
-            <span className="text-muted-foreground">Aplicación</span>
-            <select
-              value={appName}
-              onChange={(event) => changeApp(event.target.value)}
-              className="w-full rounded-md border border-border bg-background px-3 py-2"
-            >
-              {catalog.map((item) => <option key={item.app} value={item.app}>{item.app}</option>)}
-            </select>
-            <p className="text-xs text-muted-foreground">{selectedApp?.description}</p>
-          </label>
-          <label className="space-y-1 text-sm">
-            <span className="text-muted-foreground">Suite</span>
-            <select
-              value={suiteName}
-              onChange={(event) => setSuiteName(event.target.value)}
-              className="w-full rounded-md border border-border bg-background px-3 py-2"
-            >
-              {selectedApp?.suites.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
-            </select>
-            <p className="text-xs text-muted-foreground">
-              {selectedSuite?.description} {selectedSuite?.resumable ? "Reanudable." : ""}
-            </p>
-          </label>
-          <label className="space-y-1 text-sm">
-            <span className="text-muted-foreground">Modelos (Ctrl/Cmd para varios)</span>
-            <select
-              multiple
-              size={Math.min(9, Math.max(5, modelOptions.length))}
-              value={models}
-              onChange={(event) => setModels(
-                Array.from(event.currentTarget.selectedOptions, (option) => option.value),
-              )}
-              className="w-full rounded-md border border-border bg-background px-2 py-1 font-mono text-xs"
-            >
-              {modelOptions.map((item) => (
-                <option key={item.profileId} value={item.profileId}>
-                  {item.profileId}{item.displayName ? ` — ${item.displayName}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="space-y-3">
-            <label className="block space-y-1 text-sm">
-              <span className="text-muted-foreground">Revisión Git</span>
-              <input
-                value={revision}
-                onChange={(event) => setRevision(event.target.value)}
-                className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs"
-              />
-            </label>
-            {appName === "corrala" && (
-              <label className="block space-y-1 text-sm">
-                <span className="text-muted-foreground">Perfil de coste</span>
-                <select
-                  value={profile}
-                  onChange={(event) => setProfile(event.target.value)}
-                  className="w-full rounded-md border border-border bg-background px-3 py-2"
-                >
-                  <option value="quick">Quick (34 casos)</option>
-                  <option value="standard">Standard (54 casos)</option>
-                  <option value="full">Full (83 casos)</option>
-                  <option value="final">Final (83 casos × 3)</option>
-                </select>
-              </label>
-            )}
-            <label className="flex items-start gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={autoPause}
-                onChange={(event) => setAutoPause(event.target.checked)}
-                className="mt-1"
-              />
-              <span>
-                Pausar ante tráfico real
-                <span className="block text-xs text-muted-foreground">
-                  Los intentos solapados se repiten y no entran en el resultado limpio.
-                </span>
-              </span>
-            </label>
+          <div>
+            <h2 className="font-medium">Nueva ejecución</h2>
+            <p className="text-xs text-muted-foreground">Cada modelo se ejecuta de forma secuencial y aislada.</p>
           </div>
         </div>
-        <div className="mt-4 flex justify-end">
-          <button
-            type="button"
-            onClick={() => void createRun()}
-            disabled={creating || loading || models.length === 0}
-            className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
-          >
-            {creating ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />}
-            Encolar {models.length > 0 ? `${models.length} modelo${models.length === 1 ? "" : "s"}` : ""}
-          </button>
+
+        <div className="space-y-5 p-4">
+          <div>
+            <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Batería</p>
+            <div className="grid gap-2 md:grid-cols-2">
+              {catalog.map((item) => (
+                <button
+                  key={item.app}
+                  type="button"
+                  onClick={() => changeApp(item.app)}
+                  className={`rounded-lg border p-3 text-left transition-colors ${appName === item.app ? "border-primary bg-primary/10" : "border-border hover:bg-muted/50"}`}
+                >
+                  <span className="font-mono text-sm font-semibold">{item.app}</span>
+                  <span className="mt-1 block text-xs text-muted-foreground">{item.description}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-sm font-medium">Modelos</label>
+                <div className="flex gap-2 text-xs">
+                  <button type="button" onClick={() => setModels((current) => Array.from(new Set([...current, ...modelOptions.map((item) => item.profileId)])))} className="text-primary hover:underline">Seleccionar visibles</button>
+                  <button type="button" onClick={() => setModels([])} className="text-muted-foreground hover:underline">Limpiar</button>
+                </div>
+              </div>
+              <div className="relative">
+                <Search size={14} className="absolute left-3 top-2.5 text-muted-foreground" />
+                <input value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="Buscar perfil de ejecución…" className="w-full rounded-md border border-border bg-background py-2 pl-9 pr-3 text-sm" />
+              </div>
+              <div className="max-h-64 overflow-y-auto rounded-lg border border-border bg-background p-1">
+                {modelOptions.map((item) => (
+                  <label key={item.profileId} className="flex cursor-pointer items-start gap-3 rounded-md px-2 py-2 hover:bg-muted/60">
+                    <input type="checkbox" checked={models.includes(item.profileId)} onChange={() => toggleModel(item.profileId)} className="mt-0.5" />
+                    <span className="min-w-0">
+                      <span className="block truncate font-mono text-xs">{item.profileId}</span>
+                      {item.displayName && <span className="block truncate text-xs text-muted-foreground">{item.displayName}</span>}
+                    </span>
+                  </label>
+                ))}
+                {modelOptions.length === 0 && <p className="p-4 text-center text-xs text-muted-foreground">Sin coincidencias.</p>}
+              </div>
+              {models.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {models.map((model) => (
+                    <button key={model} type="button" onClick={() => toggleModel(model)} className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-1 font-mono text-[11px] text-primary">
+                      {model} <X size={11} />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-4">
+              <label className="block space-y-1 text-sm">
+                <span className="font-medium">Suite</span>
+                <select value={suiteName} onChange={(event) => setSuiteName(event.target.value)} className="w-full rounded-md border border-border bg-background px-3 py-2">
+                  {selectedApp?.suites.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
+                </select>
+                <span className="block text-xs text-muted-foreground">{selectedSuite?.description} {selectedSuite?.resumable ? "Admite reanudación." : ""}</span>
+              </label>
+
+              {appName === "corrala" && (
+                <label className="block space-y-1 text-sm">
+                  <span className="font-medium">Perfil de coste</span>
+                  <select value={profile} onChange={(event) => setProfile(event.target.value)} className="w-full rounded-md border border-border bg-background px-3 py-2">
+                    <option value="quick">Quick · 34 casos</option><option value="standard">Standard · 54 casos</option>
+                    <option value="full">Full · 83 casos</option><option value="final">Final · 83 casos × 3</option>
+                  </select>
+                </label>
+              )}
+
+              <label className="flex items-start gap-2 rounded-lg border border-border p-3 text-sm">
+                <input type="checkbox" checked={autoPause} onChange={(event) => setAutoPause(event.target.checked)} className="mt-1" />
+                <span><span className="font-medium">Proteger el tráfico real</span><span className="block text-xs text-muted-foreground">Pausa, espera a que el servidor quede libre y repite el intento afectado.</span></span>
+              </label>
+
+              <details className="rounded-lg border border-border p-3 text-sm">
+                <summary className="flex cursor-pointer list-none items-center justify-between font-medium">Opciones avanzadas <ChevronDown size={14} /></summary>
+                <label className="mt-3 block space-y-1"><span className="text-xs text-muted-foreground">Revisión Git</span><input value={revision} onChange={(event) => setRevision(event.target.value)} className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs" /></label>
+              </details>
+
+              <button type="button" onClick={() => void createRun()} disabled={creating || loading || models.length === 0} className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground disabled:opacity-50">
+                {creating ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />}
+                {models.length > 0 ? `Encolar ${models.length} modelo${models.length === 1 ? "" : "s"}` : "Selecciona modelos"}
+              </button>
+            </div>
+          </div>
         </div>
       </section>
 
       <section className="space-y-3">
-        <h2 className="font-medium">Ejecuciones</h2>
-        {!loading && runs.length === 0 && (
-          <div className="rounded-lg border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
-            No hay benchmarks todavía.
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div><h2 className="font-medium">Ejecuciones</h2><p className="text-xs text-muted-foreground">{visibleRuns.length} de {runs.length}</p></div>
+          <div className="flex flex-1 flex-wrap justify-end gap-2">
+            <div className="relative min-w-52"><Search size={13} className="absolute left-2.5 top-2.5 text-muted-foreground" /><input value={runSearch} onChange={(event) => setRunSearch(event.target.value)} placeholder="Modelo, suite o revisión…" className="w-full rounded-md border border-border bg-background py-2 pl-8 pr-2 text-xs" /></div>
+            <select value={appFilter} onChange={(event) => setAppFilter(event.target.value)} className="rounded-md border border-border bg-background px-2 py-2 text-xs"><option value="all">Todas las baterías</option>{catalog.map((app) => <option key={app.app} value={app.app}>{app.app}</option>)}</select>
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)} className="rounded-md border border-border bg-background px-2 py-2 text-xs"><option value="all">Todos los estados</option>{Object.entries(STATUS_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
           </div>
-        )}
-        {runs.map((run) => (
-          <RunCard
-            key={run.id}
-            run={run}
-            busy={busyId === run.id}
-            log={logs[run.id]}
-            onPause={() => void control(run, "pause")}
-            onResume={() => void control(run, "resume")}
-            onCancel={() => void control(run, "cancel")}
-            onLog={() => void loadLog(run.id)}
-          />
+        </div>
+
+        {!loading && visibleRuns.length === 0 && <div className="rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">{runs.length === 0 ? "No hay benchmarks todavía." : "Ninguna ejecución coincide con los filtros."}</div>}
+        {visibleRuns.map((run) => (
+          <RunCard key={run.id} run={run} busy={busyId === run.id} log={logs[run.id]} logOpen={openLogs.has(run.id)}
+            onPause={() => void control(run, "pause")} onResume={() => void control(run, "resume")} onCancel={() => void control(run, "cancel")}
+            onRerun={() => void rerun(run)} onToggleLog={() => toggleLog(run.id)} onRefreshLog={() => void loadLog(run.id, false)} />
         ))}
       </section>
     </div>
   )
 }
 
-function RunCard({
-  run,
-  busy,
-  log,
-  onPause,
-  onResume,
-  onCancel,
-  onLog,
-}: {
-  run: BenchmarkRun
-  busy: boolean
-  log?: string[]
-  onPause: () => void
-  onResume: () => void
-  onCancel: () => void
-  onLog: () => void
+function SummaryCard({ icon, label, value, tone }: { icon: ReactNode; label: string; value: number; tone: "sky" | "emerald" | "red" | "amber" }) {
+  const colors = { sky: "text-sky-400 bg-sky-500/10", emerald: "text-emerald-400 bg-emerald-500/10", red: "text-red-400 bg-red-500/10", amber: "text-amber-400 bg-amber-500/10" }
+  return <div className="flex items-center gap-3 rounded-xl border border-border bg-card p-3"><span className={`rounded-lg p-2 ${colors[tone]}`}>{icon}</span><div><p className="text-xl font-semibold tabular-nums">{value}</p><p className="text-xs text-muted-foreground">{label}</p></div></div>
+}
+
+function RunCard({ run, busy, log, logOpen, onPause, onResume, onCancel, onRerun, onToggleLog, onRefreshLog }: {
+  run: BenchmarkRun; busy: boolean; log?: string[]; logOpen: boolean; onPause: () => void; onResume: () => void;
+  onCancel: () => void; onRerun: () => void; onToggleLog: () => void; onRefreshLog: () => void
 }) {
-  const progress = run.models.length > 0
-    ? Math.round((run.currentModelIndex / run.models.length) * 100)
-    : 0
+  const progress = run.models.length > 0 ? Math.round((run.currentModelIndex / run.models.length) * 100) : 0
+  const terminal = ["completed", "failed", "cancelled"].includes(run.status)
+  const copyLog = async () => {
+    try {
+      await navigator.clipboard.writeText((log ?? []).join("\n"))
+      toast.success("Log copiado")
+    } catch {
+      toast.error("El navegador no permitió copiar el log")
+    }
+  }
 
   return (
-    <article className="rounded-lg border border-border bg-card p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="font-medium">{run.app} · {run.suite}</h3>
-            <span className={`rounded border px-2 py-0.5 text-xs ${statusClass(run.status)}`}>
-              {STATUS_LABEL[run.status]}
-            </span>
-            {run.contaminatedAttempts > 0 && (
-              <span className="inline-flex items-center gap-1 text-xs text-amber-400">
-                <AlertTriangle size={12} /> {run.contaminatedAttempts} contaminado(s)
-              </span>
-            )}
+    <article className="overflow-hidden rounded-xl border border-border bg-card">
+      <div className="p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="font-medium">{run.app} <span className="text-muted-foreground">·</span> {run.suite}</h3>
+              <span className={`rounded border px-2 py-0.5 text-xs ${statusClass(run.status)}`}>{STATUS_LABEL[run.status]}</span>
+              {run.contaminatedAttempts > 0 && <span className="inline-flex items-center gap-1 text-xs text-amber-400"><AlertTriangle size={12} /> {run.contaminatedAttempts} descartado{run.contaminatedAttempts === 1 ? "" : "s"}</span>}
+            </div>
+            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <span>{formatDate(run.createdAt)}</span><span className="inline-flex items-center gap-1"><Clock3 size={11} /> {formatDuration(run.startedAt, run.finishedAt)}</span>
+              <span>revisión <code>{run.revision.slice(0, 12)}</code></span><span className="font-mono" title={run.id}>{run.id.slice(0, 8)}</span>
+            </div>
           </div>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {formatDate(run.createdAt)} · revisión <code>{run.revision}</code>
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {run.status === "paused" ? (
-            <button type="button" onClick={onResume} disabled={busy} className={ACTION_BUTTON}>
-              <Play size={14} /> Reanudar
-            </button>
-          ) : ACTIVE_STATUSES.includes(run.status) && run.status !== "cancelling" ? (
-            <button type="button" onClick={onPause} disabled={busy} className={ACTION_BUTTON}>
-              <Pause size={14} /> Pausar
-            </button>
-          ) : null}
-          {ACTIVE_STATUSES.includes(run.status) && run.status !== "cancelling" && (
-            <button type="button" onClick={onCancel} disabled={busy} className={`${ACTION_BUTTON} text-destructive`}>
-              <Ban size={14} /> Cancelar
-            </button>
-          )}
-          {run.attempts.length > 0 && (
-            <button type="button" onClick={onLog} className={ACTION_BUTTON}>
-              <Terminal size={14} /> Log
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
-        <div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} />
-      </div>
-      <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-muted-foreground">
-        <span>{run.currentModelIndex}/{run.models.length} modelos aceptados</span>
-        <span>{run.currentModel ? `Ahora: ${run.currentModel}` : run.models.join(", ")}</span>
-      </div>
-
-      {run.pauseReason === "external_traffic" && (
-        <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-          <Activity size={14} className="mt-0.5" />
-          Pausado por tráfico externo. Se reanudará automáticamente cuando el servidor quede libre.
-        </div>
-      )}
-      {run.error && (
-        <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {run.error}
-        </div>
-      )}
-
-      {Object.keys(run.result).length > 0 && <Results results={run.result} />}
-
-      {run.attempts.length > 0 && (
-        <details className="mt-3 text-xs">
-          <summary className="cursor-pointer text-muted-foreground">
-            Intentos ({run.attempts.length})
-          </summary>
-          <div className="mt-2 overflow-x-auto">
-            <table className="w-full text-left">
-              <thead className="text-muted-foreground">
-                <tr><th className="py-1">#</th><th>Modelo</th><th>Estado</th><th>Inicio</th><th>Tráfico externo</th></tr>
-              </thead>
-              <tbody>
-                {run.attempts.map((attempt) => (
-                  <tr key={attempt.id} className="border-t border-border/60">
-                    <td className="py-1">{attempt.attemptNumber}</td>
-                    <td className="font-mono">{attempt.model}</td>
-                    <td>{attempt.status}</td>
-                    <td>{formatDate(attempt.startedAt)}</td>
-                    <td>{attempt.externalRequests.length}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {run.status === "paused" ? <button type="button" onClick={onResume} disabled={busy} className={ACTION_BUTTON}><Play size={13} /> Reanudar</button>
+              : ACTIVE_STATUSES.includes(run.status) && run.status !== "cancelling" ? <button type="button" onClick={onPause} disabled={busy} className={ACTION_BUTTON}><Pause size={13} /> Pausar</button> : null}
+            {ACTIVE_STATUSES.includes(run.status) && run.status !== "cancelling" && <button type="button" onClick={onCancel} disabled={busy} className={`${ACTION_BUTTON} text-destructive`}><Ban size={13} /> Cancelar</button>}
+            {terminal && <button type="button" onClick={onRerun} disabled={busy} className={ACTION_BUTTON}><RotateCcw size={13} /> Repetir</button>}
+            {run.attempts.length > 0 && <button type="button" onClick={onToggleLog} className={ACTION_BUTTON}><Terminal size={13} /> {logOpen ? "Ocultar log" : "Log"}</button>}
           </div>
-        </details>
-      )}
+        </div>
 
-      {log && (
-        <pre className="mt-3 max-h-72 overflow-auto rounded-md bg-black/60 p-3 text-[11px] text-zinc-300">
-          {log.join("\n") || "Sin salida todavía"}
-        </pre>
-      )}
+        <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted"><div className={`h-full transition-all ${run.status === "failed" ? "bg-destructive" : "bg-primary"}`} style={{ width: `${progress}%` }} /></div>
+        <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-muted-foreground"><span>{run.currentModelIndex}/{run.models.length} modelos aceptados · {progress}%</span><span className="font-mono">{run.currentModel ? `Ahora: ${run.currentModel}` : run.models.join(", ")}</span></div>
+
+        {run.pauseReason && <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"><Activity size={14} className="mt-0.5 shrink-0" />{run.pauseReason === "external_traffic" ? "Pausado por tráfico externo. Se reanudará automáticamente cuando el servidor quede libre." : "Pausado manualmente. Usa Reanudar cuando quieras continuar."}</div>}
+        {run.error && <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{run.error}</div>}
+        {Object.keys(run.result).length > 0 && <BenchmarkResults run={run} />}
+        {run.attempts.length > 0 && <Attempts attempts={run.attempts} />}
+      </div>
+
+      {logOpen && <div className="border-t border-border bg-black/40"><div className="flex items-center justify-between px-3 py-2"><span className="text-xs font-medium text-zinc-300">Salida del último intento</span><div className="flex gap-1"><button type="button" onClick={onRefreshLog} className="rounded p-1.5 text-zinc-400 hover:bg-white/10" title="Actualizar log"><RefreshCw size={13} /></button><button type="button" onClick={() => void copyLog()} className="rounded p-1.5 text-zinc-400 hover:bg-white/10" title="Copiar log"><Copy size={13} /></button></div></div><pre className="max-h-96 overflow-auto border-t border-white/10 p-3 text-[11px] leading-relaxed text-zinc-300">{log?.join("\n") || "Sin salida todavía"}</pre></div>}
     </article>
   )
 }
 
-function Results({ results }: { results: Record<string, Record<string, unknown>> }) {
-  const rows: Array<{ model: string; metric: Record<string, unknown> | null }> = []
-  Object.entries(results).forEach(([model, result]) => {
-    const metrics = metricRows(result)
-    if (metrics.length > 0) {
-      rows.push(...metrics.map((metric) => ({ model, metric })))
-    } else {
-      rows.push({ model, metric: null })
-    }
-  })
+function Attempts({ attempts }: { attempts: BenchmarkAttempt[] }) {
   return (
-    <details className="mt-4" open>
-      <summary className="cursor-pointer text-sm font-medium">Resultados aceptados</summary>
-      <div className="mt-2 overflow-x-auto rounded-md border border-border">
-        <table className="w-full text-left text-xs">
-          <thead className="bg-muted/40 text-muted-foreground">
-            <tr>
-              <th className="px-2 py-2">Modelo</th><th>Suite</th><th>Calidad</th>
-              <th>Primaria</th><th>Latencia p50</th><th>Decode</th><th>Errores</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(({ model, metric }, index) => {
-              const quality = asRecord(metric?.quality)
-              const speed = asRecord(metric?.speed)
-              return (
-                <tr key={`${model}-${index}`} className="border-t border-border/60">
-                  <td className="px-2 py-2 font-mono">{String(metric?.model ?? model)}</td>
-                  <td>{String(metric?.suite ?? "resultado")}</td>
-                  <td>{pct(quality?.pass_rate)}</td>
-                  <td>{pct(quality?.primary_rate)}</td>
-                  <td>{number(speed?.latency_s_p50, "s")}</td>
-                  <td>{number(speed?.decode_tok_s_p50, " tok/s")}</td>
-                  <td>{String(quality?.errors ?? "—")}</td>
-                </tr>
-              )
-            })}
-          </tbody>
+    <details className="mt-3 rounded-lg border border-border px-3 py-2 text-xs">
+      <summary className="flex cursor-pointer list-none items-center justify-between text-muted-foreground"><span className="inline-flex items-center gap-1.5"><Clipboard size={13} /> Historial de intentos ({attempts.length})</span><ChevronDown size={13} /></summary>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full min-w-[680px] text-left"><thead className="text-muted-foreground"><tr><th className="py-2">Modelo</th><th>Intento</th><th>Estado</th><th>Duración</th><th>Tráfico externo</th><th>Error</th></tr></thead>
+          <tbody>{[...attempts].reverse().map((attempt) => <tr key={attempt.id} className="border-t border-border/60"><td className="py-2 font-mono">{attempt.model}</td><td>#{attempt.attemptNumber}</td><td className={attempt.status === "completed" ? "text-emerald-400" : attempt.status === "failed" ? "text-destructive" : attempt.status === "interrupted" || attempt.status === "contaminated" ? "text-amber-400" : ""}>{ATTEMPT_LABEL[attempt.status]}</td><td>{formatDuration(attempt.startedAt, attempt.finishedAt)}</td><td>{attempt.externalRequests.length || "—"}</td><td className="max-w-72 truncate text-muted-foreground" title={attempt.error ?? undefined}>{attempt.error ?? "—"}</td></tr>)}</tbody>
         </table>
       </div>
-      <details className="mt-2">
-        <summary className="cursor-pointer text-xs text-muted-foreground">JSON bruto</summary>
-        <pre className="mt-2 max-h-96 overflow-auto rounded-md bg-black/60 p-3 text-[11px] text-zinc-300">
-          {JSON.stringify(results, null, 2)}
-        </pre>
-      </details>
     </details>
   )
 }

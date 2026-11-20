@@ -11,10 +11,17 @@ declarado y conserva su resultado sin recalcular la puntuación.
 
 ## Ejecución desde la UI
 
-La página **Benchmarks** (rol `model_manager`) permite elegir aplicación,
-suite y modelos, encolar una ejecución y consultar resultados e intentos. La
-unidad de trabajo es `aplicación + suite + modelo`: los modelos se ejecutan
-secuencialmente para que una contaminación afecte solo al modelo en curso.
+La página **Benchmarks** (rol `model_manager`) permite buscar y seleccionar
+perfiles de ejecución, filtrar el historial, repetir una configuración y
+consultar resultados, intentos y logs. Los resultados conocidos de Escriba y
+Corrala se normalizan solo para presentarlos en una tabla comparativa; el JSON
+bruto siempre se conserva y puede descargarse. Un resultado con un esquema
+nuevo muestra como alternativa sus métricas escalares, sin ocultar los datos.
+
+La unidad de trabajo es `aplicación + suite + modelo`: los modelos se ejecutan
+secuencialmente para que una contaminación afecte solo al modelo en curso. La
+barra de progreso cuenta únicamente modelos aceptados; el historial de
+intentos explica cuáles se descartaron y si coincidieron con tráfico externo.
 
 El ejecutor crea una identidad y una API key internas efímeras. Mientras corre
 observa las peticiones en vuelo de `ModelManager`; cualquier petición de otra
