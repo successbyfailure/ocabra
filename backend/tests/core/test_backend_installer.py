@@ -61,9 +61,7 @@ def backends_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def installer(
-    worker_pool: WorkerPool, backends_dir: Path
-) -> BackendInstaller:
+def installer(worker_pool: WorkerPool, backends_dir: Path) -> BackendInstaller:
     inst = BackendInstaller(
         backends_dir=backends_dir,
         worker_pool=worker_pool,
@@ -541,9 +539,7 @@ async def test_install_runs_apt_when_available(
 
     apt_calls = [c for c in calls if c and c[0].endswith("apt-get")]
     assert any(c[1:] == ["update"] for c in apt_calls), apt_calls
-    install_call = next(
-        c for c in apt_calls if "install" in c
-    )
+    install_call = next(c for c in apt_calls if "install" in c)
     assert "--no-install-recommends" in install_call
     assert "build-essential" in install_call and "cmake" in install_call
 
@@ -576,9 +572,7 @@ async def test_install_skips_apt_when_unavailable(
         calls.append(list(argv))
 
     monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
-    monkeypatch.setattr(
-        "ocabra.core.backend_installer.shutil.which", lambda name: None
-    )
+    monkeypatch.setattr("ocabra.core.backend_installer.shutil.which", lambda name: None)
     monkeypatch.setattr(
         "ocabra.core.backend_installer._system_package_present", AsyncMock(return_value=False)
     )
@@ -717,6 +711,45 @@ async def test_install_clones_git_repo_into_src_dir(
     assert meta["git_repo"] == "https://example.com/foo/bar"
     assert meta["git_ref"] == "v1.2.3"
     assert meta["src_dir"] == str(backends_dir / "mock" / "src")
+
+
+@pytest.mark.asyncio
+async def test_un_commit_fijado_se_trae_con_fetch_y_no_con_clone_branch(
+    installer: BackendInstaller,
+    backends_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``git clone --branch <sha>`` falla (exit 128): un SHA se trae con fetch.
+    Así falló la primera instalación de comfyui_video (2026-11-20)."""
+    await installer.start()
+    sha = "995456d0188ffb51032c28f41527cfa82d87d8a9"
+    backend = installer._backends["mock"]
+    monkeypatch.setattr(
+        type(backend),
+        "_spec",
+        BackendInstallSpec(
+            git_repo="https://example.com/foo/bar",
+            git_ref=sha,
+            include_core_runtime=False,
+            display_name="Mock",
+            description="",
+            tags=["TEST"],
+        ),
+    )
+    calls: list[list[str]] = []
+
+    async def _capture_run(self, backend_type, argv, *, cwd=None, env=None):  # noqa: ANN001
+        calls.append(list(argv))
+
+    monkeypatch.setattr(BackendInstaller, "_run_subprocess", _capture_run)
+    async for _state in installer.install("mock", method="source"):
+        pass
+
+    git_calls = [c for c in calls if c and c[0] == "git"]
+    assert not any("--branch" in c for c in git_calls)
+    src = str(backends_dir / "mock" / "src")
+    assert ["git", "-C", src, "fetch", "-q", "--depth", "1", "origin", sha] in git_calls
+    assert ["git", "-C", src, "checkout", "-q", "FETCH_HEAD"] in git_calls
 
 
 @pytest.mark.asyncio
@@ -1112,9 +1145,7 @@ async def test_list_backends_endpoint(installer: BackendInstaller) -> None:
     await installer.start()
     app = _build_isolated_app(installer)
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/ocabra/backends")
 
     assert resp.status_code == 200
@@ -1135,9 +1166,7 @@ async def test_get_backend_unknown_returns_404(
     await installer.start()
     app = _build_isolated_app(installer)
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/ocabra/backends/__does_not_exist__")
 
     assert resp.status_code == 404
@@ -1153,12 +1182,8 @@ async def test_install_refused_at_http_layer_while_models_use_it(
     monkeypatch.setattr(installer, "reinstall_blocker", lambda bt: "models loaded")
     app = _build_isolated_app(installer)
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        resp = await client.post(
-            "/ocabra/backends/mock/install", json={"method": "oci"}
-        )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/ocabra/backends/mock/install", json={"method": "oci"})
 
     assert resp.status_code == 409
 
@@ -1172,11 +1197,24 @@ def test_display_version_uses_the_main_installed_package_not_a_requirement():
     # Antes se enseñaba "torch>=2.5" o "source".
     assert display_version("vllm", ["vllm==0.32.0"], {"vllm": "0.32.0"}, "0.32.0") == "0.32.0"
     assert (
-        display_version("whisper", ["torch>=2.5", "faster-whisper>=1.1"], {"faster-whisper": "1.2.1"}, "torch>=2.5")
+        display_version(
+            "whisper",
+            ["torch>=2.5", "faster-whisper>=1.1"],
+            {"faster-whisper": "1.2.1"},
+            "torch>=2.5",
+        )
         == "faster-whisper 1.2.1"
     )
-    assert display_version("piper", ["piper-tts>=1.8.0"], {"piper-tts": "1.8.0"}, "piper-tts>=1.8.0") == "piper-tts 1.8.0"
-    assert display_version("diffusers", ["diffusers @ git+https://x"], {"diffusers": "0.41.0"}, "torch>=2.5") == "0.41.0"
+    assert (
+        display_version("piper", ["piper-tts>=1.8.0"], {"piper-tts": "1.8.0"}, "piper-tts>=1.8.0")
+        == "piper-tts 1.8.0"
+    )
+    assert (
+        display_version(
+            "diffusers", ["diffusers @ git+https://x"], {"diffusers": "0.41.0"}, "torch>=2.5"
+        )
+        == "0.41.0"
+    )
     # Sin versión de verdad (nativos, clonados de git): nada; la rama va aparte.
     assert display_version("llama_cpp", [], {}, "source") is None
     assert display_version("acestep", ["torch>=2.5"], {"torch": "2.10"}, "torch>=2.5") is None
@@ -1203,5 +1241,9 @@ async def test_backends_api_counts_loaded_models_once_per_canonical_id():
     async def list_states(include_derived=False):
         return states
 
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_manager=SimpleNamespace(list_states=list_states))))
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(model_manager=SimpleNamespace(list_states=list_states))
+        )
+    )
     assert await _loaded_by_backend(request) == {"llamacpp_mks": 2, "piper": 1}

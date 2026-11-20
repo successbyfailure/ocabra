@@ -46,6 +46,9 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# Un ref de git que es un commit completo (no rama ni etiqueta).
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+
 
 # ---------------------------------------------------------------------------
 # Constants and data types
@@ -233,9 +236,7 @@ class BackendInstaller:
                 continue
 
             if meta is not None:
-                self._states[backend_type] = await self._installed_state(
-                    backend_type, spec, meta
-                )
+                self._states[backend_type] = await self._installed_state(backend_type, spec, meta)
             elif self._assume_fat_image:
                 # No metadata on disk but the fat image has every backend
                 # pre-installed — keep it usable.  Fase 2 will migrate each
@@ -259,9 +260,7 @@ class BackendInstaller:
                     install_status=BackendInstallStatus.NOT_INSTALLED,
                     estimated_size_mb=spec.estimated_size_mb,
                 )
-                self._worker_pool.register_disabled_backend(
-                    backend_type, "not installed"
-                )
+                self._worker_pool.register_disabled_backend(backend_type, "not installed")
 
         logger.info(
             "backend_installer_ready",
@@ -417,15 +416,11 @@ class BackendInstaller:
                         if not (failed and method == "auto"):
                             return
                         self._log(backend_type, "Prebuilt install failed: building from source")
-                    async for state in self._install_from_source(
-                        backend_type, backend, spec
-                    ):
+                    async for state in self._install_from_source(backend_type, backend, spec):
                         # _install_from_source already mutates self._states.
                         queue.put_nowait(state)
                 except Exception as exc:  # noqa: BLE001
-                    logger.exception(
-                        "backend_install_runner_failed", backend_type=backend_type
-                    )
+                    logger.exception("backend_install_runner_failed", backend_type=backend_type)
                     err_state = self._states.get(backend_type)
                     if err_state is None:
                         err_state = BackendModuleState(
@@ -445,9 +440,7 @@ class BackendInstaller:
                 finally:
                     queue.put_nowait(None)
 
-        task = asyncio.create_task(
-            _runner(), name=f"install-{backend_type}"
-        )
+        task = asyncio.create_task(_runner(), name=f"install-{backend_type}")
         self._install_tasks[backend_type] = task
 
         try:
@@ -623,7 +616,9 @@ class BackendInstaller:
                 if "not found" in line and "libcuda.so" not in line
             ]
             if missing:
-                raise RuntimeError(f"{name} needs libraries this machine lacks: {', '.join(missing)}")
+                raise RuntimeError(
+                    f"{name} needs libraries this machine lacks: {', '.join(missing)}"
+                )
 
     async def _install_from_source(
         self,
@@ -770,9 +765,7 @@ class BackendInstaller:
             # Step 5 — post-install script (cmake builds, uv sync, ...).
             if spec.post_install_script:
                 state.install_progress = 0.7
-                state.install_detail = (
-                    f"Running post-install script: {spec.post_install_script}"
-                )
+                state.install_detail = f"Running post-install script: {spec.post_install_script}"
                 yield self._snapshot(state)
                 await self._run_post_install_script(
                     backend_type,
@@ -871,9 +864,7 @@ class BackendInstaller:
 
         state = self._states[backend_type]
         if state.install_source == "built-in":
-            raise RuntimeError(
-                f"Backend '{backend_type}' is built-in and cannot be uninstalled"
-            )
+            raise RuntimeError(f"Backend '{backend_type}' is built-in and cannot be uninstalled")
         if state.install_status != BackendInstallStatus.INSTALLED:
             raise RuntimeError(
                 f"Backend '{backend_type}' is not installed (status={state.install_status})"
@@ -881,9 +872,7 @@ class BackendInstaller:
 
         loaded = _count_models_for_backend(self._worker_pool, backend_type)
         if loaded > 0:
-            raise RuntimeError(
-                f"Cannot uninstall '{backend_type}': {loaded} model(s) still loaded"
-            )
+            raise RuntimeError(f"Cannot uninstall '{backend_type}': {loaded} model(s) still loaded")
 
         lock = self._install_locks.setdefault(backend_type, asyncio.Lock())
         async with lock:
@@ -896,9 +885,7 @@ class BackendInstaller:
 
             # Update worker pool: mark as disabled.
             try:
-                self._worker_pool.register_disabled_backend(
-                    backend_type, "not installed"
-                )
+                self._worker_pool.register_disabled_backend(backend_type, "not installed")
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "worker_pool_disable_failed",
@@ -949,9 +936,7 @@ class BackendInstaller:
             )
             return None
 
-    async def _write_metadata(
-        self, backend_type: str, metadata: dict[str, Any]
-    ) -> None:
+    async def _write_metadata(self, backend_type: str, metadata: dict[str, Any]) -> None:
         meta_path = self._backends_dir / backend_type / METADATA_FILENAME
         payload = json.dumps(metadata, indent=2, sort_keys=True)
         await asyncio.to_thread(meta_path.write_text, payload, encoding="utf-8")
@@ -1046,9 +1031,7 @@ class BackendInstaller:
 
         rc = await proc.wait()
         if rc != 0:
-            raise RuntimeError(
-                f"Command {' '.join(argv)!r} failed with exit code {rc}"
-            )
+            raise RuntimeError(f"Command {' '.join(argv)!r} failed with exit code {rc}")
 
     async def _run_subprocess(
         self,
@@ -1075,17 +1058,13 @@ class BackendInstaller:
             self._log(backend_type, line.decode(errors="replace").rstrip())
         rc = await proc.wait()
         if rc != 0:
-            raise RuntimeError(
-                f"Command {' '.join(argv)!r} failed with exit code {rc}"
-            )
+            raise RuntimeError(f"Command {' '.join(argv)!r} failed with exit code {rc}")
 
     # ------------------------------------------------------------------
     # Step helpers (apt / git / post-install / extra_bins)
     # ------------------------------------------------------------------
 
-    async def _install_apt_packages(
-        self, backend_type: str, packages: list[str]
-    ) -> None:
+    async def _install_apt_packages(self, backend_type: str, packages: list[str]) -> None:
         """Make sure the OS packages a backend needs are there.
 
         Packages already in the image are skipped, and ``apt-get`` runs only for
@@ -1116,9 +1095,7 @@ class BackendInstaller:
             )
 
         env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
-        await self._run_subprocess(
-            backend_type, [apt_get, "update"], env=env
-        )
+        await self._run_subprocess(backend_type, [apt_get, "update"], env=env)
         await self._run_subprocess(
             backend_type,
             [
@@ -1143,6 +1120,36 @@ class BackendInstaller:
         """Clone *repo* @ *ref* into *dest*, replacing any existing checkout."""
         if await asyncio.to_thread(dest.exists):
             await asyncio.to_thread(shutil.rmtree, dest)
+        if _COMMIT_SHA.fullmatch(ref):
+            # ``git clone --branch`` solo acepta ramas y etiquetas. Un commit
+            # fijado se trae con fetch (GitHub admite pedir un SHA concreto).
+            await asyncio.to_thread(dest.mkdir, parents=True)
+            await self._run_subprocess(backend_type, ["git", "-C", str(dest), "init", "-q"])
+            await self._run_subprocess(
+                backend_type, ["git", "-C", str(dest), "remote", "add", "origin", repo]
+            )
+            await self._run_subprocess(
+                backend_type, ["git", "-C", str(dest), "fetch", "-q", "--depth", "1", "origin", ref]
+            )
+            await self._run_subprocess(
+                backend_type, ["git", "-C", str(dest), "checkout", "-q", "FETCH_HEAD"]
+            )
+            if recursive:
+                await self._run_subprocess(
+                    backend_type,
+                    [
+                        "git",
+                        "-C",
+                        str(dest),
+                        "submodule",
+                        "update",
+                        "--init",
+                        "--recursive",
+                        "--depth",
+                        "1",
+                    ],
+                )
+            return
         argv = ["git", "clone", "--depth", "1", "--branch", ref]
         if recursive:
             argv.append("--recursive")
@@ -1168,9 +1175,7 @@ class BackendInstaller:
         """
         script_path = await asyncio.to_thread(_resolve_script_path, script)
         if not await asyncio.to_thread(script_path.is_file):
-            raise FileNotFoundError(
-                f"post_install_script not found: '{script_path}'"
-            )
+            raise FileNotFoundError(f"post_install_script not found: '{script_path}'")
 
         env = {
             **os.environ,
@@ -1198,20 +1203,16 @@ class BackendInstaller:
         resolved: dict[str, str] = {}
         target_resolved = await asyncio.to_thread(target_dir.resolve)
         for logical_name, rel_path in declared.items():
-            abs_path = await asyncio.to_thread(
-                lambda p=rel_path: (target_dir / p).resolve()
-            )
+            abs_path = await asyncio.to_thread(lambda p=rel_path: (target_dir / p).resolve())
             try:
                 abs_path.relative_to(target_resolved)
             except ValueError as exc:
                 raise RuntimeError(
-                    f"extra_bins['{logical_name}']='{rel_path}' escapes "
-                    f"backend dir '{target_dir}'"
+                    f"extra_bins['{logical_name}']='{rel_path}' escapes backend dir '{target_dir}'"
                 ) from exc
             if not await asyncio.to_thread(abs_path.is_file):
                 raise FileNotFoundError(
-                    f"extra_bins['{logical_name}'] not produced by install: "
-                    f"expected '{abs_path}'"
+                    f"extra_bins['{logical_name}'] not produced by install: expected '{abs_path}'"
                 )
             await asyncio.to_thread(_chmod_exec, abs_path)
             resolved[logical_name] = str(abs_path)
@@ -1225,7 +1226,6 @@ class BackendInstaller:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
-
 
 
 def _check_prebuilt_files(tree: Path, target_dir: Path, meta: dict[str, Any]) -> dict[str, Path]:
@@ -1254,12 +1254,11 @@ def _check_prebuilt_files(tree: Path, target_dir: Path, meta: dict[str, Any]) ->
         bins[name] = staged
     return bins
 
+
 def _count_models_for_backend(worker_pool: WorkerPool, backend_type: str) -> int:
     """Count currently loaded workers that belong to *backend_type*."""
     workers = getattr(worker_pool, "_workers", {}) or {}
-    return sum(
-        1 for info in workers.values() if getattr(info, "backend_type", "") == backend_type
-    )
+    return sum(1 for info in workers.values() if getattr(info, "backend_type", "") == backend_type)
 
 
 def _compute_dir_size_mb(path: Path) -> int:
@@ -1308,7 +1307,6 @@ def _req_name(req: str) -> str:
     return head.strip().lower()
 
 
-
 # Backends sin instalación propia (corren aparte): qué enseñar de ellos.
 _BUILTIN_INFO: dict[str, dict[str, Any]] = {
     "ollama": {
@@ -1349,13 +1347,16 @@ def display_version(
     tampoco, ``None`` (los nativos y los clonados de git ya enseñan su rama o
     commit aparte).
     """
+
     def norm(name: str) -> str:
         return name.lower().replace("_", "-")
 
     bt = norm(backend_type)
     wanted = norm(_MAIN_PACKAGE.get(backend_type, backend_type))
     installed = {norm(k): v for k, v in (packages or {}).items()}
-    candidates = [wanted, bt] + [norm(_req_name(r)) for r in declared if norm(_req_name(r)).startswith(bt)]
+    candidates = [wanted, bt] + [
+        norm(_req_name(r)) for r in declared if norm(_req_name(r)).startswith(bt)
+    ]
     for name in candidates:
         version = installed.get(name)
         if version:
@@ -1364,9 +1365,8 @@ def display_version(
         return stored
     return None
 
-def _derive_version(
-    pip_packages: list[str], backend_type: str | None = None
-) -> str:
+
+def _derive_version(pip_packages: list[str], backend_type: str | None = None) -> str:
     """Best-effort version extraction from a ``pip`` requirement list.
 
     Heuristic order (avoids the cosmetic ``"torch>=2.5"`` bug — Deuda 9h):
@@ -1482,13 +1482,7 @@ def venv_cuda_home(backends_dir: str | Path, backend_type: str) -> str | None:
     error so the user knows to add the wheels to the install spec.
     """
     base = Path(backends_dir) / backend_type
-    site_packages = (
-        base
-        / "venv"
-        / "lib"
-        / "python3.11"
-        / "site-packages"
-    )
+    site_packages = base / "venv" / "lib" / "python3.11" / "site-packages"
     runtime_lib = site_packages / "nvidia" / "cuda_runtime" / "lib"
     runtime_inc = site_packages / "nvidia" / "cuda_runtime" / "include"
     if not (runtime_lib.is_dir() and runtime_inc.is_dir()):
@@ -1559,9 +1553,7 @@ def venv_nvidia_ld_library_path(backends_dir: str | Path, backend_type: str) -> 
     return ":".join(paths)
 
 
-def read_backend_metadata(
-    backends_dir: str | Path, backend_type: str
-) -> dict[str, Any] | None:
+def read_backend_metadata(backends_dir: str | Path, backend_type: str) -> dict[str, Any] | None:
     """Read the persisted ``metadata.json`` for *backend_type*, or ``None``.
 
     Backends use this from their ``_resolve_*_bin()`` helpers to find the
