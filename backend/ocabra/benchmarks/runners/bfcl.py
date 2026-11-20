@@ -27,9 +27,24 @@ def _inside_official_environment(source: Path) -> None:
     env["OCABRA_BFCL_ENV"] = "1"
     os.execvpe(
         uv,
-        [uv, "run", "--project", str(source), "python", str(Path(__file__).resolve()), *sys.argv[1:]],
+        _official_environment_command(uv, source),
         env,
     )
+
+
+def _official_environment_command(uv: str, source: Path) -> list[str]:
+    """Add dependencies used by BFCL imports but omitted from its project file."""
+    return [
+        uv,
+        "run",
+        "--project",
+        str(source),
+        "--with",
+        "soundfile",
+        "python",
+        str(Path(__file__).resolve()),
+        *sys.argv[1:],
+    ]
 
 
 def _number(value: str | None) -> float | None:

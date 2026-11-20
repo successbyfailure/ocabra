@@ -13,6 +13,16 @@ def test_bfcl_score_parser_accepts_decimal_and_percentage() -> None:
     assert bfcl._number("") is None
 
 
+def test_bfcl_adds_dependency_omitted_by_the_official_project(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["bfcl.py", "--models", "model"])
+    command = bfcl._official_environment_command("/usr/bin/uv", Path("/bfcl"))
+
+    assert command[:7] == [
+        "/usr/bin/uv", "run", "--project", "/bfcl", "--with", "soundfile", "python"
+    ]
+    assert command[-2:] == ["--models", "model"]
+
+
 def test_ifeval_checkpoints_each_response_and_normalizes_official_scores(
     tmp_path: Path, monkeypatch
 ) -> None:

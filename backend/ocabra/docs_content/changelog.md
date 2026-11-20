@@ -16,6 +16,17 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.123.1 — 2026-11-20
+
+### Arreglos
+
+- **BFCL ya arranca su scorer oficial.** La revisión fijada de BFCL importa
+  `soundfile` a través de `qwen-agent`, pero no lo declara en sus dependencias;
+  el runner terminaba con código 1 antes de la primera inferencia. oCabra añade
+  ahora esa dependencia al entorno aislado de BFCL.
+
+---
+
 ## 0.123.0 — 2026-11-20
 
 ### Nuevo
