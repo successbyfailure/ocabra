@@ -50,6 +50,7 @@ class RequestRuntimeTelemetry:
     admission_limit: int | None = None
     admission_concurrency: int | None = None
     admission_lease_id: int | None = None
+    gpu_indices: list[int] | None = None
 
     def mark_load(self, duration_ms: int) -> None:
         self.load_ms = max(0, int(duration_ms))
@@ -80,7 +81,7 @@ class RequestRuntimeTelemetry:
             observed = time.monotonic() if now is None else now
             self.ttft_ms = max(0, int((observed - self.started_monotonic) * 1000))
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self) -> dict[str, int | list[int]]:
         values = {
             "prompt_tokens_estimate": self.prompt_tokens_estimate,
             "kv_tokens_reserved": self.kv_tokens_reserved,
@@ -94,7 +95,12 @@ class RequestRuntimeTelemetry:
             "admission_concurrency": self.admission_concurrency,
             "admission_lease_id": self.admission_lease_id,
         }
-        return {key: int(value) for key, value in values.items() if value is not None}
+        result: dict[str, int | list[int]] = {
+            key: int(value) for key, value in values.items() if value is not None
+        }
+        if self.gpu_indices:
+            result["gpu_indices"] = [int(value) for value in self.gpu_indices]
+        return result
 
 
 def mark_prefill_since(request_state: object, started: float) -> None:

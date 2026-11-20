@@ -82,6 +82,7 @@ def _attempt_payload(attempt) -> dict[str, object]:
         "model": attempt.model,
         "attemptNumber": attempt.attempt_number,
         "status": attempt.status,
+        "environment": attempt.environment or {},
         "returnCode": attempt.return_code,
         "externalRequests": attempt.external_requests,
         "error": attempt.error,
@@ -100,6 +101,7 @@ def _run_payload(run: BenchmarkRun, *, include_attempts: bool = True) -> dict[st
         "models": run.models,
         "suiteArgs": run.suite_args,
         "status": run.status,
+        "phase": run.phase,
         "autoPause": run.auto_pause,
         "pauseReason": run.pause_reason,
         "currentModelIndex": run.current_model_index,
@@ -170,6 +172,7 @@ async def create_benchmark_run(
         models=body.models,
         suite_args=body.suite_args,
         auto_pause=body.auto_pause,
+        phase="queued",
         workspace_path=workspace,
         created_by=created_by,
     )
@@ -231,6 +234,23 @@ async def _control_run(run_id: uuid.UUID, request: Request, action: str) -> dict
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _run_payload(run, include_attempts=False)
+
+
+@router.post("/runs/{run_id}/retry", summary="Retry a failed benchmark from its current model")
+async def retry_benchmark_run(
+    run_id: uuid.UUID,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict[str, object]:
+    """Requeue a failed run without repeating models already accepted.
+
+    Parameters:
+        run_id: Failed benchmark execution identifier.
+
+    Returns:
+        Requeued run, positioned at the failed model and retaining its checkpoint.
+    """
+    return await _control_run(run_id, request, "retry")
 
 
 @router.post("/runs/{run_id}/pause", summary="Pause a benchmark run")

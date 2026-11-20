@@ -14,6 +14,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+_SCORER_DEPENDENCIES = ("absl-py", "langdetect", "nltk", "immutabledict")
+
 
 def _safe_model(model: str) -> str:
     return "".join(char if char.isalnum() or char in "._-" else "_" for char in model)
@@ -80,6 +82,13 @@ def _accuracy(path: Path) -> tuple[float, float, int, int]:
     )
 
 
+def _uv_python(uv: str) -> list[str]:
+    command = [uv, "run"]
+    for dependency in _SCORER_DEPENDENCIES:
+        command.extend(("--with", dependency))
+    return [*command, "python"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-root", type=Path, required=True)
@@ -124,15 +133,34 @@ def main() -> int:
     uv = shutil.which("uv")
     if uv is None:
         raise SystemExit("IFEval necesita uv para instalar el scorer oficial aislado")
+    cache_root = Path(os.environ.get("UV_CACHE_DIR", output / ".uv-cache")).parent
+    nltk_data = cache_root / "nltk_data"
+    nltk_data.mkdir(parents=True, exist_ok=True)
+    scorer_env = {**os.environ, "NLTK_DATA": str(nltk_data)}
     subprocess.run(
         [
-            uv, "run", "--with", "absl-py", "--with", "langdetect", "--with", "nltk",
-            "--with", "immutabledict", "python", "-m",
+            *_uv_python(uv),
+            "-c",
+            (
+                "import nltk,sys; "
+                "ok=nltk.download('punkt_tab', download_dir=sys.argv[1], quiet=True); "
+                "raise SystemExit(0 if ok else 1)"
+            ),
+            str(nltk_data),
+        ],
+        cwd=args.source_root,
+        env=scorer_env,
+        check=True,
+    )
+    subprocess.run(
+        [
+            *_uv_python(uv), "-m",
             "instruction_following_eval.evaluation_main",
             f"--input_data={selected_input}", f"--input_response_data={responses_path}",
             f"--output_dir={output}",
         ],
         cwd=args.source_root,
+        env=scorer_env,
         check=True,
     )
 

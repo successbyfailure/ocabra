@@ -42,7 +42,10 @@ def test_ifeval_checkpoints_each_response_and_normalizes_official_scores(
         calls.append(prompt)
         return f"respuesta {prompt}", 1.5, {"input_tokens": 10, "output_tokens": 4}
 
-    def fake_scorer(*args, **kwargs):
+    scorer_commands: list[list[str]] = []
+
+    def fake_scorer(command, **kwargs):
+        scorer_commands.append(command)
         output = dataset / "ocabra_results_model"
         strict = [
             {"follow_instruction_list": [True]},
@@ -75,6 +78,9 @@ def test_ifeval_checkpoints_each_response_and_normalizes_official_scores(
     assert result["metrics"]["strict_prompt_accuracy"] == 0.5
     assert result["metrics"]["strict_instruction_accuracy"] == 2 / 3
     assert result["metrics"]["loose_prompt_accuracy"] == 1
+    assert "nltk.download('punkt_tab'" in scorer_commands[0][scorer_commands[0].index("-c") + 1]
+    assert scorer_commands[1][-4] == "instruction_following_eval.evaluation_main"
+    assert scorer_commands[1].count("--with") == 4
 
     calls.clear()
     assert ifeval.main() == 0

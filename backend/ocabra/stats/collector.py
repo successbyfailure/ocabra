@@ -1545,6 +1545,10 @@ async def _record_stat(
         except Exception:
             pass
 
+        telemetry_for_request = getattr(request.state, "runtime_telemetry", None)
+        if isinstance(telemetry_for_request, RequestRuntimeTelemetry) and serving_gpus:
+            telemetry_for_request.gpu_indices = list(serving_gpus)
+
         # Estimate energy from the power draw of the GPUs that served it ×
         # its duration (every GPU of a split model, not only the first). It is
         # the whole card's draw: concurrent requests on it each count it.

@@ -298,6 +298,12 @@ def test_engine_runtime_telemetry_extracts_prefill_and_slot() -> None:
     assert telemetry.slot_id == 3
 
 
+def test_runtime_telemetry_serializes_every_serving_gpu() -> None:
+    telemetry = RequestRuntimeTelemetry(started_monotonic=0.0, gpu_indices=[0, 1])
+
+    assert telemetry.as_dict()["gpu_indices"] == [0, 1]
+
+
 def test_embedding_prompt_tps_uses_worker_time_not_wall_clock() -> None:
     # 2026-11-12: los embeddings no guardaban velocidad (el worker no
     # devuelve ``timings``). Se mide la llamada al worker, sin cola ni carga.

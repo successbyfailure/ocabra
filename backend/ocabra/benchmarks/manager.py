@@ -13,6 +13,7 @@ import asyncio
 import base64
 import json
 import os
+import platform
 import re
 import secrets
 import signal
@@ -30,7 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from ocabra.benchmarks.catalog import APPS, AppSpec, SuiteSpec
-from ocabra.config import settings
+from ocabra.config import APP_VERSION, settings
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.auth import ApiKey, User, UserRole
 from ocabra.db.benchmarks import BenchmarkAttempt, BenchmarkRun
@@ -85,6 +86,71 @@ def external_active_requests(model_manager, identity: BenchmarkIdentity) -> list
     return external
 
 
+def execution_observations(rows, gpu_states: dict[int, object]) -> dict[str, object]:
+    """Summarize persisted benchmark requests into reproducible runtime facts."""
+    gpu_indices: set[int] = set()
+    for row in rows:
+        telemetry = row.runtime_telemetry if isinstance(row.runtime_telemetry, dict) else {}
+        observed = telemetry.get("gpu_indices")
+        if isinstance(observed, list):
+            gpu_indices.update(int(index) for index in observed if isinstance(index, int))
+        elif row.gpu_index is not None:
+            gpu_indices.add(int(row.gpu_index))
+    gpus = []
+    for index in sorted(gpu_indices):
+        state = gpu_states.get(index)
+        gpus.append(
+            {
+                "index": index,
+                "name": getattr(state, "name", None),
+                "totalVramMb": getattr(state, "total_vram_mb", None),
+            }
+        )
+    return {
+        "model": {
+            "backends": sorted({row.backend_type for row in rows if row.backend_type}),
+            "runtimePresets": sorted(
+                {row.runtime_preset for row in rows if row.runtime_preset}
+            ),
+            "effectiveContexts": sorted(
+                {row.effective_context for row in rows if row.effective_context}
+            ),
+        },
+        "hardware": {
+            "gpus": gpus,
+            "nodes": sorted({row.remote_node_name or "local" for row in rows}),
+        },
+        "requests": {
+            "count": len(rows),
+            "errors": sum(1 for row in rows if row.error or (row.status_code or 0) >= 400),
+            "inputTokens": sum(row.input_tokens or 0 for row in rows),
+            "outputTokens": sum(row.output_tokens or 0 for row in rows),
+        },
+    }
+
+
+def backend_version_observations(
+    backend_types: list[str], nodes: list[str], installer
+) -> list[dict[str, object]]:
+    """Describe installed backend artifacts without failing on remote/unknown modules."""
+    modules: list[dict[str, object]] = []
+    for backend_type in backend_types:
+        state = None
+        if installer is not None:
+            with suppress(KeyError):
+                state = installer.get_state(backend_type)
+        modules.append(
+            {
+                "type": backend_type,
+                "installedVersion": getattr(state, "installed_version", None),
+                "packages": dict(getattr(state, "packages", {}) or {}),
+                "ociDigest": getattr(state, "oci_digest", None),
+                "node": "local" if nodes == ["local"] else None,
+            }
+        )
+    return modules
+
+
 class BenchmarkManager:
     """Single-worker queue for reproducible application benchmarks."""
 
@@ -130,6 +196,7 @@ class BenchmarkManager:
             else:
                 run.status = "pausing"
             run.pause_reason = "manual"
+            run.phase = "pausing" if run.status == "pausing" else "paused"
             await session.commit()
             await session.refresh(run)
         self.notify()
@@ -143,6 +210,7 @@ class BenchmarkManager:
             run.status = "queued"
             run.pause_reason = None
             run.error = None
+            run.phase = "queued"
             await session.commit()
             await session.refresh(run)
         self.notify()
@@ -156,9 +224,28 @@ class BenchmarkManager:
             if run.status in {"queued", "paused"}:
                 run.status = "cancelled"
                 run.finished_at = datetime.now(UTC)
+                run.phase = "cancelled"
             else:
                 run.status = "cancelling"
+                run.phase = "cancelling"
             run.pause_reason = None
+            await session.commit()
+            await session.refresh(run)
+        self.notify()
+        return run
+
+    async def request_retry(self, run_id: uuid.UUID) -> BenchmarkRun:
+        """Retry only the failed/current model and keep its runner checkpoint."""
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            if run.status != "failed":
+                raise ValueError("Solo se puede reintentar una ejecución fallida")
+            run.status = "queued"
+            run.phase = "queued"
+            run.pause_reason = None
+            run.current_model = None
+            run.error = None
+            run.finished_at = None
             await session.commit()
             await session.refresh(run)
         self.notify()
@@ -225,6 +312,7 @@ class BenchmarkManager:
             for run in runs:
                 run.status = "queued"
                 run.pause_reason = None
+                run.phase = "queued"
                 changed = True
             if changed:
                 await session.commit()
@@ -236,6 +324,7 @@ class BenchmarkManager:
                 return
             if run.current_model_index >= len(run.models):
                 run.status = "completed"
+                run.phase = "completed"
                 run.current_model = None
                 run.finished_at = datetime.now(UTC)
                 await session.commit()
@@ -247,11 +336,13 @@ class BenchmarkManager:
                 active = external_active_requests(self._model_manager, self._identity)
                 if active:
                     run.status = "paused"
+                    run.phase = "paused_external_traffic"
                     run.pause_reason = "external_traffic"
                     run.external_activity_at = datetime.now(UTC)
                     await session.commit()
                     return
             run.status = "running"
+            run.phase = "checkout"
             run.current_model = model
             run.started_at = run.started_at or datetime.now(UTC)
             run.error = None
@@ -272,6 +363,7 @@ class BenchmarkManager:
         source = workspace / "source"
         log_path = workspace / "runner.log"
         workspace.mkdir(parents=True, exist_ok=True)
+        await self._set_phase(run_id, "checkout")
         await self._ensure_checkout(source, app, await self._run_revision(run_id), log_path)
         dataset_root = source / app.dataset_root
         script = (
@@ -283,6 +375,7 @@ class BenchmarkManager:
             raise RuntimeError(f"La revisión no contiene el runner esperado: {script}")
 
         if suite.prepare_script and not (workspace / ".prepared").exists():
+            await self._set_phase(run_id, "preparing")
             prepare = dataset_root / suite.prepare_script
             outcome = await self._run_process(
                 run_id,
@@ -298,7 +391,10 @@ class BenchmarkManager:
                 raise RuntimeError(f"La preparación terminó con código {outcome.return_code}")
             (workspace / ".prepared").touch()
 
-        attempt = await self._create_attempt(run_id, model, attempt_number, workspace, log_path)
+        environment = await self._base_environment(run_id, source, app, suite, model)
+        attempt = await self._create_attempt(
+            run_id, model, attempt_number, workspace, log_path, environment
+        )
         before = self._result_snapshot(dataset_root, suite.result_glob)
         command = [sys.executable, "-I", str(script)]
         if suite.local_runner:
@@ -307,18 +403,23 @@ class BenchmarkManager:
         command.extend(await self._suite_args(run_id))
         if resume:
             command.extend(suite.resume_args)
+        await self._set_phase(run_id, "running")
         started_at = datetime.now(UTC)
         outcome = await self._run_process(run_id, command, source, log_path, detect_external=True)
         finished_at = datetime.now(UTC)
+        await self._set_phase(run_id, "finalizing")
         # StatsMiddleware records at response completion. Give its short DB
         # write a scheduling turn before checking for fast external requests
         # that may have started and ended between active-request polls.
         await asyncio.sleep(0.1)
+        environment = await self._complete_environment(
+            environment, started_at, finished_at, source
+        )
         historical = await self._historical_external_requests(started_at, finished_at)
         external = self._deduplicate_external([*outcome.external_requests, *historical])
 
         if outcome.interruption:
-            await self._finish_interrupted_attempt(attempt.id, outcome, external)
+            await self._finish_interrupted_attempt(attempt.id, outcome, external, environment)
             return
         result_path = self._changed_result(dataset_root, suite.result_glob, before)
         result = await asyncio.to_thread(self._read_result, result_path) if result_path else None
@@ -328,17 +429,17 @@ class BenchmarkManager:
                 if outcome.return_code != 0
                 else f"No generó un resultado que coincida con {suite.result_glob}"
             )
-            await self._finish_failed_attempt(attempt.id, outcome.return_code, message)
+            await self._finish_failed_attempt(attempt.id, outcome.return_code, message, environment)
             await self._fail_run(run_id, message)
             return
         if external:
-            await self._finish_contaminated_attempt(attempt.id, result, external)
+            await self._finish_contaminated_attempt(attempt.id, result, external, environment)
             if await self._run_auto_pause(run_id):
                 await self._pause_for_external_traffic(run_id, external)
             else:
-                await self._advance_run(run_id, model, result, contaminated=True)
+                await self._retry_contaminated(run_id)
             return
-        await self._finish_clean_attempt(attempt.id, result, outcome.return_code)
+        await self._finish_clean_attempt(attempt.id, result, outcome.return_code, environment)
         await self._advance_run(run_id, model, result)
 
     async def _run_process(
@@ -443,7 +544,9 @@ class BenchmarkManager:
         number = max((attempt.attempt_number for attempt in attempts), default=0) + 1
         latest = attempts[0] if attempts else None
         if (
-            latest and latest.status == "interrupted" and Path(latest.workspace_path).is_dir()  # noqa: ASYNC240 — stat local mínimo
+            latest
+            and latest.status in {"interrupted", "failed"}
+            and Path(latest.workspace_path).is_dir()  # noqa: ASYNC240 — stat local mínimo
         ):
             return number, Path(latest.workspace_path), True
         model_part = _SAFE_COMPONENT.sub("_", model).strip("._")[:100] or "model"
@@ -557,11 +660,14 @@ class BenchmarkManager:
             for run in runs:
                 if run.status == "cancelling":
                     run.status = "cancelled"
+                    run.phase = "cancelled"
                     run.finished_at = now
                 elif run.pause_reason == "manual":
                     run.status = "paused"
+                    run.phase = "paused"
                 else:
                     run.status = "queued"
+                    run.phase = "queued"
             await session.commit()
 
     @property
@@ -649,6 +755,126 @@ class BenchmarkManager:
                 )
             return result
 
+    async def _base_environment(
+        self,
+        run_id: uuid.UUID,
+        source: Path,
+        app: AppSpec,
+        suite: SuiteSpec,
+        model: str,
+    ) -> dict[str, object]:
+        """Describe immutable software and dataset versions before inference starts."""
+        commit = await self._git_value(source, "rev-parse", "HEAD")
+        repository = await self._git_value(source, "remote", "get-url", "origin")
+        runner_version: str | None = None
+        if app.name == "bfcl":
+            pyproject = source / app.dataset_root / "pyproject.toml"
+            if pyproject.is_file():
+                try:
+                    import tomllib
+
+                    raw = await asyncio.to_thread(pyproject.read_bytes)
+                    runner_version = str(tomllib.loads(raw.decode())["project"]["version"])
+                except (KeyError, OSError, TypeError, ValueError):
+                    runner_version = None
+        return {
+            "software": {
+                "ocabra": APP_VERSION,
+                "python": platform.python_version(),
+                **({"scorer": runner_version} if runner_version else {}),
+            },
+            "benchmark": {
+                "app": app.name,
+                "suite": suite.name,
+                "requestedRevision": await self._run_revision(run_id),
+                "commit": commit,
+                "repository": repository or app.repository,
+                "runner": "ocabra" if suite.local_runner else "application",
+            },
+            "model": {"profile": model},
+            "hardware": {"gpus": [], "nodes": []},
+            "requests": {"count": 0},
+        }
+
+    @staticmethod
+    async def _git_value(source: Path, *arguments: str) -> str | None:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            str(source),
+            *arguments,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        output, _ = await process.communicate()
+        return output.decode(errors="replace").strip() if process.returncode == 0 else None
+
+    async def _complete_environment(
+        self,
+        base: dict[str, object],
+        started_at: datetime,
+        finished_at: datetime,
+        source: Path,
+    ) -> dict[str, object]:
+        """Attach the backends, nodes and physical GPUs observed in benchmark requests."""
+        assert self._identity is not None
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(RequestStat).where(
+                        RequestStat.user_id == self._identity.user_id,
+                        RequestStat.started_at >= started_at - timedelta(hours=1),
+                        RequestStat.started_at <= finished_at,
+                    )
+                )
+            ).scalars().all()
+        rows = [
+            row
+            for row in rows
+            if row.started_at + timedelta(milliseconds=row.duration_ms or 0) >= started_at
+        ]
+        gpu_manager = getattr(self._app.state, "gpu_manager", None)
+        gpu_states = {}
+        if gpu_manager is not None:
+            states = await gpu_manager.get_all_states()
+            gpu_states = {state.index: state for state in states}
+        observed = execution_observations(rows, gpu_states)
+        environment = dict(base)
+        software = dict(environment.get("software") or {})
+        installer = getattr(self._app.state, "backend_installer", None)
+        model_observations = observed["model"]
+        hardware_observations = observed["hardware"]
+        assert isinstance(model_observations, dict)
+        assert isinstance(hardware_observations, dict)
+        software["backends"] = backend_version_observations(
+            model_observations["backends"], hardware_observations["nodes"], installer
+        )
+        benchmark = environment.get("benchmark")
+        if isinstance(benchmark, dict) and benchmark.get("app") == "bfcl":
+            metadata_files = list(
+                (source / "berkeley-function-call-leaderboard" / ".venv").glob(
+                    "lib/python*/site-packages/bfcl_eval-*.dist-info/METADATA"
+                )
+            )
+            if metadata_files:
+                try:
+                    text = await asyncio.to_thread(metadata_files[0].read_text, encoding="utf-8")
+                    version = next(
+                        line.removeprefix("Version: ").strip()
+                        for line in text.splitlines()
+                        if line.startswith("Version: ")
+                    )
+                    software["scorer"] = version
+                except (OSError, StopIteration):
+                    pass
+        environment["software"] = software
+        model = dict(environment.get("model") or {})
+        model.update(observed["model"])
+        environment["model"] = model
+        environment["hardware"] = observed["hardware"]
+        environment["requests"] = observed["requests"]
+        return environment
+
     @staticmethod
     def _deduplicate_external(items: list[dict[str, object]]) -> list[dict[str, object]]:
         return list({str(item.get("requestId")): item for item in items}.values())
@@ -725,6 +951,13 @@ class BenchmarkManager:
                 )
             )
 
+    async def _set_phase(self, run_id: uuid.UUID, phase: str) -> None:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                sa.update(BenchmarkRun).where(BenchmarkRun.id == run_id).values(phase=phase)
+            )
+            await session.commit()
+
     async def _create_attempt(
         self,
         run_id: uuid.UUID,
@@ -732,6 +965,7 @@ class BenchmarkManager:
         number: int,
         workspace: Path,
         log_path: Path,
+        environment: dict[str, object],
     ) -> BenchmarkAttempt:
         attempt = BenchmarkAttempt(
             run_id=run_id,
@@ -740,6 +974,7 @@ class BenchmarkManager:
             status="running",
             workspace_path=str(workspace),
             log_path=str(log_path),
+            environment=environment,
             started_at=datetime.now(UTC),
         )
         async with AsyncSessionLocal() as session:
@@ -761,6 +996,7 @@ class BenchmarkManager:
         attempt_id: uuid.UUID,
         outcome: ProcessOutcome,
         external: list[dict[str, object]],
+        environment: dict[str, object],
     ) -> None:
         async with AsyncSessionLocal() as session:
             attempt = await session.get(BenchmarkAttempt, attempt_id)
@@ -768,6 +1004,7 @@ class BenchmarkManager:
                 attempt.status = "interrupted"
                 attempt.return_code = outcome.return_code
                 attempt.external_requests = external
+                attempt.environment = environment
                 attempt.error = f"Interrumpido: {outcome.interruption}"
                 attempt.finished_at = datetime.now(UTC)
                 await session.commit()
@@ -788,7 +1025,11 @@ class BenchmarkManager:
             return run_id
 
     async def _finish_failed_attempt(
-        self, attempt_id: uuid.UUID, return_code: int | None, error: str
+        self,
+        attempt_id: uuid.UUID,
+        return_code: int | None,
+        error: str,
+        environment: dict[str, object],
     ) -> None:
         async with AsyncSessionLocal() as session:
             attempt = await session.get(BenchmarkAttempt, attempt_id)
@@ -796,11 +1037,16 @@ class BenchmarkManager:
                 attempt.status = "failed"
                 attempt.return_code = return_code
                 attempt.error = error
+                attempt.environment = environment
                 attempt.finished_at = datetime.now(UTC)
                 await session.commit()
 
     async def _finish_contaminated_attempt(
-        self, attempt_id: uuid.UUID, result: dict, external: list[dict[str, object]]
+        self,
+        attempt_id: uuid.UUID,
+        result: dict,
+        external: list[dict[str, object]],
+        environment: dict[str, object],
     ) -> None:
         async with AsyncSessionLocal() as session:
             attempt = await session.get(BenchmarkAttempt, attempt_id)
@@ -809,11 +1055,16 @@ class BenchmarkManager:
                 attempt.return_code = 0
                 attempt.result = result
                 attempt.external_requests = external
+                attempt.environment = environment
                 attempt.finished_at = datetime.now(UTC)
                 await session.commit()
 
     async def _finish_clean_attempt(
-        self, attempt_id: uuid.UUID, result: dict, return_code: int | None
+        self,
+        attempt_id: uuid.UUID,
+        result: dict,
+        return_code: int | None,
+        environment: dict[str, object],
     ) -> None:
         async with AsyncSessionLocal() as session:
             attempt = await session.get(BenchmarkAttempt, attempt_id)
@@ -821,6 +1072,7 @@ class BenchmarkManager:
                 attempt.status = "completed"
                 attempt.return_code = return_code
                 attempt.result = result
+                attempt.environment = environment
                 attempt.finished_at = datetime.now(UTC)
                 await session.commit()
 
@@ -830,6 +1082,7 @@ class BenchmarkManager:
         async with AsyncSessionLocal() as session:
             run = await self._get_run(session, run_id)
             run.status = "paused"
+            run.phase = "paused_external_traffic"
             run.pause_reason = "external_traffic"
             run.external_activity_at = datetime.now(UTC)
             if external:
@@ -840,6 +1093,7 @@ class BenchmarkManager:
         async with AsyncSessionLocal() as session:
             run = await self._get_run(session, run_id)
             run.status = "paused"
+            run.phase = "paused"
             run.pause_reason = reason
             await session.commit()
 
@@ -847,6 +1101,7 @@ class BenchmarkManager:
         async with AsyncSessionLocal() as session:
             run = await self._get_run(session, run_id)
             run.status = "cancelled"
+            run.phase = "cancelled"
             run.finished_at = datetime.now(UTC)
             await session.commit()
 
@@ -855,23 +1110,32 @@ class BenchmarkManager:
         run_id: uuid.UUID,
         model: str,
         result: dict,
-        *,
-        contaminated: bool = False,
     ) -> None:
         async with AsyncSessionLocal() as session:
             run = await self._get_run(session, run_id)
             values = dict(run.result or {})
             values[model] = result
             run.result = values
-            if contaminated:
-                run.contaminated_attempts += 1
             run.current_model_index += 1
             run.current_model = None
             if run.current_model_index >= len(run.models):
                 run.status = "completed"
+                run.phase = "completed"
                 run.finished_at = datetime.now(UTC)
             else:
                 run.status = "queued"
+                run.phase = "queued"
+            await session.commit()
+        self.notify()
+
+    async def _retry_contaminated(self, run_id: uuid.UUID) -> None:
+        """Repeat the same model immediately when automatic pausing is disabled."""
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            run.status = "queued"
+            run.phase = "queued"
+            run.current_model = None
+            run.contaminated_attempts += 1
             await session.commit()
         self.notify()
 
@@ -879,9 +1143,19 @@ class BenchmarkManager:
         async with AsyncSessionLocal() as session:
             run = await self._get_run(session, run_id)
             if run.status not in _TERMINAL:
+                now = datetime.now(UTC)
+                await session.execute(
+                    sa.update(BenchmarkAttempt)
+                    .where(
+                        BenchmarkAttempt.run_id == run_id,
+                        BenchmarkAttempt.status == "running",
+                    )
+                    .values(status="failed", error=error[:4000], finished_at=now)
+                )
                 run.status = "failed"
+                run.phase = "failed"
                 run.error = error[:4000]
-                run.finished_at = datetime.now(UTC)
+                run.finished_at = now
                 await session.commit()
 
 
