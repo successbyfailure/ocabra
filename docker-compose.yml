@@ -435,6 +435,7 @@ services:
       - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/embeddings:/opt/ComfyUI/models/embeddings
       - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/controlnet:/opt/ComfyUI/models/controlnet
       - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/image/upscalers:/opt/ComfyUI/models/upscale_models
+      - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/video:/opt/ComfyUI/models_video
       - ${AI_MODELS_ROOT:-/docker/ai-models}/ocabra/models/comfyui:/opt/ComfyUI/user
     ports:
       - "${COMFYUI_PORT:-8188}:8188"

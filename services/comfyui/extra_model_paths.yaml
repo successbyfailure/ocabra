@@ -1,0 +1,10 @@
+# Carpeta de modelos de vídeo de oCabra (``<models>/video``), montada en
+# /opt/ComfyUI/models_video. Sigue la estructura del repo de LTX-2.5.
+ocabra_video:
+  base_path: /opt/ComfyUI/models_video
+  diffusion_models: diffusion_models
+  text_encoders: text_encoders
+  vae: vae
+  latent_upscale_models: latent_upscale_models
+  loras: loras
+  model_patches: model_patches
