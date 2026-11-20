@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import {
   Activity, AlertTriangle, Ban, BarChart3, CheckCircle2, ChevronDown, CircleDot,
-  Clipboard, Clock3, Copy, Cpu, GitCommit, Loader2, Pause, Play, Plus, RefreshCw,
-  RotateCcw, Search, Server, Terminal, X, XCircle,
+  Clipboard, Clock3, Copy, Cpu, CalendarDays, GitCommit, Loader2, Pause, Play, Plus,
+  RefreshCw, RotateCcw, Save, Search, Server, Star, Terminal, Trash2, X, XCircle,
 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import type {
-  BenchmarkAppCatalog, BenchmarkAttempt, BenchmarkRun, BenchmarkRunStatus,
+  BenchmarkAppCatalog, BenchmarkAttempt, BenchmarkRun, BenchmarkRunStatus, BenchmarkSchedule,
+  BenchmarkScheduleInput,
   ModelProfile,
 } from "@/types"
 import { BenchmarkResults } from "./benchmarks/BenchmarkResults"
+import { BenchmarkHistory } from "./benchmarks/BenchmarkHistory"
 
 const ACTIVE_STATUSES: BenchmarkRunStatus[] = [
   "queued", "running", "pausing", "paused", "cancelling",
@@ -42,6 +44,8 @@ const PHASE_LABEL: Record<string, string> = {
   completed: "Finalizado",
   failed: "Fallido",
 }
+
+const WEEKDAYS = ["L", "M", "X", "J", "V", "S", "D"]
 
 function statusClass(status: BenchmarkRunStatus): string {
   if (status === "completed") return "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
@@ -122,6 +126,7 @@ export function Benchmarks() {
   const [catalog, setCatalog] = useState<BenchmarkAppCatalog[]>([])
   const [profiles, setProfiles] = useState<ModelProfile[]>([])
   const [runs, setRuns] = useState<BenchmarkRun[]>([])
+  const [schedules, setSchedules] = useState<BenchmarkSchedule[]>([])
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
   const [appName, setAppName] = useState("")
@@ -131,6 +136,12 @@ export function Benchmarks() {
   const [revision, setRevision] = useState("")
   const [profile, setProfile] = useState("standard")
   const [autoPause, setAutoPause] = useState(true)
+  const [scheduleName, setScheduleName] = useState("")
+  const [scheduleEnabled, setScheduleEnabled] = useState(false)
+  const [scheduleDays, setScheduleDays] = useState<number[]>([0])
+  const [scheduleTime, setScheduleTime] = useState("02:00")
+  const [scheduleTimezone, setScheduleTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Madrid")
+  const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [logs, setLogs] = useState<Record<string, string[]>>({})
   const [openLogs, setOpenLogs] = useState<Set<string>>(new Set())
@@ -138,14 +149,21 @@ export function Benchmarks() {
   const [statusFilter, setStatusFilter] = useState<"all" | BenchmarkRunStatus>("all")
   const [appFilter, setAppFilter] = useState("all")
 
-  const refresh = useCallback(async () => setRuns(await api.benchmarks.list()), [])
+  const refresh = useCallback(async () => {
+    const [nextRuns, nextSchedules] = await Promise.all([
+      api.benchmarks.list(), api.benchmarks.schedules.list(),
+    ])
+    setRuns(nextRuns)
+    setSchedules(nextSchedules)
+  }, [])
 
   useEffect(() => {
-    void Promise.all([api.benchmarks.catalog(), api.profiles.listAll(), api.benchmarks.list()])
-      .then(([nextCatalog, nextProfiles, nextRuns]) => {
+    void Promise.all([api.benchmarks.catalog(), api.profiles.listAll(), api.benchmarks.list(), api.benchmarks.schedules.list()])
+      .then(([nextCatalog, nextProfiles, nextRuns, nextSchedules]) => {
         setCatalog(nextCatalog)
         setProfiles(nextProfiles.filter((item) => item.enabled && item.profileKind === "execution"))
         setRuns(nextRuns)
+        setSchedules(nextSchedules)
         if (nextCatalog.length > 0) {
           setAppName(nextCatalog[0].app)
           setSuiteName(nextCatalog[0].suites[0]?.name ?? "")
@@ -214,6 +232,92 @@ export function Benchmarks() {
     }
   }
 
+  const schedulePayload = (overrides: Partial<BenchmarkScheduleInput> = {}): BenchmarkScheduleInput => ({
+    name: scheduleName.trim(), app: appName, suite: suiteName, models, revision,
+    suiteArgs: suiteProfileArgs(appName, profile), autoPause, enabled: scheduleEnabled,
+    weekdays: scheduleDays, timeOfDay: scheduleTime, timezone: scheduleTimezone,
+    ...overrides,
+  })
+
+  const saveSchedule = async () => {
+    if (!scheduleName.trim() || !appName || !suiteName || models.length === 0) {
+      toast.error("Pon nombre al plan y selecciona al menos un modelo")
+      return
+    }
+    setCreating(true)
+    try {
+      if (editingScheduleId) {
+        await api.benchmarks.schedules.update(editingScheduleId, schedulePayload())
+        toast.success("Plan actualizado")
+      } else {
+        await api.benchmarks.schedules.create(schedulePayload())
+        toast.success(scheduleEnabled ? "Plan programado" : "Plantilla guardada")
+      }
+      setEditingScheduleId(null)
+      setScheduleName("")
+      await refresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo guardar el plan")
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const editSchedule = (schedule: BenchmarkSchedule) => {
+    setEditingScheduleId(schedule.id)
+    setScheduleName(schedule.name)
+    setAppName(schedule.app)
+    setSuiteName(schedule.suite)
+    setModels(schedule.models)
+    setRevision(schedule.revision)
+    setAutoPause(schedule.autoPause)
+    setScheduleEnabled(schedule.enabled)
+    setScheduleDays(schedule.weekdays)
+    setScheduleTime(schedule.timeOfDay)
+    setScheduleTimezone(schedule.timezone)
+    const profileIndex = schedule.suiteArgs.indexOf("--profile")
+    setProfile(profileIndex >= 0 ? schedule.suiteArgs[profileIndex + 1] ?? "standard" : "standard")
+    window.scrollTo({ top: 0, behavior: "smooth" })
+  }
+
+  const updateSchedule = async (schedule: BenchmarkSchedule, changes: Partial<BenchmarkScheduleInput>) => {
+    setBusyId(schedule.id)
+    try {
+      await api.benchmarks.schedules.update(schedule.id, {
+        name: schedule.name, app: schedule.app, suite: schedule.suite,
+        revision: schedule.revision, models: schedule.models, suiteArgs: schedule.suiteArgs,
+        autoPause: schedule.autoPause, enabled: schedule.enabled,
+        weekdays: schedule.weekdays, timeOfDay: schedule.timeOfDay,
+        timezone: schedule.timezone, ...changes,
+      })
+      await refresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo actualizar el plan")
+    } finally { setBusyId(null) }
+  }
+
+  const runSchedule = async (schedule: BenchmarkSchedule) => {
+    setBusyId(schedule.id)
+    try {
+      await api.benchmarks.schedules.run(schedule.id)
+      toast.success("Plan añadido a la cola")
+      await refresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo ejecutar el plan")
+    } finally { setBusyId(null) }
+  }
+
+  const removeSchedule = async (schedule: BenchmarkSchedule) => {
+    if (!window.confirm(`¿Eliminar el plan «${schedule.name}»? El histórico se conserva.`)) return
+    setBusyId(schedule.id)
+    try {
+      await api.benchmarks.schedules.remove(schedule.id)
+      await refresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo eliminar el plan")
+    } finally { setBusyId(null) }
+  }
+
   const control = async (run: BenchmarkRun, action: "pause" | "resume" | "cancel") => {
     setBusyId(run.id)
     try {
@@ -253,6 +357,17 @@ export function Benchmarks() {
     } finally {
       setBusyId(null)
     }
+  }
+
+  const setBaseline = async (run: BenchmarkRun) => {
+    setBusyId(run.id)
+    try {
+      await api.benchmarks.baseline(run.id)
+      toast.success("Referencia histórica actualizada")
+      await refresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo fijar la referencia")
+    } finally { setBusyId(null) }
   }
 
   const loadLog = async (runId: string, open = true) => {
@@ -404,6 +519,18 @@ export function Benchmarks() {
                 <label className="mt-3 block space-y-1"><span className="text-xs text-muted-foreground">Revisión Git</span><input value={revision} onChange={(event) => setRevision(event.target.value)} className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs" /></label>
               </details>
 
+              <details className="rounded-lg border border-border p-3 text-sm" open={Boolean(editingScheduleId)}>
+                <summary className="flex cursor-pointer list-none items-center justify-between font-medium"><span className="inline-flex items-center gap-1.5"><CalendarDays size={14} /> Guardar como plan</span><ChevronDown size={14} /></summary>
+                <div className="mt-3 space-y-3">
+                  <label className="block space-y-1"><span className="text-xs text-muted-foreground">Nombre</span><input value={scheduleName} onChange={(event) => setScheduleName(event.target.value)} placeholder="IFEval nocturno" className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm" /></label>
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={scheduleEnabled} onChange={(event) => setScheduleEnabled(event.target.checked)} /><span>Programación activa</span></label>
+                  <div className="flex flex-wrap gap-1.5">{WEEKDAYS.map((day, index) => <button key={day} type="button" onClick={() => setScheduleDays((current) => current.includes(index) ? current.length > 1 ? current.filter((value) => value !== index) : current : [...current, index].sort())} className={`h-8 w-8 rounded-full border text-xs ${scheduleDays.includes(index) ? "border-primary bg-primary text-primary-foreground" : "border-border text-muted-foreground"}`}>{day}</button>)}</div>
+                  <div className="grid grid-cols-2 gap-2"><label className="space-y-1"><span className="text-xs text-muted-foreground">Hora</span><input type="time" value={scheduleTime} onChange={(event) => setScheduleTime(event.target.value)} className="w-full rounded-md border border-border bg-background px-2 py-2" /></label><label className="space-y-1"><span className="text-xs text-muted-foreground">Zona</span><input value={scheduleTimezone} onChange={(event) => setScheduleTimezone(event.target.value)} className="w-full rounded-md border border-border bg-background px-2 py-2 text-xs" /></label></div>
+                  <button type="button" onClick={() => void saveSchedule()} disabled={creating || models.length === 0 || !scheduleName.trim()} className={ACTION_BUTTON}><Save size={13} /> {editingScheduleId ? "Actualizar plan" : "Guardar plan"}</button>
+                  {editingScheduleId && <button type="button" onClick={() => { setEditingScheduleId(null); setScheduleName("") }} className="ml-2 text-xs text-muted-foreground hover:underline">Cancelar edición</button>}
+                </div>
+              </details>
+
               <button type="button" onClick={() => void createRun()} disabled={creating || loading || models.length === 0} className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground disabled:opacity-50">
                 {creating ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />}
                 {models.length > 0 ? `Encolar ${models.length} modelo${models.length === 1 ? "" : "s"}` : "Selecciona modelos"}
@@ -412,6 +539,19 @@ export function Benchmarks() {
           </div>
         </div>
       </section>
+
+      <section className="rounded-xl border border-border bg-card">
+        <div className="flex items-center gap-2 border-b border-border px-4 py-3"><CalendarDays size={16} className="text-primary" /><div><h2 className="font-medium">Planes y horarios</h2><p className="text-xs text-muted-foreground">Las plantillas desactivadas se conservan sin lanzarse solas.</p></div></div>
+        {schedules.length === 0 ? <p className="p-6 text-center text-sm text-muted-foreground">Todavía no hay planes guardados.</p> : <div className="grid gap-3 p-4 lg:grid-cols-2">{schedules.map((schedule) => (
+          <article key={schedule.id} className="rounded-lg border border-border bg-background p-3">
+            <div className="flex items-start justify-between gap-3"><div><h3 className="font-medium">{schedule.name}</h3><p className="font-mono text-xs text-muted-foreground">{schedule.app}/{schedule.suite} · {schedule.models.length} modelo{schedule.models.length === 1 ? "" : "s"}</p></div><button type="button" disabled={busyId === schedule.id} onClick={() => void updateSchedule(schedule, { enabled: !schedule.enabled })} className={`rounded-full border px-2 py-1 text-xs ${schedule.enabled ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400" : "border-border text-muted-foreground"}`}>{schedule.enabled ? "Activo" : "Plantilla"}</button></div>
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground"><div><span className="block">Próxima</span><strong className="font-normal text-foreground">{schedule.nextRunAt ? formatDate(schedule.nextRunAt) : "No programada"}</strong></div><div><span className="block">Última</span><strong className="font-normal text-foreground">{formatDate(schedule.lastRunAt)}</strong></div><div><span className="block">Horario</span><strong className="font-normal text-foreground">{schedule.weekdays.map((day) => WEEKDAYS[day]).join(" ")} · {schedule.timeOfDay}</strong></div><div><span className="block">Zona</span><strong className="font-normal text-foreground">{schedule.timezone}</strong></div></div>
+            <div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={() => void runSchedule(schedule)} disabled={busyId === schedule.id} className={ACTION_BUTTON}><Play size={12} /> Ejecutar ahora</button><button type="button" onClick={() => editSchedule(schedule)} className={ACTION_BUTTON}>Editar</button><button type="button" onClick={() => void removeSchedule(schedule)} disabled={busyId === schedule.id} className={`${ACTION_BUTTON} text-destructive`}><Trash2 size={12} /> Eliminar</button></div>
+          </article>
+        ))}</div>}
+      </section>
+
+      <BenchmarkHistory runs={runs} />
 
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -427,7 +567,7 @@ export function Benchmarks() {
         {visibleRuns.map((run) => (
           <RunCard key={run.id} run={run} busy={busyId === run.id} log={logs[run.id]} logOpen={openLogs.has(run.id)}
             onPause={() => void control(run, "pause")} onResume={() => void control(run, "resume")} onCancel={() => void control(run, "cancel")}
-            onRetry={() => void retry(run)} onRerun={() => void rerun(run)} onToggleLog={() => toggleLog(run.id)} onRefreshLog={() => void loadLog(run.id, false)} />
+            onRetry={() => void retry(run)} onRerun={() => void rerun(run)} onBaseline={() => void setBaseline(run)} onToggleLog={() => toggleLog(run.id)} onRefreshLog={() => void loadLog(run.id, false)} />
         ))}
       </section>
     </div>
@@ -439,9 +579,9 @@ function SummaryCard({ icon, label, value, tone }: { icon: ReactNode; label: str
   return <div className="flex items-center gap-3 rounded-xl border border-border bg-card p-3"><span className={`rounded-lg p-2 ${colors[tone]}`}>{icon}</span><div><p className="text-xl font-semibold tabular-nums">{value}</p><p className="text-xs text-muted-foreground">{label}</p></div></div>
 }
 
-function RunCard({ run, busy, log, logOpen, onPause, onResume, onCancel, onRetry, onRerun, onToggleLog, onRefreshLog }: {
+function RunCard({ run, busy, log, logOpen, onPause, onResume, onCancel, onRetry, onRerun, onBaseline, onToggleLog, onRefreshLog }: {
   run: BenchmarkRun; busy: boolean; log?: string[]; logOpen: boolean; onPause: () => void; onResume: () => void;
-  onCancel: () => void; onRetry: () => void; onRerun: () => void; onToggleLog: () => void; onRefreshLog: () => void
+  onCancel: () => void; onRetry: () => void; onRerun: () => void; onBaseline: () => void; onToggleLog: () => void; onRefreshLog: () => void
 }) {
   const progress = run.models.length > 0 ? Math.round((run.currentModelIndex / run.models.length) * 100) : 0
   const terminal = ["completed", "failed", "cancelled"].includes(run.status)
@@ -462,11 +602,12 @@ function RunCard({ run, busy, log, logOpen, onPause, onResume, onCancel, onRetry
             <div className="flex flex-wrap items-center gap-2">
               <h3 className="font-medium">{run.app} <span className="text-muted-foreground">·</span> {run.suite}</h3>
               <span className={`rounded border px-2 py-0.5 text-xs ${statusClass(run.status)}`}>{STATUS_LABEL[run.status]}</span>
+              {run.isBaseline && <span className="inline-flex items-center gap-1 text-xs text-amber-400"><Star size={12} className="fill-current" /> Referencia</span>}
               {run.contaminatedAttempts > 0 && <span className="inline-flex items-center gap-1 text-xs text-amber-400"><AlertTriangle size={12} /> {run.contaminatedAttempts} descartado{run.contaminatedAttempts === 1 ? "" : "s"}</span>}
             </div>
             <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
               <span>{formatDate(run.createdAt)}</span><span className="inline-flex items-center gap-1"><Clock3 size={11} /> {formatDuration(run.startedAt, run.finishedAt)}</span>
-              <span>revisión <code>{run.revision.slice(0, 12)}</code></span><span className="font-mono" title={run.id}>{run.id.slice(0, 8)}</span>
+              <span>revisión <code>{run.revision.slice(0, 12)}</code></span>{run.scheduleId && <span className="inline-flex items-center gap-1"><CalendarDays size={11} /> plan</span>}<span className="font-mono" title={run.id}>{run.id.slice(0, 8)}</span>
             </div>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -474,6 +615,7 @@ function RunCard({ run, busy, log, logOpen, onPause, onResume, onCancel, onRetry
               : ACTIVE_STATUSES.includes(run.status) && run.status !== "cancelling" ? <button type="button" onClick={onPause} disabled={busy} className={ACTION_BUTTON}><Pause size={13} /> Pausar</button> : null}
             {ACTIVE_STATUSES.includes(run.status) && run.status !== "cancelling" && <button type="button" onClick={onCancel} disabled={busy} className={`${ACTION_BUTTON} text-destructive`}><Ban size={13} /> Cancelar</button>}
             {run.status === "failed" && <button type="button" onClick={onRetry} disabled={busy} className={ACTION_BUTTON}><RotateCcw size={13} /> Reintentar modelo</button>}
+            {run.status === "completed" && !run.isBaseline && <button type="button" onClick={onBaseline} disabled={busy} className={ACTION_BUTTON}><Star size={13} /> Usar como referencia</button>}
             {terminal && <button type="button" onClick={onRerun} disabled={busy} className={ACTION_BUTTON}><RotateCcw size={13} /> Repetir todo</button>}
             {run.attempts.length > 0 && <button type="button" onClick={onToggleLog} className={ACTION_BUTTON}><Terminal size={13} /> {logOpen ? "Ocultar log" : "Log"}</button>}
           </div>

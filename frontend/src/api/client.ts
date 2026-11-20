@@ -86,6 +86,8 @@ import type {
   BatchEndpoint,
   BenchmarkAppCatalog,
   BenchmarkRun,
+  BenchmarkSchedule,
+  BenchmarkScheduleInput,
 } from "@/types";
 import { useAuthStore } from "@/stores/authStore";
 
@@ -3066,6 +3068,11 @@ export const api = {
         "POST",
         `/ocabra/benchmarks/runs/${encodeURIComponent(runId)}/retry`,
       ),
+    baseline: (runId: string) =>
+      request<BenchmarkRun>(
+        "POST",
+        `/ocabra/benchmarks/runs/${encodeURIComponent(runId)}/baseline`,
+      ),
     cancel: (runId: string) =>
       request<BenchmarkRun>(
         "POST",
@@ -3076,6 +3083,33 @@ export const api = {
         "GET",
         `/ocabra/benchmarks/runs/${encodeURIComponent(runId)}/log${buildQuery({ lines })}`,
       ),
+    schedules: {
+      list: () => request<BenchmarkSchedule[]>("GET", "/ocabra/benchmarks/schedules"),
+      create: (payload: BenchmarkScheduleInput) =>
+        request<BenchmarkSchedule>("POST", "/ocabra/benchmarks/schedules", {
+          name: payload.name, app: payload.app, suite: payload.suite,
+          revision: payload.revision || null, models: payload.models,
+          suite_args: payload.suiteArgs ?? [], auto_pause: payload.autoPause ?? true,
+          enabled: payload.enabled ?? false, weekdays: payload.weekdays,
+          time_of_day: payload.timeOfDay, timezone: payload.timezone,
+        }),
+      update: (scheduleId: string, payload: BenchmarkScheduleInput) =>
+        request<BenchmarkSchedule>(
+          "PUT", `/ocabra/benchmarks/schedules/${encodeURIComponent(scheduleId)}`, {
+            name: payload.name, app: payload.app, suite: payload.suite,
+            revision: payload.revision || null, models: payload.models,
+            suite_args: payload.suiteArgs ?? [], auto_pause: payload.autoPause ?? true,
+            enabled: payload.enabled ?? false, weekdays: payload.weekdays,
+            time_of_day: payload.timeOfDay, timezone: payload.timezone,
+          },
+        ),
+      remove: (scheduleId: string) => request<void>(
+        "DELETE", `/ocabra/benchmarks/schedules/${encodeURIComponent(scheduleId)}`,
+      ),
+      run: (scheduleId: string) => request<BenchmarkRun>(
+        "POST", `/ocabra/benchmarks/schedules/${encodeURIComponent(scheduleId)}/run`,
+      ),
+    },
   },
 
   backends: {

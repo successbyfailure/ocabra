@@ -2215,6 +2215,8 @@ export interface BenchmarkRun {
   suiteArgs: string[];
   status: BenchmarkRunStatus;
   phase: string;
+  scheduleId: string | null;
+  isBaseline: boolean;
   autoPause: boolean;
   pauseReason: "manual" | "external_traffic" | null;
   currentModelIndex: number;
@@ -2227,6 +2229,40 @@ export interface BenchmarkRun {
   startedAt: string | null;
   finishedAt: string | null;
   attempts: BenchmarkAttempt[];
+}
+
+export interface BenchmarkSchedule {
+  id: string;
+  name: string;
+  app: string;
+  suite: string;
+  revision: string;
+  models: string[];
+  suiteArgs: string[];
+  autoPause: boolean;
+  enabled: boolean;
+  weekdays: number[];
+  timeOfDay: string;
+  timezone: string;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastRunId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BenchmarkScheduleInput {
+  name: string;
+  app: string;
+  suite: string;
+  revision?: string;
+  models: string[];
+  suiteArgs?: string[];
+  autoPause?: boolean;
+  enabled?: boolean;
+  weekdays: number[];
+  timeOfDay: string;
+  timezone: string;
 }
 
 // Backend modules (Bloque 15) — re-exported for convenience.

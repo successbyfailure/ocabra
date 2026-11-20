@@ -144,6 +144,25 @@ describe("api client mappings", () => {
     expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST")
   })
 
+  it("serializes benchmark schedules and their weekly clock", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "plan-1" }), {
+        status: 201, headers: { "Content-Type": "application/json" },
+      }),
+    )
+
+    await api.benchmarks.schedules.create({
+      name: "Nocturno", app: "ifeval", suite: "quick", models: ["qwen"],
+      weekdays: [0, 4], timeOfDay: "02:30", timezone: "Europe/Madrid", enabled: true,
+    })
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("/ocabra/benchmarks/schedules")
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      name: "Nocturno", weekdays: [0, 4], time_of_day: "02:30",
+      timezone: "Europe/Madrid", enabled: true,
+    })
+  })
+
   it("maps snake_case estimate payloads to the camelCase shape used by the UI", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
