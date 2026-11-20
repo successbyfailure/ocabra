@@ -21,8 +21,10 @@ class _Status:
 
 
 def _state(backend_type="upscaler", image_upscaling=True):
+    # resolve_profile devuelve el estado del worker cargado; su model_id es la
+    # clave del worker, la misma que la del perfil de _PROFILE.
     return SimpleNamespace(
-        model_id=f"{backend_type}/m",
+        model_id=f"{backend_type}/realesrgan-x4plus",
         backend_type=backend_type,
         backend_model_id="m",
         status=_Status(),

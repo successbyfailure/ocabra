@@ -15,7 +15,6 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
     EngineSuffixedModelName,
     check_capability,
-    compute_worker_key,
     ensure_loaded,
     get_federation_manager,
     get_model_manager,
@@ -130,7 +129,9 @@ async def _run_embeddings(
             request_state=request.state,
         )
         merged_body = merge_profile_defaults(profile, body)
-        worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+        # El worker que resolve_profile ha cargado: su clave incluye el preset de
+        # runtime, que compute_worker_key(base, load_overrides) no ve.
+        worker_key = state.model_id
     except EngineSuffixedModelName:
         # Nombre que lleva el motor dentro: no hay via legacy que
         # probar, y su mensaje dice los dos nombres validos.

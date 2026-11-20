@@ -23,7 +23,6 @@ from ._deps import (
     NON_STREAMING_LOAD_RESPONSE_DOC,
     _openai_error,
     check_capability,
-    compute_worker_key,
     get_federation_manager,
     get_model_manager,
     get_openai_user,
@@ -123,7 +122,9 @@ async def embeddings(
     check_capability(state, "embeddings", "embeddings")
 
     merged_body = merge_profile_defaults(profile, body)
-    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    # El worker que resolve_profile ha cargado: su clave incluye el preset de
+    # runtime, que compute_worker_key(base, load_overrides) no ve.
+    worker_key = state.model_id
 
     dimensions = merged_body.get("dimensions")
     if dimensions is not None and (not isinstance(dimensions, int) or dimensions < 1):

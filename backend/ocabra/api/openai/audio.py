@@ -25,7 +25,6 @@ from ._deps import (
     NON_STREAMING_LOAD_RESPONSE_DOC,
     _openai_error,
     check_capability,
-    compute_worker_key,
     get_federation_manager,
     get_model_manager,
     get_openai_user,
@@ -285,7 +284,9 @@ async def transcriptions(
             param="diarize",
             code="diarization_not_supported",
         )
-    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    # El worker que resolve_profile ha cargado: su clave incluye el preset de
+    # runtime, que compute_worker_key(base, load_overrides) no ve.
+    worker_key = state.model_id
     # Multipart: the stats middleware cannot read ``model`` from the body, so
     # it takes the name from here. The profile the client asked for, not the
     # worker key: plain and -diarized share a worker, and recording the key
@@ -623,7 +624,9 @@ async def list_voices(
         request_state=request.state,
     )
     check_capability(state, "tts", "text-to-speech")
-    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    # El worker que resolve_profile ha cargado: su clave incluye el preset de
+    # runtime, que compute_worker_key(base, load_overrides) no ve.
+    worker_key = state.model_id
 
     worker_pool = request.app.state.worker_pool
     worker = worker_pool.get_worker(worker_key)
@@ -802,7 +805,9 @@ async def speech(
     check_capability(state, "tts", "text-to-speech")
 
     merged_body = merge_profile_defaults(profile, body)
-    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    # El worker que resolve_profile ha cargado: su clave incluye el preset de
+    # runtime, que compute_worker_key(base, load_overrides) no ve.
+    worker_key = state.model_id
 
     input_text: str = merged_body.get("input", "")
     voice: str = merged_body.get("voice", "alloy")
@@ -975,7 +980,9 @@ async def generate_music(
     check_capability(state, "music_generation", "music generation")
 
     merged_body = merge_profile_defaults(profile, body)
-    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    # El worker que resolve_profile ha cargado: su clave incluye el preset de
+    # runtime, que compute_worker_key(base, load_overrides) no ve.
+    worker_key = state.model_id
     # Multipart: the stats middleware cannot read ``model`` from the body, so
     # it takes the name from here. The profile the client asked for, not the
     # worker key: plain and -diarized share a worker, and recording the key

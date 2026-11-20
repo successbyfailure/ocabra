@@ -30,7 +30,6 @@ from ._deps import (
     _openai_error,
     build_model_status_headers,
     check_capability,
-    compute_worker_key,
     get_federation_manager,
     get_model_manager,
     get_openai_user,
@@ -326,7 +325,9 @@ async def image_upscale(
     pre_status = state.status.value
     started = time.monotonic()
 
-    worker_key = compute_worker_key(profile.base_model_id, profile.load_overrides)
+    # El worker que resolve_profile ha cargado: su clave incluye el preset de
+    # runtime, que compute_worker_key(base, load_overrides) no ve.
+    worker_key = state.model_id
     # Multipart: the stats middleware has no JSON ``model`` to read.
     request.state.stats_model_id = profile.profile_id
 

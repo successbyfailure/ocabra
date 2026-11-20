@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.124.1 — 2026-11-20
+
+### Corregido
+
+- **Embeddings, rerank, pooling, audio y escalado con modelos recién
+  descargados.** Un modelo dado de alta desde Explorar (o por
+  `POST /ocabra/downloads`) recibe un preset de runtime `normal`, y su worker
+  se registraba con una clave distinta de la que buscaban `/v1/embeddings`,
+  `/api/embed`, `/v1/rerank`, `/v1/score`, `/v1/pooling`, `/v1/classify`,
+  `/v1/audio/*` y `/v1/images/upscale`. El resultado era un **503
+  `worker_unloaded`** («it was unloaded while the request waited») en todas las
+  peticiones, aunque el modelo estuviera cargado. Los modelos antiguos sin
+  preset no estaban afectados. Ahora esos endpoints usan el worker que se acaba
+  de resolver.
+
+---
+
 ## 0.124.0 — 2026-11-20
 
 ### Nuevo
