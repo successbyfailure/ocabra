@@ -162,6 +162,7 @@ class VideoJobManager:
             "output_w": pending.params["width"],
             "output_h": pending.params["height"],
             "seconds": pending.params["seconds"],
+            "mode": pending.params.get("mode", "t2v"),
             "input_frames": pending.params["seconds"] * pending.params.get("fps", 24) + 1,
         }
         inflight_id = None

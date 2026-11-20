@@ -101,3 +101,45 @@ describe("VideoInterface", () => {
     await waitFor(() => expect(screen.getByText("Sin VRAM")).toBeTruthy())
   })
 })
+
+describe("VideoInterface con imágenes", () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it("con imagen inicial y final envía multipart sin size (proporción de la imagen)", async () => {
+    let sent: FormData | null = null
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.startsWith("/v1/videos?")) return json({ object: "list", data: [], has_more: false })
+      if (url === "/v1/videos" && init?.method === "POST") {
+        sent = init.body as FormData
+        return json(job())
+      }
+      return json(job())
+    })
+    if (!URL.createObjectURL) {
+      Object.defineProperty(URL, "createObjectURL", { value: () => "blob:x", configurable: true })
+      Object.defineProperty(URL, "revokeObjectURL", { value: () => undefined, configurable: true })
+    }
+
+    render(<VideoInterface modelId="ltx-2.5" />)
+    const png = new File([new Uint8Array([137, 80, 78, 71])], "a.png", { type: "image/png" })
+    fireEvent.change(screen.getByTestId("video-start-input"), { target: { files: [png] } })
+    fireEvent.change(screen.getByTestId("video-end-input"), { target: { files: [png] } })
+    fireEvent.change(screen.getByPlaceholderText(/Plano, sujeto/), {
+      target: { value: "transición" },
+    })
+    expect(screen.getByText("según la imagen")).toBeTruthy()
+    fireEvent.click(screen.getByText("Generar transición"))
+
+    await waitFor(() => expect(sent).not.toBeNull())
+    const fd = sent as unknown as FormData
+    expect(fd.get("model")).toBe("ltx-2.5")
+    expect(fd.get("prompt")).toBe("transición")
+    expect(fd.get("size")).toBeNull()
+    expect(fd.get("input_reference")).toBeInstanceOf(File)
+    expect(fd.get("last_frame")).toBeInstanceOf(File)
+  })
+})

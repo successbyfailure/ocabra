@@ -211,3 +211,136 @@ def test_un_modelo_inexistente_da_404():
     app.state.model_manager.get_state = AsyncMock(return_value=None)
     resp, _ = _post(app, {"model": "no-existe", "prompt": "x"})
     assert resp.status_code == 404
+
+
+# ── Imagen a vídeo y primer/último fotograma ───────────────────────────
+
+
+def _png(width: int, height: int) -> bytes:
+    import struct
+    import zlib
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    chunk = b"IHDR" + ihdr
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", len(ihdr))
+        + chunk
+        + struct.pack(">I", zlib.crc32(chunk))
+    )
+
+
+def test_lee_las_dimensiones_de_png_jpeg_y_webp():
+    from ocabra.core.image_header import image_size
+
+    assert image_size(_png(1000, 500)) == (1000, 500)
+    jpeg = (
+        b"\xff\xd8"
+        + b"\xff\xe0\x00\x10" + b"JFIF\x00" + b"\x00" * 9
+        + b"\xff\xc0\x00\x11\x08" + (480).to_bytes(2, "big") + (640).to_bytes(2, "big")
+        + b"\x03" + b"\x00" * 9
+    )  # fmt: skip
+    assert image_size(jpeg) == (640, 480)
+    webp = (
+        b"RIFF\x00\x00\x00\x00WEBPVP8X"
+        + b"\x00" * 8
+        + (799).to_bytes(3, "little")
+        + (599).to_bytes(3, "little")
+    )
+    assert image_size(webp) == (800, 600)
+    assert image_size(b"esto no es una imagen, solo texto largo") is None
+
+
+def _post_multipart(app, data, files):
+    session = _Session()
+    with patch(f"{MODULE}.AsyncSessionLocal", lambda: session):
+        resp = TestClient(app, raise_server_exceptions=False).post(
+            "/v1/videos", data=data, files=files
+        )
+    return resp
+
+
+def test_input_reference_por_multipart_anima_la_imagen_con_su_proporcion():
+    import base64
+
+    app, jobs = _app()
+    image = _png(1000, 1000)
+    resp = _post_multipart(
+        app,
+        {"model": "ltx-2.5", "prompt": "que se mueva"},
+        {"input_reference": ("foto.png", image, "image/png")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["size"] == "960x960"
+    params = jobs.submit.await_args.args[0].params
+    assert params["mode"] == "i2v"
+    assert base64.b64decode(params["image_b64"]) == image
+    assert "last_image_b64" not in params
+
+
+def test_primer_y_ultimo_fotograma_por_data_url():
+    import base64
+
+    app, jobs = _app()
+    first = "data:image/png;base64," + base64.b64encode(_png(1280, 720)).decode()
+    last = {"image_url": "data:image/png;base64," + base64.b64encode(_png(1280, 720)).decode()}
+    resp, _ = _post(
+        app,
+        {"model": "ltx-2.5", "prompt": "x", "input_reference": first, "last_frame": last},
+    )
+    assert resp.status_code == 200, resp.text
+    params = jobs.submit.await_args.args[0].params
+    assert params["mode"] == "flf2v"
+    assert params["image_b64"] and params["last_image_b64"]
+    assert resp.json()["size"] == "1280x704"
+
+
+@pytest.mark.parametrize(
+    ("extra", "param"),
+    [
+        ({"last_frame": "data:image/png;base64," + __import__("base64").b64encode(
+            _png(64, 64)).decode()}, "last_frame"),
+        ({"input_reference": "data:text/plain;base64,aG9sYQ=="}, "input_reference"),
+        ({"input_reference": "ftp://example.com/x.png"}, "input_reference"),
+    ],
+)  # fmt: skip
+def test_rechaza_imagenes_invalidas(extra, param):
+    app, jobs = _app()
+    resp, _ = _post(app, {"model": "ltx-2.5", "prompt": "x", **extra})
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["error"]["param"] == param
+    jobs.submit.assert_not_awaited()
+
+
+def test_los_workflows_de_imagen_rellenan_sus_imagenes():
+    worker = _worker_module()
+    base = WORKERS / "comfyui_video_workflows"
+    i2v = worker.WorkflowTemplate(base / "ltx25_i2v.json")
+    assert i2v.image_inputs == ["image"]
+    assert len(i2v.samplers) == 2
+    prompt, _ = i2v.render(
+        {"prompt": "x", "width": 960, "height": 960, "seconds": 3}, "p", {"image": "j_image"}
+    )
+    assert prompt[i2v.params["image"]]["inputs"]["image"] == "j_image"
+
+    flf = worker.WorkflowTemplate(base / "ltx25_flf2v.json")
+    assert flf.image_inputs == ["image", "last_image"]
+    # Una sola pasada: todo el progreso de muestreo en un tramo.
+    assert len(flf.samplers) == 1 and len(flf.stage_weights) == 1
+    prompt, _ = flf.render(
+        {"prompt": "x", "width": 1280, "height": 704, "seconds": 3},
+        "p",
+        {"image": "a", "last_image": "b"},
+    )
+    assert prompt[flf.params["image"]]["inputs"]["image"] == "a"
+    assert prompt[flf.params["last_image"]]["inputs"]["image"] == "b"
+    assert prompt[flf.params["width"]]["inputs"]["value"] == 1280
+
+
+def test_el_backend_da_los_tres_modos_por_defecto():
+    from ocabra.backends.comfyui_video_backend import ComfyUIVideoBackend
+
+    paths = ComfyUIVideoBackend.workflow_paths({})
+    assert sorted(paths) == ["flf2v", "i2v", "t2v"]
+    with pytest.raises(ValueError):
+        ComfyUIVideoBackend.workflow_paths({"workflows": {"v2v": "ltx25_t2v"}})

@@ -1,7 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Download, RotateCcw, Shuffle, Trash2 } from "lucide-react"
 import { toast } from "sonner"
+import { ImageDropTile } from "@/components/playground/ImageInterface"
+import { fileFromClipboard, fileFromUrl } from "@/lib/imageFiles"
 import { playgroundFetch } from "@/lib/playgroundNode"
+
+interface InputImage {
+  file: File
+  preview: string
+}
+
+/** Imagen enviada desde otra pestaña (p. ej. «Animar» en Imagen). */
+export interface VideoDraft {
+  url: string
+  prompt: string
+}
 
 /** Objeto ``video`` de /v1/videos (API de vídeo estilo OpenAI). */
 export interface VideoJob {
@@ -65,12 +78,27 @@ function elapsed(job: VideoJob, now: number): string {
   return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`
 }
 
-export function VideoInterface({ modelId }: { modelId: string }) {
+// "auto": sin ``size``, el servidor toma la proporción de la imagen inicial.
+const AUTO_SIZE = "auto"
+
+export function VideoInterface({
+  modelId,
+  draft = null,
+  onDraftConsumed,
+}: {
+  modelId: string
+  draft?: VideoDraft | null
+  onDraftConsumed?: () => void
+}) {
   const [prompt, setPrompt] = useState("")
   const [negativePrompt, setNegativePrompt] = useState("")
   const [seconds, setSeconds] = useState(5)
   const [sizeKey, setSizeKey] = useState("16_9")
   const [seed, setSeed] = useState<string>("")
+  const [startImage, setStartImage] = useState<InputImage | null>(null)
+  const [endImage, setEndImage] = useState<InputImage | null>(null)
+  const startInput = useRef<HTMLInputElement | null>(null)
+  const endInput = useRef<HTMLInputElement | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [jobs, setJobs] = useState<VideoJob[]>([])
   const [prompts, setPrompts] = useState<Record<string, string>>({})
@@ -78,6 +106,57 @@ export function VideoInterface({ modelId }: { modelId: string }) {
   const mounted = useRef(true)
 
   const size = SIZE_PRESETS.find((p) => p.key === sizeKey) ?? SIZE_PRESETS[0]!
+  const autoSize = sizeKey === AUTO_SIZE && startImage !== null
+
+  const setImage = useCallback(
+    (which: "start" | "end", file: File | null) => {
+      const setter = which === "start" ? setStartImage : setEndImage
+      setter((prev) => {
+        if (prev) URL.revokeObjectURL(prev.preview)
+        return file ? { file, preview: URL.createObjectURL(file) } : null
+      })
+      // Con imagen inicial, el formato por defecto pasa a ser el de la imagen.
+      if (which === "start") setSizeKey((key) => (file ? AUTO_SIZE : key === AUTO_SIZE ? "16_9" : key))
+    },
+    [],
+  )
+
+  const pasteInto = async (which: "start" | "end") => {
+    try {
+      const file = await fileFromClipboard()
+      if (file) setImage(which, file)
+      else toast.error("No hay ninguna imagen en el portapapeles")
+    } catch {
+      toast.error("El navegador no deja leer el portapapeles")
+    }
+  }
+
+  // «Animar» desde la pestaña Imagen: la imagen llega como primer fotograma.
+  // El callback va por ref para que un padre que lo recrea en cada render no
+  // relance la carga.
+  const consumed = useRef(onDraftConsumed)
+  useEffect(() => {
+    consumed.current = onDraftConsumed
+  }, [onDraftConsumed])
+  useEffect(() => {
+    if (!draft) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const file = await fileFromUrl(draft.url, "start.png")
+        if (cancelled) return
+        setImage("start", file)
+        setPrompt((current) => current || draft.prompt)
+      } catch {
+        toast.error("No se pudo cargar la imagen")
+      } finally {
+        consumed.current?.()
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [draft, setImage])
   const pending = jobs.filter((j) => j.status === "queued" || j.status === "in_progress")
 
   // Historial: los vídeos se guardan 24 h en el servidor, así que al volver a
@@ -144,21 +223,38 @@ export function VideoInterface({ modelId }: { modelId: string }) {
       toast.error("Describe la escena (y el sonido) en el prompt")
       return
     }
+    if (endImage && !startImage) {
+      toast.error("Para usar imagen final hace falta también la inicial")
+      return
+    }
     setSubmitting(true)
     try {
-      const body: Record<string, unknown> = {
+      const fields: Record<string, string> = {
         model: modelId,
         prompt: prompt.trim(),
         seconds: String(seconds),
-        size: `${size.width}x${size.height}`,
       }
-      if (negativePrompt.trim()) body.negative_prompt = negativePrompt.trim()
-      if (seed.trim() !== "" && Number.isFinite(Number(seed))) body.seed = Number(seed)
-      const response = await playgroundFetch("/v1/videos", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      })
+      if (!autoSize) fields.size = `${size.width}x${size.height}`
+      if (negativePrompt.trim()) fields.negative_prompt = negativePrompt.trim()
+      if (seed.trim() !== "" && Number.isFinite(Number(seed))) fields.seed = String(Number(seed))
+      let init: RequestInit
+      if (startImage) {
+        // Con imágenes, multipart: es como lo envía el SDK de OpenAI.
+        const fd = new FormData()
+        for (const [key, value] of Object.entries(fields)) fd.append(key, value)
+        fd.append("input_reference", startImage.file, startImage.file.name)
+        if (endImage) fd.append("last_frame", endImage.file, endImage.file.name)
+        init = { method: "POST", body: fd }
+      } else {
+        const body: Record<string, unknown> = { ...fields }
+        if (fields.seed) body.seed = Number(fields.seed)
+        init = {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      }
+      const response = await playgroundFetch("/v1/videos", init)
       if (!response.ok) throw new Error(await errorMessage(response))
       const job = (await response.json()) as VideoJob
       setPrompts((prev) => ({ ...prev, [job.id]: prompt.trim() }))
@@ -206,7 +302,57 @@ export function VideoInterface({ modelId }: { modelId: string }) {
         </label>
       </div>
 
+      <div className="grid gap-3 md:grid-cols-2">
+        <ImageDropTile
+          label="Imagen inicial (opcional)"
+          previewUrl={startImage?.preview ?? null}
+          onPick={() => startInput.current?.click()}
+          onClear={() => setImage("start", null)}
+          onPaste={() => void pasteInto("start")}
+          onDropFile={(f) => setImage("start", f)}
+          hint="Primer fotograma: el vídeo la anima siguiendo el prompt"
+        />
+        <ImageDropTile
+          label="Imagen final (opcional)"
+          previewUrl={endImage?.preview ?? null}
+          onPick={() => endInput.current?.click()}
+          onClear={() => setImage("end", null)}
+          onPaste={() => void pasteInto("end")}
+          onDropFile={(f) => setImage("end", f)}
+          hint="Último fotograma: el vídeo va de la inicial a esta"
+        />
+        {(["start", "end"] as const).map((which) => (
+          <input
+            key={which}
+            ref={which === "start" ? startInput : endInput}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            className="hidden"
+            data-testid={`video-${which}-input`}
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) setImage(which, f)
+              e.target.value = ""
+            }}
+          />
+        ))}
+      </div>
+
       <div className="flex flex-wrap items-center gap-1.5">
+        {startImage && (
+          <button
+            type="button"
+            onClick={() => setSizeKey(AUTO_SIZE)}
+            className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+              autoSize
+                ? "border-primary bg-primary/10 text-primary"
+                : "border-border text-muted-foreground hover:bg-muted"
+            }`}
+            title="La proporción de la imagen inicial"
+          >
+            Auto <span className="text-[10px] opacity-70">imagen</span>
+          </button>
+        )}
         {SIZE_PRESETS.map((p) => (
           <button
             key={p.key}
@@ -223,7 +369,7 @@ export function VideoInterface({ modelId }: { modelId: string }) {
           </button>
         ))}
         <span className="ml-1 text-xs text-muted-foreground">
-          {size.width}×{size.height}
+          {autoSize ? "según la imagen" : `${size.width}×${size.height}`}
         </span>
       </div>
 
@@ -263,7 +409,13 @@ export function VideoInterface({ modelId }: { modelId: string }) {
           disabled={submitting || !modelId}
           className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
         >
-          {submitting ? "Enviando..." : "Generar vídeo"}
+          {submitting
+            ? "Enviando..."
+            : endImage
+              ? "Generar transición"
+              : startImage
+                ? "Animar imagen"
+                : "Generar vídeo"}
         </button>
       </div>
       <p className="text-xs text-muted-foreground">

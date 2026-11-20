@@ -16,6 +16,24 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.126.0 — 2026-11-20
+
+### Nuevo
+
+- **`/v1/videos` parte de imágenes.** `input_reference` (el campo de OpenAI)
+  usa una imagen como primer fotograma y el vídeo la anima siguiendo el
+  prompt. Se acepta como fichero en multipart (lo que envía el SDK de OpenAI),
+  o en JSON como `data:` URL, URL `http(s)` pública o `{"image_url": ...}`.
+  Si no mandas `size`, el vídeo toma la proporción de la imagen.
+- **`last_frame`** (extensión, necesita `input_reference`): la imagen del
+  último fotograma; el vídeo hace la transición de una a otra.
+- Hasta 20 MB por imagen (`VIDEO_MAX_IMAGE_MB`); PNG, JPEG, WebP o GIF.
+
+**Acción:** si mandabas `input_reference` y tratabas el 400 como «no
+soportado», ahora se usa de verdad.
+
+---
+
 ## 0.125.2 — 2026-11-20
 
 ### Corregido

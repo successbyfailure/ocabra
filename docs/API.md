@@ -143,7 +143,7 @@ curl -H "Authorization: Bearer sk-…" http://localhost:8484/v1/models
 
 ## OpenAI — vídeo (`/v1/videos`)
 
-Asíncrona, como la de OpenAI: `POST` encola y devuelve el objeto `video` en `queued`; se consulta hasta `completed` y se descarga el MP4 (con audio). No disponible en nodos `zero_data`.
+Asíncrona, como la de OpenAI: `POST` encola y devuelve el objeto `video` en `queued`; se consulta hasta `completed` y se descarga el MP4 (con audio). `input_reference` anima una imagen (primer fotograma) y `last_frame` (extensión) fija el último. No disponible en nodos `zero_data`.
 
 | Método | Ruta | Qué hace | Acceso |
 |---|---|---|---|

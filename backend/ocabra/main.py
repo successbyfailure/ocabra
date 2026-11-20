@@ -1168,9 +1168,16 @@ modelo en `/v1/images/generations` y edita con otro en `/v1/images/edits`.
    genera tambien el sonido; describelo en el prompt). `?variant=thumbnail`
    da un JPEG del primer fotograma.
 
+**Partir de imagenes.** `input_reference` (como en OpenAI) es el primer
+fotograma: el video anima esa imagen siguiendo el prompt. Va como fichero en
+multipart, o en JSON como `data:` URL, URL `http(s)` publica o
+`{"image_url": ...}`. Sin `size`, el video toma la proporcion de la imagen.
+`last_frame` (extension, necesita `input_reference`) es el ultimo fotograma:
+el video va de una imagen a la otra. Hasta 20 MB por imagen.
+
 Diferencias: `seconds` es cualquier entero de 1 a 10; `size` se redondea a
-multiplos de 64 (`1280x720` sale `1280x704`); `seed` y `negative_prompt` son
-extensiones. Se genera un video a la vez en todo el nodo; uno de 5 s a 720p
+multiplos de 64 (`1280x720` sale `1280x704`); `seed`, `negative_prompt` y
+`last_frame` son extensiones. Se genera un video a la vez en todo el nodo; uno de 5 s a 720p
 tarda ~65 s con el modelo cargado y ~85 s si hay que cargarlo. El fichero se
 borra a las 24 h. No disponible en nodos `zero_data`.
 

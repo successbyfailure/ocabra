@@ -13,7 +13,10 @@ con audio en ~65 s en caliente y ~85 s en frío.
 
 ``extra_config.comfyui_video``:
   model_dir   carpeta relativa a MODELS_DIR (por defecto ``video``)
-  workflow    nombre del JSON en ``workers/comfyui_video_workflows`` (``ltx25_t2v``)
+  workflows   modo → nombre del JSON en ``workers/comfyui_video_workflows``.
+              Modos: ``t2v`` (texto), ``i2v`` (imagen inicial) y ``flf2v``
+              (primer y último fotograma). Por defecto los tres de LTX-2.5.
+  workflow    (antiguo) solo el de ``t2v``
   comfy_args  opciones extra para ComfyUI (p. ej. ``["--lowvram"]``)
   max_seconds tope de duración por petición (por defecto 10)
   vram_mb     VRAM reservada (por defecto 23500: la 3090 entera)
@@ -52,7 +55,8 @@ CONFIG_SECTION = "comfyui_video"
 # Pico medido con 1280x704 y 5 s: 23,7 GB. ComfyUI reparte la VRAM que
 # encuentra (carga dinámica), así que se reserva la tarjeta entera.
 DEFAULT_VRAM_MB = 23500
-DEFAULT_WORKFLOW = "ltx25_t2v"
+DEFAULT_WORKFLOWS = {"t2v": "ltx25_t2v", "i2v": "ltx25_i2v", "flf2v": "ltx25_flf2v"}
+VIDEO_MODES = tuple(DEFAULT_WORKFLOWS)
 DEFAULT_MODEL_DIR = "video"
 DEFAULT_MAX_SECONDS = 10
 # ComfyUI pin: mismo commit que la imagen del servicio interactivo, el único
@@ -117,6 +121,20 @@ class ComfyUIVideoBackend(BackendInterface):
             raise FileNotFoundError(f"Worker script not found: {script}")
         return script
 
+    @classmethod
+    def workflow_paths(cls, cfg: dict[str, Any]) -> dict[str, Path]:
+        """Workflow de cada modo según ``extra_config.comfyui_video``."""
+        names = dict(DEFAULT_WORKFLOWS)
+        if cfg.get("workflow"):
+            names["t2v"] = str(cfg["workflow"])
+        custom = cfg.get("workflows")
+        if isinstance(custom, dict):
+            names = {str(k): str(v) for k, v in custom.items() if v}
+        unknown = set(names) - set(VIDEO_MODES)
+        if unknown:
+            raise ValueError(f"Unknown video modes: {sorted(unknown)}")
+        return {mode: cls.workflow_path(name) for mode, name in names.items()}
+
     @staticmethod
     def workflow_path(name: str) -> Path:
         # Solo nombres de fichero del directorio de workflows, nunca rutas.
@@ -138,7 +156,7 @@ class ComfyUIVideoBackend(BackendInterface):
         model_dir = Path(settings.models_dir) / str(cfg.get("model_dir") or DEFAULT_MODEL_DIR)
         if not model_dir.is_dir():
             raise FileNotFoundError(f"Video model directory not found: {model_dir}")
-        workflow = self.workflow_path(str(cfg.get("workflow") or DEFAULT_WORKFLOW))
+        workflows = self.workflow_paths(cfg)
         src_dir = Path(settings.backends_dir) / BACKEND_TYPE / "src"
         if not (src_dir / "main.py").exists():
             raise FileNotFoundError(
@@ -161,10 +179,11 @@ class ComfyUIVideoBackend(BackendInterface):
             "--model-id", model_id,
             "--model-path", str(model_dir),
             "--src-dir", str(src_dir),
-            "--workflow", str(workflow),
             "--port", str(port),
             "--comfy-port", str(comfy_port),
         ]  # fmt: skip
+        for mode, path in workflows.items():
+            cmd.append(f"--workflow={mode}={path}")
         for arg in cfg.get("comfy_args") or []:
             cmd.append(f"--comfy-arg={arg}")
 
@@ -203,7 +222,7 @@ class ComfyUIVideoBackend(BackendInterface):
             gpu_index=gpu_index,
             port=port,
             comfy_port=comfy_port,
-            workflow=workflow.name,
+            modes=sorted(workflows),
         )
         return info
 

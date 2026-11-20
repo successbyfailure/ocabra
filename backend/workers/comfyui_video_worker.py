@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import ctypes
 import json
 import logging
@@ -49,8 +50,12 @@ logger = logging.getLogger(__name__)
 # Fracción del progreso que se atribuye a cada muestreador del workflow de
 # LTX-2.5: la primera pasada (8 pasos a media resolución) es casi todo el
 # trabajo; el refinado tras el escalado latente son 3 pasos; el resto es
-# codificar el texto y decodificar vídeo y audio.
+# codificar el texto y decodificar vídeo y audio. El de primer y último
+# fotograma tiene una sola pasada.
 _STAGE_WEIGHTS = ((5.0, 70.0), (75.0, 15.0))
+_SINGLE_STAGE_WEIGHTS = ((5.0, 85.0),)
+# Imágenes de entrada que puede pedir un workflow (nodos LoadImage).
+IMAGE_PARAMS = ("image", "last_image")
 _POLL_S = 0.5
 
 
@@ -87,6 +92,8 @@ class WorkflowTemplate:
         # Orden de ejecución: el muestreador cuyo latente sale de otro
         # muestreador va después.
         self.samplers = sorted(samplers, key=lambda n: self._depends_on_sampler(n, samplers))
+        self.stage_weights = _SINGLE_STAGE_WEIGHTS if len(samplers) == 1 else _STAGE_WEIGHTS
+        self.image_inputs = [name for name in IMAGE_PARAMS if name in self.params]
 
     def _depends_on_sampler(self, node_id: str, samplers: list[str]) -> int:
         seen: set[str] = set()
@@ -103,7 +110,9 @@ class WorkflowTemplate:
                         stack.append(src)
         return 0
 
-    def render(self, req: dict[str, Any], prefix: str) -> tuple[dict[str, Any], int]:
+    def render(
+        self, req: dict[str, Any], prefix: str, images: dict[str, str] | None = None
+    ) -> tuple[dict[str, Any], int]:
         prompt = json.loads(json.dumps(self.prompt))
         p = self.params
 
@@ -124,6 +133,8 @@ class WorkflowTemplate:
         put("fps", "value", int(req.get("fps") or 24))
         put("seed", "noise_seed", int(seed))
         put("output", "filename_prefix", prefix)
+        for name, filename in (images or {}).items():
+            put(name, "image", filename)
         return prompt, int(seed)
 
 
@@ -134,7 +145,12 @@ class WorkerState:
         self.src_dir = Path(args.src_dir)
         self.comfy_port: int = args.comfy_port
         self.base = f"http://127.0.0.1:{args.comfy_port}"
-        self.template = WorkflowTemplate(Path(args.workflow))
+        # Un workflow por modo: t2v (solo texto), i2v (imagen inicial) y
+        # flf2v (primer y último fotograma). ``--workflow modo=ruta``.
+        self.templates: dict[str, WorkflowTemplate] = {}
+        for item in args.workflow:
+            mode, _, path = item.rpartition("=")
+            self.templates[mode or "t2v"] = WorkflowTemplate(Path(path))
         self.work_dir = Path(tempfile.mkdtemp(prefix="ocabra_comfyui_video_"))
         self.process: subprocess.Popen | None = None
         self.lock = asyncio.Lock()
@@ -212,9 +228,53 @@ class WorkerState:
         self.progress = {"job_id": job_id, "percent": round(percent, 1), "stage": stage}
 
     async def generate(self, req: dict[str, Any]) -> tuple[bytes, dict[str, str]]:
-        job_id = str(req.get("job_id") or uuid.uuid4().hex)
+        # Va en nombres de fichero: solo caracteres seguros.
+        job_id = "".join(c for c in str(req.get("job_id") or "") if c.isalnum())[:64]
+        job_id = job_id or uuid.uuid4().hex
         prefix = f"ocabra/{job_id}"
-        prompt, seed = self.template.render(req, prefix)
+        mode = str(req.get("mode") or "t2v")
+        template = self.templates.get(mode)
+        if template is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Mode '{mode}' is not available; this model has {sorted(self.templates)}",
+            )
+        images = self._save_images(job_id, template, req)
+        try:
+            return await self._generate(req, job_id, prefix, template, images)
+        finally:
+            for filename in images.values():
+                (self.work_dir / "input" / filename).unlink(missing_ok=True)
+
+    def _save_images(
+        self, job_id: str, template: WorkflowTemplate, req: dict[str, Any]
+    ) -> dict[str, str]:
+        """Escribe las imágenes de entrada en el directorio de ComfyUI."""
+        saved: dict[str, str] = {}
+        for name in template.image_inputs:
+            raw = req.get(f"{name}_b64")
+            if not raw:
+                raise HTTPException(status_code=400, detail=f"'{name}' is required in this mode")
+            try:
+                data = base64.b64decode(raw, validate=True)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail=f"'{name}' is not valid base64"
+                ) from None
+            filename = f"{job_id}_{name}"
+            (self.work_dir / "input" / filename).write_bytes(data)
+            saved[name] = filename
+        return saved
+
+    async def _generate(
+        self,
+        req: dict[str, Any],
+        job_id: str,
+        prefix: str,
+        template: WorkflowTemplate,
+        images: dict[str, str],
+    ) -> tuple[bytes, dict[str, str]]:
+        prompt, seed = template.render(req, prefix, images)
         client_id = uuid.uuid4().hex
         started = time.monotonic()
         self._set_progress(job_id, 1.0, "queued")
@@ -227,7 +287,7 @@ class WorkerState:
                     status_code=400, detail=f"ComfyUI rejected the workflow: {r.text[:500]}"
                 )
             prompt_id = r.json()["prompt_id"]
-            progress_task = asyncio.create_task(self._follow_progress(job_id, client_id))
+            progress_task = asyncio.create_task(self._follow_progress(job_id, client_id, template))
             try:
                 history = await self._wait_history(client, prompt_id)
             finally:
@@ -256,6 +316,7 @@ class WorkerState:
         frames = int(req["seconds"]) * int(req.get("fps") or 24) + 1
         self._set_progress(job_id, 100.0, "completed")
         stats = {
+            "mode": str(req.get("mode") or "t2v"),
             "width": req["width"],
             "height": req["height"],
             "seconds": req["seconds"],
@@ -290,13 +351,15 @@ class WorkerState:
                         return path
         raise HTTPException(status_code=500, detail="ComfyUI produced no video file")
 
-    async def _follow_progress(self, job_id: str, client_id: str) -> None:
+    async def _follow_progress(
+        self, job_id: str, client_id: str, template: WorkflowTemplate
+    ) -> None:
         """Progreso por el websocket de ComfyUI (eventos ``progress``)."""
         import aiohttp  # dependencia de ComfyUI, está en el venv del backend
 
         stages = {
             node: weights
-            for node, weights in zip(self.template.samplers, _STAGE_WEIGHTS, strict=False)
+            for node, weights in zip(template.samplers, template.stage_weights, strict=False)
         }
         url = f"ws://127.0.0.1:{self.comfy_port}/ws?clientId={client_id}"
         try:
@@ -362,7 +425,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--model-path", required=True, help="Carpeta de modelos de vídeo")
     parser.add_argument("--src-dir", required=True, help="Clon de ComfyUI")
-    parser.add_argument("--workflow", required=True, help="Workflow en formato API (JSON)")
+    parser.add_argument(
+        "--workflow",
+        action="append",
+        required=True,
+        help="modo=ruta de un workflow en formato API (repetir: t2v, i2v, flf2v)",
+    )
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--comfy-port", type=int, required=True)
     parser.add_argument("--host", default="127.0.0.1")

@@ -24,7 +24,7 @@ import { ParamsPanel, type PlaygroundParams } from "@/components/playground/Para
 import { PoolingInterface } from "@/components/playground/PoolingInterface"
 import { RealtimeInterface } from "@/components/playground/RealtimeInterface"
 import { NodeSelector } from "@/components/playground/NodeSelector"
-import { VideoInterface } from "@/components/playground/VideoInterface"
+import { VideoInterface, type VideoDraft } from "@/components/playground/VideoInterface"
 import type { ModelState } from "@/types"
 
 type TaskTab = "text" | "image" | "video" | "audio" | "embeddings" | "realtime"
@@ -114,6 +114,10 @@ export function Playground() {
   const [chatKey, setChatKey] = useState(0)
   const [tab, setTab] = useState<TaskTab | null>(null)
   const [imageDraft, setImageDraft] = useState<{ url: string; prompt: string } | null>(null)
+  const [videoDraft, setVideoDraft] = useState<VideoDraft | null>(null)
+  const hasVideoModel = models.some(
+    (m) => Boolean(m.capabilities.videoGeneration) || m.backendType === "comfyui_video",
+  )
 
   const agents = useAgentsStore((s) => s.agents)
   const fetchAgents = useAgentsStore((s) => s.fetchAll)
@@ -393,9 +397,23 @@ export function Playground() {
                       editDraft={imageDraft}
                       onDraftConsumed={() => setImageDraft(null)}
                       onSendToEdit={(url, prompt) => setImageDraft({ url, prompt })}
+                      onSendToVideo={
+                        hasVideoModel
+                          ? (url, prompt) => {
+                              setVideoDraft({ url, prompt })
+                              setTab("video")
+                            }
+                          : undefined
+                      }
                     />
                   )}
-                  {activeTab === "video" && <VideoInterface modelId={selectedModelId} />}
+                  {activeTab === "video" && (
+                    <VideoInterface
+                      modelId={selectedModelId}
+                      draft={videoDraft}
+                      onDraftConsumed={() => setVideoDraft(null)}
+                    />
+                  )}
                   {activeTab === "audio" && (
                     <AudioInterface
                       modelId={selectedModelId}

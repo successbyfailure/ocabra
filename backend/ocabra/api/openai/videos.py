@@ -19,11 +19,13 @@ Diferencias con OpenAI que conviene saber:
 from __future__ import annotations
 
 import asyncio
+import base64
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Annotated, Any
 
+import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
@@ -36,7 +38,9 @@ from ocabra.api.openai._deps import (
     get_openai_user,
     get_profile_registry,
 )
+from ocabra.api.openai._media_urls import url_problem
 from ocabra.config import settings
+from ocabra.core.image_header import image_size
 from ocabra.core.model_manager import declared_capabilities
 from ocabra.core.video_jobs import PendingVideo, normalize_size
 from ocabra.database import AsyncSessionLocal
@@ -96,30 +100,103 @@ def _bad(message: str, param: str) -> HTTPException:
     return _openai_error(message, "invalid_request_error", param=param, code="invalid_value")
 
 
+# Campos de imagen: ``input_reference`` (OpenAI: primer fotograma) y
+# ``last_frame`` (extensión: último fotograma).
+_IMAGE_FIELDS = ("input_reference", "last_frame")
+
+
 async def _read_body(request: Request) -> dict[str, Any]:
+    """Cuerpo como dict; las imágenes ya leídas como ``bytes``."""
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("multipart/form-data") or content_type.startswith(
         "application/x-www-form-urlencoded"
     ):
         form = await request.form()
-        if form.get("input_reference") is not None:
-            raise _bad(
-                "input_reference (image-to-video) is not supported yet; send only a prompt.",
-                "input_reference",
-            )
-        return {k: v for k, v in form.items() if isinstance(v, str)}
+        body: dict[str, Any] = {}
+        for key, value in form.items():
+            if isinstance(value, str):
+                body[key] = value
+            elif key in _IMAGE_FIELDS:
+                body[key] = await _read_upload(value, key)
+        return body
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
         raise _bad("The body must be JSON or multipart/form-data.", "body") from None
     if not isinstance(body, dict):
         raise _bad("The body must be a JSON object.", "body")
-    if body.get("input_reference"):
-        raise _bad(
-            "input_reference (image-to-video) is not supported yet; send only a prompt.",
-            "input_reference",
-        )
+    for key in _IMAGE_FIELDS:
+        if body.get(key):
+            body[key] = await _read_image_ref(body[key], key)
     return body
+
+
+def _max_image_bytes() -> int:
+    return max(1, int(settings.video_max_image_mb)) * 1024 * 1024
+
+
+async def _read_upload(upload: Any, param: str) -> bytes:
+    limit = _max_image_bytes()
+    data = await upload.read(limit + 1)
+    if len(data) > limit:
+        raise _bad(f"'{param}' is larger than {settings.video_max_image_mb} MB.", param)
+    return data
+
+
+async def _read_image_ref(value: Any, param: str) -> bytes:
+    """Imagen dada como data URL, URL http(s) o ``{"image_url": ...}``."""
+    if isinstance(value, dict):
+        value = value.get("image_url") or value.get("url")
+        if isinstance(value, dict):
+            value = value.get("url")
+    if not isinstance(value, str) or not value.strip():
+        raise _bad(f"'{param}' must be an image file, a data: URL or an http(s) URL.", param)
+    value = value.strip()
+    limit = _max_image_bytes()
+    if value.startswith("data:"):
+        _, _, payload = value.partition(",")
+        try:
+            data = base64.b64decode(payload, validate=True)
+        except ValueError:
+            raise _bad(f"'{param}' is not valid base64.", param) from None
+        if len(data) > limit:
+            raise _bad(f"'{param}' is larger than {settings.video_max_image_mb} MB.", param)
+        return data
+    if value.startswith(("http://", "https://")):
+        # Misma regla que las imágenes de chat: nada de direcciones privadas.
+        problem = await url_problem(value)
+        if problem:
+            raise _bad(f"'{param}': {problem}", param)
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+                async with client.stream("GET", value) as response:
+                    response.raise_for_status()
+                    chunks, total = [], 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > limit:
+                            raise _bad(
+                                f"'{param}' is larger than {settings.video_max_image_mb} MB.",
+                                param,
+                            )
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+        except httpx.HTTPError as exc:
+            raise _bad(f"Could not download '{param}': {exc}", param) from None
+    raise _bad(f"'{param}' must be an image file, a data: URL or an http(s) URL.", param)
+
+
+def _size_for_image(width: int, height: int) -> tuple[int, int]:
+    """Tamaño de vídeo con la proporción de la imagen y los píxeles por defecto."""
+    w_str, h_str = str(settings.video_default_size).lower().split("x")
+    pixels = min(int(w_str) * int(h_str), int(settings.video_max_pixels))
+    ratio = width / height
+    out_w = (pixels * ratio) ** 0.5
+    out_h = out_w / ratio
+    w, h = normalize_size(int(out_w), int(out_h))
+    while w * h > int(settings.video_max_pixels):
+        w, h = normalize_size(int(w * 0.95), int(h * 0.95))
+    return w, h
 
 
 def _parse_params(body: dict[str, Any]) -> dict[str, Any]:
@@ -133,7 +210,22 @@ def _parse_params(body: dict[str, Any]) -> dict[str, Any]:
     max_seconds = int(settings.video_max_seconds)
     if not 1 <= seconds <= max_seconds:
         raise _bad(f"'seconds' must be between 1 and {max_seconds}.", "seconds")
-    size = str(body.get("size") or settings.video_default_size).lower().replace(" ", "")
+    first = body.get("input_reference")
+    last = body.get("last_frame")
+    first_size = None
+    for key, data in (("input_reference", first), ("last_frame", last)):
+        if data is None or data == "":
+            continue
+        if not isinstance(data, bytes) or image_size(data) is None:
+            raise _bad(f"'{key}' must be a PNG, JPEG, WebP or GIF image.", key)
+        if key == "input_reference":
+            first_size = image_size(data)
+    if last and not first:
+        raise _bad("'last_frame' needs 'input_reference' as the first frame.", "last_frame")
+    default_size = settings.video_default_size
+    if first_size and not body.get("size"):
+        default_size = "{}x{}".format(*_size_for_image(*first_size))
+    size = str(body.get("size") or default_size).lower().replace(" ", "")
     try:
         w_str, h_str = size.split("x")
         width, height = normalize_size(int(w_str), int(h_str))
@@ -159,6 +251,12 @@ def _parse_params(body: dict[str, Any]) -> dict[str, Any]:
     negative = str(body.get("negative_prompt") or "").strip()
     if negative:
         params["negative_prompt"] = negative
+    # Las imágenes viajan al worker en base64 y solo viven en memoria.
+    params["mode"] = "flf2v" if last else ("i2v" if first else "t2v")
+    if first:
+        params["image_b64"] = base64.b64encode(first).decode("ascii")
+    if last:
+        params["last_image_b64"] = base64.b64encode(last).decode("ascii")
     return params
 
 
@@ -175,6 +273,13 @@ async def create_video(
         seconds         — duration, 1..``VIDEO_MAX_SECONDS`` (default 5)
         size            — ``WxH``; rounded to multiples of 64 (default 1280x704)
         negative_prompt — what to avoid (extension)
+        input_reference — image used as the first frame (image-to-video): a file
+                          (multipart), a ``data:`` URL, an ``http(s)`` URL or
+                          ``{"image_url": ...}``. Without ``size`` the video
+                          takes the image's aspect ratio.
+        last_frame      — image for the last frame (extension, needs
+                          ``input_reference``): the video goes from one to
+                          the other
         seed            — fixed seed (extension); random when omitted
 
     Returns:

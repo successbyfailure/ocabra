@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.125.2"
+APP_VERSION = "0.126.0"
 
 
 class Settings(BaseSettings):
@@ -821,6 +821,8 @@ class Settings(BaseSettings):
     video_default_size: str = "1280x704"
     # Píxeles por fotograma: 1280x704 cabe en una 3090 con 23,7 GB de pico.
     video_max_pixels: int = 1_048_576
+    # Tope de cada imagen de entrada (input_reference / last_frame).
+    video_max_image_mb: int = 20
 
     # OpenAI Images API: URL response_format support
     # Generated PNGs are written here and served via GET /v1/images/files/{name}

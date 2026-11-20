@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
+  Clapperboard,
   Copy,
   Download,
   Edit3,
@@ -12,6 +13,7 @@ import {
 import { toast } from "sonner"
 import type { PlaygroundParams } from "@/components/playground/ParamsPanel"
 
+import { fileFromClipboard, fileFromUrl } from "@/lib/imageFiles"
 import { playgroundFetch } from "@/lib/playgroundNode"
 type Mode = "generate" | "edit"
 
@@ -52,28 +54,6 @@ const ASPECT_PRESETS: AspectPreset[] = [
 
 const MAX_REFS = 3
 
-async function fileFromUrl(url: string, name = "input.png"): Promise<File> {
-  const res = await fetch(url)
-  const blob = await res.blob()
-  return new File([blob], name, { type: blob.type || "image/png" })
-}
-
-async function fileFromClipboard(): Promise<File | null> {
-  const nav = navigator as Navigator & {
-    clipboard?: { read?: () => Promise<ClipboardItem[]> }
-  }
-  if (!nav.clipboard?.read) return null
-  const items = await nav.clipboard.read()
-  for (const item of items) {
-    for (const type of item.types) {
-      if (type.startsWith("image/")) {
-        const blob = await item.getType(type)
-        return new File([blob], "pasted.png", { type })
-      }
-    }
-  }
-  return null
-}
 
 interface ImageInterfaceProps {
   modelId: string
@@ -84,6 +64,8 @@ interface ImageInterfaceProps {
   editDraft?: { url: string; prompt: string } | null
   onDraftConsumed?: () => void
   onSendToEdit?: (url: string, prompt: string) => void
+  /** Lleva la imagen a la pestaña Vídeo como primer fotograma. */
+  onSendToVideo?: (url: string, prompt: string) => void
 }
 
 export function ImageInterface({
@@ -95,6 +77,7 @@ export function ImageInterface({
   editDraft,
   onDraftConsumed,
   onSendToEdit,
+  onSendToVideo,
 }: ImageInterfaceProps) {
   const [mode, setMode] = useState<Mode>(canGenerate ? "generate" : "edit")
 
@@ -630,6 +613,17 @@ export function ImageInterface({
                     Editar
                   </button>
                 )}
+                {onSendToVideo && (
+                  <button
+                    type="button"
+                    onClick={() => onSendToVideo(item.url, item.prompt)}
+                    className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
+                    title="Animar esta imagen en la pestaña Vídeo"
+                  >
+                    <Clapperboard size={12} />
+                    Animar
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setSeed(item.seed)}
@@ -677,7 +671,7 @@ interface ImageDropTileProps {
   hint?: string
 }
 
-function ImageDropTile({
+export function ImageDropTile({
   label,
   previewUrl,
   onPick,
