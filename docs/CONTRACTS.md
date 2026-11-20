@@ -550,7 +550,8 @@ reutiliza su workspace y los argumentos de reanudación del runner.
 
 Cada `benchmark_attempt` conserva `environment`: versión de oCabra, Python,
 scorer cuando existe, commit real del dataset, revisión solicitada, perfil,
-backend y versión instalada del módulo, preset/contexto efectivos, nodo y
+backend y versión instalada del módulo (o commit exacto de fuentes para
+backends nativos y digest para OCI), preset/contexto efectivos, nodo y
 todas las GPU físicas que atendieron sus peticiones (índice, modelo y VRAM),
 además de recuentos de peticiones, errores y tokens. El JSON descargado desde
 la UI incluye el resultado bruto y esta evidencia reproducible de todos los

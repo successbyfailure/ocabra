@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.126.1 — 2026-11-20
+
+### Corregido
+
+- **Versión exacta de backends nativos en benchmarks.** Los módulos compilados
+  desde Git, como `llamacpp_mks`, no tienen una versión de paquete Python y se
+  mostraban como «versión no informada». Cada intento conserva ahora el commit
+  completo de las fuentes que produjeron el binario y la UI presenta su hash
+  corto. Para instalaciones Python u OCI se mantienen la versión de paquete y
+  el digest de imagen respectivamente.
+
+---
+
 ## 0.126.0 — 2026-11-20
 
 ### Nuevo

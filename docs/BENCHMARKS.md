@@ -42,7 +42,8 @@ solapes entra en los resultados limpios. Una pausa manual usa el mismo
 checkpoint, pero nunca se reanuda sola.
 
 Cada intento anota el commit exacto del dataset, las versiones de oCabra,
-Python, scorer y módulos de backend disponibles, el perfil/preset/contexto
+Python, scorer y módulos de backend disponibles (commit de fuentes en los
+nativos, versión de paquete u OCI digest), el perfil/preset/contexto
 efectivos, el nodo y todas las tarjetas que sirvieron las llamadas (modelo y
 VRAM). También conserva número de peticiones, errores y tokens. Si un runner
 falla, **Reintentar modelo** reutiliza su workspace y checkpoint; **Repetir
