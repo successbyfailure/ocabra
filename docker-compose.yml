@@ -425,6 +425,10 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      # Solo la GPU en la que oCabra le reserva memoria (mismo índice PCI que
+      # nvidia-smi y pynvml). Sin esto usaba la que CUDA ordena primero.
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: ${COMFYUI_PREFERRED_GPU:-1}
       HF_HOME: /root/.cache/huggingface
       HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
     volumes:
