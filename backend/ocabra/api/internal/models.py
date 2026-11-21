@@ -2463,7 +2463,9 @@ async def delete_model(
 
     deleted_path: str | None = None
     if delete_files:
-        deleted_path = await _delete_model_files(model_id, state.backend_type, state.extra_config)
+        deleted_path = await _delete_model_files(
+            model_id, state.backend_type, state.extra_config, getattr(state, "artifact", None)
+        )
         # Drop the LocalScanner cache so the user sees the deletion reflected
         # in /registry/local without having to wait for the TTL.
         from ocabra.api.internal.registry import invalidate_local_scan
@@ -2473,11 +2475,67 @@ async def delete_model(
     return {"ok": True, "deleted_path": deleted_path}
 
 
+def _unshared_download_dir(raw_path: str, other_paths: list[str]) -> Path | None:
+    """Blocking part of :func:`_artifact_download_dir` (run it in a thread)."""
+    root = (Path(settings.models_dir or "/data/models") / "huggingface").resolve()
+    path = Path(raw_path).resolve()
+    if path.is_file():
+        path = path.parent
+    if path.parent != root or not path.is_dir():
+        return None
+    for other in other_paths:
+        if Path(other).resolve().is_relative_to(path):
+            return None
+    return path
+
+
+async def _artifact_download_dir(model_id: str, artifact: dict | None) -> Path | None:
+    """Download folder of a local GGUF artifact, if nothing else uses it.
+
+    Since model ids are the public name (``llamacpp_mks/ravenx-chaos-agent``),
+    the folder can no longer be derived from the id: the download manager
+    names it after the repo and file (``<org>--<repo>--<stem>``) and the
+    artifact keeps that path. Deleting by id left 16 GB behind (2026-11-21).
+
+    Only a direct child of ``<models_dir>/huggingface`` is returned, and only
+    when no other registered model points into it.
+    """
+    import asyncio
+
+    import sqlalchemy as sa
+
+    from ocabra.database import AsyncSessionLocal
+    from ocabra.db.model_config import ModelConfig
+
+    if not isinstance(artifact, dict) or not artifact.get("path"):
+        return None
+    if artifact.get("source") == "ollama":
+        return None  # Ollama's store: deleted through Ollama, not here
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                sa.select(ModelConfig.artifact).where(ModelConfig.model_id != model_id)
+            )
+        ).all()
+    other_paths = [
+        str(row[0]["path"]) for row in rows if isinstance(row[0], dict) and row[0].get("path")
+    ]
+    return await asyncio.to_thread(_unshared_download_dir, str(artifact["path"]), other_paths)
+
+
 async def _delete_model_files(
-    model_id: str, backend_type: str, extra_config: dict | None = None
+    model_id: str,
+    backend_type: str,
+    extra_config: dict | None = None,
+    artifact: dict | None = None,
 ) -> str | None:
     """Delete model files from disk based on backend type."""
     import asyncio
+
+    artifact_dir = await _artifact_download_dir(model_id, artifact)
+    if artifact_dir is not None:
+        await asyncio.to_thread(shutil.rmtree, artifact_dir)
+        return str(artifact_dir)
 
     if backend_type == "comfyui_video":
         # La carpeta de pesos de vídeo es compartida entre modelos de vídeo y

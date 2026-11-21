@@ -6842,8 +6842,16 @@ class ModelManager:
             backend_model_id = str(backend_model_id_override)
         normalized_backend = str(backend_type or "").strip().lower()
 
+        adopt: ModelState | None = None
         if normalized_model_id in self._states:
-            return self._states[normalized_model_id]
+            if not persist or normalized_model_id in self._persisted_model_ids:
+                return self._states[normalized_model_id]
+            # In memory only (an Ollama tag seen by the inventory sync, ...):
+            # registering it must persist it. Returning the memory-only state
+            # answered 200 and wrote nothing, so the model had no logical
+            # model nor public profile, and a deployment added on its backend
+            # vanished (inkling-2-mini on ollama, 2026-11-21).
+            adopt = self._states[normalized_model_id]
 
         # Derived workers (``<id>::<hash>``, per-profile load overrides) inherit
         # the base deployment's model and artifact so loads re-resolve paths.
@@ -6953,6 +6961,22 @@ class ModelManager:
         # the winner's objects instead of overwriting them.
         existing = self._states.setdefault(normalized_model_id, state)
         if existing is not state:
+            if existing is adopt and persist:
+                # Keep the live object (its status, worker and lock) and give
+                # it what the registration persisted.
+                for name in (
+                    "backend_model_id",
+                    "model_key",
+                    "artifact",
+                    "display_name",
+                    "load_policy",
+                    "pin_permanent",
+                    "preferred_gpu",
+                    "extra_config",
+                ):
+                    setattr(existing, name, getattr(state, name))
+                self._persisted_model_ids.add(normalized_model_id)
+                self._notify_event_listeners("register", existing)
             return existing
         self._load_locks.setdefault(normalized_model_id, asyncio.Lock())
         if persist:

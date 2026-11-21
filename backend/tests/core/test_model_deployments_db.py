@@ -139,3 +139,21 @@ async def test_ui_edit_of_ctx_is_applied_even_with_a_stale_snake_twin(
         )
         assert row.extra_config["bitnet"]["ctx_size"] == 8192
         assert "ctxSize" not in row.extra_config["bitnet"]
+
+
+@requires_db
+async def test_registering_a_model_only_in_memory_persists_it(clean_db) -> None:
+    """The Ollama inventory sync leaves tags in memory only; registering one
+    answered 200 and wrote nothing (inkling-2-mini, 2026-11-21)."""
+    mm = ModelManager(worker_pool=None)
+    live = await mm.add_model(f"ollama/{KEY}", "ollama", persist=False)
+    assert live.model_key is None
+
+    registered = await mm.add_model(f"ollama/{KEY}", "ollama", display_name="zz")
+    assert registered is live  # the live object, not a copy
+    assert registered.model_key == KEY
+    async with AsyncSessionLocal() as session:
+        row = await session.scalar(
+            sa.select(ModelConfig).where(ModelConfig.model_id == f"ollama/{KEY}")
+        )
+    assert row is not None and row.model_key == KEY

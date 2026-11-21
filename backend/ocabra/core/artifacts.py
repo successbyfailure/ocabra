@@ -133,6 +133,22 @@ def read_ollama_manifest(
     return layers if "model" in layers else None
 
 
+def ollama_tag_has_gguf(tag_ref: str, root: str | Path | None = None) -> bool | None:
+    """Whether an installed Ollama tag ships a GGUF blob llama.cpp can open.
+
+    ``None`` when the tag is not installed (nothing to tell). ``False`` for the
+    newer layout with one blob per tensor (``format: safetensors``, MLX
+    runner): there is no single file to hand to llama.cpp. inkling-2-mini was
+    registered on llamacpp_mks that way and could never load (2026-11-21).
+    """
+    path = Path(root or ollama_root()) / "manifests" / ollama_manifest_relpath(tag_ref)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return "model" in _layers_from_manifest(data)
+
+
 def scan_ollama_manifests(root: str | Path = DEFAULT_OLLAMA_ROOT) -> dict[str, dict[str, str]]:
     """Map every installed Ollama tag to its blob digests."""
     out: dict[str, dict[str, str]] = {}

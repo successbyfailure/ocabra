@@ -16,6 +16,27 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.127.2 — 2026-11-21
+
+### Arreglos
+
+- **Los modelos de Ollama en el formato nuevo ya no se dan de alta en
+  llama.cpp.** Algunos tags recientes (p. ej. `inkling-2-mini`) no traen un
+  GGUF sino un fichero por tensor (`format: safetensors`, motor MLX de
+  Ollama). Se registraban en llamacpp_mks, el editor decía «No cabe: sin
+  model_path del GGUF» y el modelo no podía cargar nunca. Ahora se registran
+  en el backend `ollama`, el único que los sirve.
+- **Borrar un modelo GGUF descargado de Hugging Face libera de verdad el
+  disco.** La carpeta se buscaba por el nombre público del modelo y no la
+  encontraba: la API respondía 200 y el fichero se quedaba (16 GB en un
+  caso). Ahora se borra la carpeta de la descarga, salvo que otro modelo la
+  use.
+- **Registrar un modelo que el servidor ya veía en Ollama lo guarda.** Antes
+  `POST /ocabra/models` devolvía 200 sin persistir nada, y el modelo se
+  quedaba sin nombre público en `/v1/models`.
+
+---
+
 ## 0.127.1 — 2026-11-20
 
 ### Corregido

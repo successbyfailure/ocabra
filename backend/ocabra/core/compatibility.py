@@ -59,6 +59,18 @@ def backends_for_artifact(
     source = artifact.get("source")
     name = str(artifact.get("file") or artifact.get("path") or artifact.get("ref") or "")
     if kind in {"gguf", "ollama_tag"}:
+        if source == "ollama" and artifact.get("ref"):
+            from ocabra.core.artifacts import ollama_tag_has_gguf
+
+            if ollama_tag_has_gguf(str(artifact["ref"])) is False:
+                return [
+                    _entry(
+                        "ollama",
+                        "compatible",
+                        "tag de Ollama sin GGUF (safetensors, motor MLX): solo lo sirve Ollama",
+                        installed,
+                    )
+                ]
         if is_ternary_gguf(name):
             return [_entry("bitnet", "compatible", "GGUF ternario/1-bit", installed)]
         out = [
