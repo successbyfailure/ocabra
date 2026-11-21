@@ -595,7 +595,15 @@ def _arch_from_gguf_cached(path: str, _mtime_ns: int, _size: int) -> ModelArch |
 
     try:
         layers = int(g("block_count"))
-        n_heads = int(g("attention.head_count") or 0)
+        # Per-layer array in some models (inkling2: 48 values, 2026-11-21);
+        # int() of the list made the whole header unreadable and every preset
+        # "did not fit" ("no se pudo leer el header del GGUF").
+        raw_heads = g("attention.head_count")
+        n_heads = (
+            max((int(v) for v in raw_heads), default=0)
+            if isinstance(raw_heads, list)
+            else int(raw_heads or 0)
+        )
         # head_count_kv is either a scalar, a per-layer array (e.g. gemma4:
         # global-attention layers use fewer KV heads than local/SWA ones —
         # see the sliding_pattern branch below, which uses the per-layer

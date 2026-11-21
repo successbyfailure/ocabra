@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.127.3 — 2026-11-21
+
+### Arreglos
+
+- **Modelos GGUF con número de cabezas por capa ya no salen como «no cabe».**
+  Algunas arquitecturas nuevas (p. ej. `inkling2`) guardan
+  `attention.head_count` como una lista por capa; el servidor no sabía leerla,
+  daba «no se pudo leer el header del GGUF» y marcaba todos los peldaños como
+  que no cabían, aunque sí cabían.
+
+---
+
 ## 0.127.2 — 2026-11-21
 
 ### Arreglos

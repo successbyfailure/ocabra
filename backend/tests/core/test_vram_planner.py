@@ -693,3 +693,25 @@ def test_qwen35_sigue_usando_su_propia_convencion(tmp_path):
     # qwen35 declara head_count_kv como escalar, no como array con ceros
     assert arch.kv_elements_per_token_override > 0
     assert arch.rs_cache_mb_per_slot > 0
+
+
+def test_arch_from_gguf_handles_per_layer_head_count_array(tmp_path):
+    """2026-11-21: inkling2 stores attention.head_count per layer too; int()
+    of the list made the header unreadable and every preset "did not fit"."""
+    kv = {
+        "general.architecture": "inkling2",
+        "inkling2.block_count": 6,
+        "inkling2.attention.head_count": [24] * 6,
+        "inkling2.attention.head_count_kv": [8] * 6,
+        "inkling2.attention.key_length": 128,
+        "inkling2.attention.value_length": 128,
+        "inkling2.attention.sliding_window_pattern": [1, 1, 1, 1, 1, 0],
+        "inkling2.attention.sliding_window": 1024,
+        "inkling2.embedding_length": 2304,
+        "inkling2.context_length": 1048576,
+    }
+    arch = vp.arch_from_gguf(_write_gguf(tmp_path, kv))
+    assert arch is not None
+    assert arch.n_kv_heads == 8
+    # Only the one global-attention layer grows with context.
+    assert arch.kv_elements_per_token_override == 1 * 8 * 256
