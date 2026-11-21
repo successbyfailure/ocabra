@@ -24,10 +24,10 @@ for backend in "${@:-llamacpp_mks llama_cpp whisper_cpp}"; do
   for b in $backend; do
     case "$b" in
         llamacpp_mks) build llamacpp_mks https://github.com/makespacemadrid/llama.cpp-mks \
-            "${LLAMACPP_MKS_REF:-96fff6cab237f60dd2e46606a6aeaf0de7abe15b}" \
+            "${LLAMACPP_MKS_REF:-efbf556487d3f28141f12f4a9aa8a186f02d5753}" \
             install_llama_cpp.sh "server=bin/llama-server" ON ;;
         llama_cpp) build llama_cpp https://github.com/ggml-org/llama.cpp \
-            "${LLAMA_CPP_REF:-d3c3e242c16b8cbf51400fad410cd69b22d64f35}" \
+            "${LLAMA_CPP_REF:-e6d624b9a4b95c6b52f5ca384d70b75581f9821a}" \
             install_llama_cpp.sh "server=bin/llama-server" ON ;;
         whisper_cpp) build whisper_cpp https://github.com/ggerganov/whisper.cpp \
             "${WHISPER_CPP_REF:-aba02defd6bb6ff5de63721c21e3456645c153e2}" \

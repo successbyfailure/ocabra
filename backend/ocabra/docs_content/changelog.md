@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.127.4 — 2026-11-21
+
+### Cambios
+
+- **llama.cpp upstream y el fork Makespace se actualizan juntos.** El backend
+  `llama_cpp` incorpora los últimos cambios de `ggml-org/llama.cpp`, y
+  `llamacpp_mks` conserva la visión bajo demanda y el cambio de contexto en
+  vivo sobre esa misma base actualizada. Las imágenes nativas y la imagen de
+  nodo usan exactamente los commits validados.
+
+---
+
 ## 0.127.3 — 2026-11-21
 
 ### Arreglos

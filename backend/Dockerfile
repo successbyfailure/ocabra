@@ -25,7 +25,7 @@ FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS llama-builder
 ARG LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp
 # Pinned (INF-07) to the llama.cpp commit the native backends publish
 # (scripts/publish-native-backends.sh); a branch or tag also works.
-ARG LLAMA_CPP_REF=d3c3e242c16b8cbf51400fad410cd69b22d64f35
+ARG LLAMA_CPP_REF=e6d624b9a4b95c6b52f5ca384d70b75581f9821a
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

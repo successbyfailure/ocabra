@@ -16,7 +16,7 @@
 #   docker build -f backend/Dockerfile.backend-native \
 #       --build-arg BACKEND=llamacpp_mks \
 #       --build-arg GIT_REPO=https://github.com/makespacemadrid/llama.cpp-mks \
-#       --build-arg GIT_REF=96fff6cab237f60dd2e46606a6aeaf0de7abe15b \
+#       --build-arg GIT_REF=efbf556487d3f28141f12f4a9aa8a186f02d5753 \
 #       --build-arg SCRIPT=install_llama_cpp.sh \
 #       --build-arg BINS="server=bin/llama-server" \
 #       -t ocabra-backend-build:llamacpp_mks backend

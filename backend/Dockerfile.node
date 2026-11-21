@@ -17,7 +17,7 @@ ARG CUDA_VERSION=12.8.1
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS llama-build
 ARG LLAMA_REPO=https://github.com/makespacemadrid/llama.cpp-mks
 # Same commit as production (backend llamacpp_mks).
-ARG LLAMA_REF=96fff6cab237f60dd2e46606a6aeaf0de7abe15b
+ARG LLAMA_REF=efbf556487d3f28141f12f4a9aa8a186f02d5753
 # A100, A40/3090/A6000, 4090/L40S/L4, H100/H200, B200, 5090/PRO 6000. No 75
 # (T4/2080: little VRAM, barely offered for pods). Each entry also ships PTX,
 # so a newer GPU still runs via JIT (slower first load).
@@ -97,7 +97,7 @@ meta = {
     "install_source": "source",
     "version": "source",
     "git_repo": "https://github.com/makespacemadrid/llama.cpp-mks",
-    "git_ref": "96fff6cab237f60dd2e46606a6aeaf0de7abe15b",
+    "git_ref": "efbf556487d3f28141f12f4a9aa8a186f02d5753",
     "bin_dir": "/data/backends/llamacpp_mks/bin",
     "src_dir": None,
     "extra_bins": {"server": "/data/backends/llamacpp_mks/bin/llama-server"},
