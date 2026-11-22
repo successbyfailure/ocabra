@@ -37,6 +37,26 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["backends"])
 
 
+def _published_update_available(
+    state: BackendModuleState, published: dict[str, Any] | None
+) -> bool:
+    """Compare an installed artifact with the moving OCI backend tag."""
+    if not published or str(state.install_status) != "installed":
+        return False
+    if state.oci_digest:
+        return state.oci_digest != published["digest"]
+    if state.install_source != "source":
+        return False
+    if published["packages"]:
+        return published["packages"] != state.packages
+    version = published.get("version")
+    if version and state.source_commit:
+        # Native backends have no Python packages. Their OCI version is the
+        # source commit (shortened by the publisher).
+        return not state.source_commit.startswith(version.lower())
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Request/response schemas
 # ---------------------------------------------------------------------------
@@ -451,10 +471,7 @@ async def get_backend_published(
         published = await installer.published(backend_type, refresh=refresh)
     except Exception as exc:  # noqa: BLE001 — surface as a gateway problem
         raise HTTPException(status_code=502, detail=f"Registry: {exc}") from exc
-    update = False
-    if published and str(state.install_status) == "installed":
-        if state.oci_digest:
-            update = state.oci_digest != published["digest"]
-        elif state.install_source == "source":
-            update = bool(published["packages"]) and published["packages"] != state.packages
-    return {"published": published, "update_available": update}
+    return {
+        "published": published,
+        "update_available": _published_update_available(state, published),
+    }

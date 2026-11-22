@@ -100,6 +100,9 @@ class BackendModuleState:
     packages: dict[str, str] = field(default_factory=dict)
     declared_packages: list[str] = field(default_factory=list)
     git_ref: str | None = None
+    # Commit realmente compilado. ``git_ref`` puede ser una rama móvil y no
+    # sirve para compararlo con la versión de una imagen OCI.
+    source_commit: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +130,31 @@ async def _system_package_present(package: str) -> bool:
         return False
     out, _ = await proc.communicate()
     return proc.returncode == 0 and b"install ok installed" in out
+
+
+async def _git_head(path: Path) -> str | None:
+    """Return the checked-out commit, including for old metadata without it."""
+    try:
+        is_checkout = (path / ".git").exists()
+    except OSError:
+        return None
+    if not is_checkout:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            str(path),
+            "rev-parse",
+            "HEAD",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+    except OSError:
+        return None
+    commit = stdout.decode(errors="replace").strip().lower()
+    return commit if proc.returncode == 0 and _COMMIT_SHA.fullmatch(commit) else None
 
 
 class BackendInstaller:
@@ -273,6 +301,9 @@ class BackendInstaller:
     ) -> BackendModuleState:
         from ocabra.core.oci_registry import installed_packages, package_names
 
+        source_commit = meta.get("source_commit")
+        if not source_commit and meta.get("install_source") == "source" and meta.get("src_dir"):
+            source_commit = await _git_head(Path(meta["src_dir"]))
         packages = meta.get("packages")
         if not isinstance(packages, dict):
             packages = await asyncio.to_thread(
@@ -296,6 +327,7 @@ class BackendInstaller:
             packages=dict(packages),
             declared_packages=list(spec.pip_packages),
             git_ref=meta.get("git_ref"),
+            source_commit=source_commit,
         )
 
     async def published(self, backend_type: str, *, refresh: bool = False) -> dict | None:
@@ -637,6 +669,7 @@ class BackendInstaller:
         # builds a binary into BIN_DIR. Backends whose post-install needs the
         # venv (acestep / uv sync) declare pip_packages so the venv exists.
         needs_venv = bool(spec.pip_packages or spec.include_core_runtime)
+        source_commit: str | None = None
 
         state = self._states[backend_type] = BackendModuleState(
             backend_type=backend_type,
@@ -673,6 +706,7 @@ class BackendInstaller:
                     recursive=spec.git_recursive,
                     dest=src_dir,
                 )
+                source_commit = await _git_head(src_dir)
 
             # Step 3 — venv (skipped for native backends with no Python deps).
             python_bin: Path | None = None
@@ -808,6 +842,7 @@ class BackendInstaller:
                 "apt_packages": list(spec.apt_packages),
                 "git_repo": spec.git_repo,
                 "git_ref": spec.git_ref if spec.git_repo else None,
+                "source_commit": source_commit,
                 "src_dir": str(src_dir) if spec.git_repo else None,
                 "bin_dir": str(bin_dir),
             }
@@ -831,6 +866,7 @@ class BackendInstaller:
             # Sin esto la tarjeta se quedaba sin rama/commit hasta el
             # siguiente reinicio (whisper_cpp el 17/11: ni versión ni rama).
             state.git_ref = fresh.git_ref
+            state.source_commit = fresh.source_commit
             state.installed_at = _parse_iso(metadata["installed_at"])
             state.install_source = "source"
             state.actual_size_mb = size_mb

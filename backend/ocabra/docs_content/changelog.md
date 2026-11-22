@@ -26,6 +26,14 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   vivo sobre esa misma base actualizada. Las imágenes nativas y la imagen de
   nodo usan exactamente los commits validados.
 
+### Arreglos
+
+- **Las actualizaciones de backends nativos instalados desde código vuelven a
+  notificarse.** Como no tienen paquetes Python, ahora se compara el commit
+  realmente compilado con el commit publicado en la imagen OCI. También se
+  reconocen instalaciones antiguas que aún no guardaban ese dato en sus
+  metadatos.
+
 ---
 
 ## 0.127.3 — 2026-11-21
