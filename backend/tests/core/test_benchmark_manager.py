@@ -17,6 +17,7 @@ from ocabra.benchmarks.manager import (
     BenchmarkIdentity,
     BenchmarkManager,
     backend_version_observations,
+    corrala_benchmark_database_url,
     execution_observations,
     external_active_requests,
     git_authorization_header,
@@ -32,6 +33,17 @@ def test_github_token_uses_basic_header_for_git_https() -> None:
     scheme, encoded = header.split(" ", 2)[1:]
     assert scheme == "Basic"
     assert base64.b64decode(encoded).decode() == "x-access-token:github-token"
+
+
+def test_corrala_scratch_database_keeps_the_real_password() -> None:
+    derived = corrala_benchmark_database_url(
+        "postgresql+asyncpg://ocabra:secret%40value@postgres:5432/ocabra"
+    )
+    parsed = sa.engine.make_url(derived)
+
+    assert parsed.database == "ocabra_bench"
+    assert parsed.password == "secret@value"
+    assert "***" not in derived
 
 
 def test_catalog_matches_cli_manifests() -> None:

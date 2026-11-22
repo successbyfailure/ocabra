@@ -16,6 +16,17 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.127.5 — 2026-11-22
+
+### Arreglos
+
+- **El benchmark de Corrala vuelve a conectarse a su base desechable.** Al
+  derivar `ocabra_bench` desde la conexión principal se conserva ahora la
+  contraseña real; antes SQLAlchemy la sustituía por `***` y todos los intentos
+  terminaban con un error de autenticación de PostgreSQL.
+
+---
+
 ## 0.127.4 — 2026-11-21
 
 ### Cambios

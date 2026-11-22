@@ -88,6 +88,16 @@ def git_authorization_header(token: str) -> str:
     return f"Authorization: Basic {credentials}"
 
 
+def corrala_benchmark_database_url(database_url: str) -> str:
+    """Derive Corrala's scratch database URL without redacting credentials."""
+    from sqlalchemy.engine import make_url
+
+    main = make_url(database_url)
+    return main.set(database=f"{main.database or 'ocabra'}_bench").render_as_string(
+        hide_password=False
+    )
+
+
 @dataclass(frozen=True)
 class BenchmarkIdentity:
     user_id: uuid.UUID
@@ -1032,10 +1042,7 @@ class BenchmarkManager:
     async def _corrala_database_url(self) -> str:
         url = settings.benchmark_corrala_database_url.strip()
         if not url:
-            from sqlalchemy.engine import make_url
-
-            main = make_url(settings.database_url)
-            url = str(main.set(database=f"{main.database or 'ocabra'}_bench"))
+            url = corrala_benchmark_database_url(settings.database_url)
         await self._ensure_postgres_database(url)
         return url
 
