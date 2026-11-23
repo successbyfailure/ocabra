@@ -377,6 +377,8 @@ def _is_voice_ref_path_safe(path: str) -> bool:
     Prevents path traversal attacks by resolving the real path and checking
     it starts with one of the allowed prefixes.
     """
+    if not path:
+        return False
     try:
         resolved = os.path.realpath(path)
     except (OSError, ValueError):
