@@ -17,7 +17,12 @@ La página **Benchmarks** (rol `model_manager`) abre en **Resultados** y separa
 tres espacios: comparativa gráfica, ejecuciones/histórico y lanzamiento de
 pruebas. Agrupa los perfiles por modelo y permite seleccionar sus backends como
 burbujas independientes, filtrar el historial, reintentar desde el modelo
-fallido y repetir una configuración. Los resultados conocidos de Escriba,
+fallido y repetir una configuración. Antes de encolar muestra una duración
+estimada, su rango y confianza, con desglose por modelo: prioriza muestras
+limpias del mismo perfil y configuración, usa la mediana de la suite si no las
+hay y escala por número de casos los perfiles de Corrala e IFEval. La primera
+preparación del dataset y las pausas por tráfico se señalan como tiempo no
+incluido. Los resultados conocidos de Escriba,
 Corrala, BFCL e IFEval se normalizan para ofrecer rankings por métrica y prueba,
 líderes y tabla comparativa; Corrala añade un agregado de calidad ponderado por
 casos. El JSON bruto siempre se conserva y puede descargarse junto con el

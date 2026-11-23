@@ -230,7 +230,9 @@ Implementado:
   resultados, seguimiento y lanzamiento, y presenta rankings gráficos por
   métrica con agregados ponderados cuando la suite los permite. La portada
   añade un ranking global explicable por modelo+backend, perfiles de pesos,
-  cobertura mínima, cohortes de versión/GPU y frontera calidad-rendimiento.
+  cobertura mínima, cohortes de versión/GPU y frontera calidad-rendimiento. El
+  lanzamiento estima duración y rango desde el histórico limpio, con escalado
+  por carga y desglose por modelo.
   Uso y contrato en `docs/BENCHMARKS.md`.
 
 ---
