@@ -12,6 +12,8 @@ import type {
   ModelProfile,
 } from "@/types"
 import { BenchmarkResultsDashboard } from "./benchmarks/BenchmarkResultsDashboard"
+import { BenchmarkTimeEstimate } from "./benchmarks/BenchmarkTimeEstimate"
+import { estimateBenchmarkTime } from "./benchmarks/benchmarkEstimate"
 
 const ACTIVE_STATUSES: BenchmarkRunStatus[] = [
   "queued", "running", "pausing", "paused", "cancelling",
@@ -182,6 +184,9 @@ export function Benchmarks() {
 
   const selectedApp = catalog.find((item) => item.app === appName)
   const selectedSuite = selectedApp?.suites.find((item) => item.name === suiteName)
+  const timeEstimate = useMemo(() => estimateBenchmarkTime(
+    runs, appName, suiteName, suiteProfileArgs(appName, profile), models,
+  ), [appName, models, profile, runs, suiteName])
   const modelGroups = useMemo(() => {
     return benchmarkModelGroups(profiles, appName, suiteName, modelSearch)
   }, [appName, modelSearch, profiles, suiteName])
@@ -530,6 +535,12 @@ export function Benchmarks() {
                 <input type="checkbox" checked={autoPause} onChange={(event) => setAutoPause(event.target.checked)} className="mt-1" />
                 <span><span className="font-medium">Proteger el tráfico real</span><span className="block text-xs text-muted-foreground">Pausa, espera a que el servidor quede libre y repite el intento afectado.</span></span>
               </label>
+
+              <BenchmarkTimeEstimate
+                estimate={timeEstimate}
+                needsPreparation={selectedSuite?.needsPreparation ?? false}
+                autoPause={autoPause}
+              />
 
               <details className="rounded-lg border border-border p-3 text-sm">
                 <summary className="flex cursor-pointer list-none items-center justify-between font-medium">Opciones avanzadas <ChevronDown size={14} /></summary>

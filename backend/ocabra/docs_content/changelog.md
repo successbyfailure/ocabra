@@ -16,6 +16,16 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.130.0 — 2026-11-23
+
+### Nuevo
+
+- **Estimación de duración antes de lanzar un benchmark.** El formulario usa
+  los tiempos limpios del mismo modelo y suite, escala perfiles equivalentes
+  cuando es posible y muestra rango, confianza y desglose por modelo. También
+  avisa de preparaciones iniciales y de que las pausas por tráfico real no
+  forman parte del cálculo.
+
 ## 0.129.0 — 2026-11-23
 
 ### Nuevo
