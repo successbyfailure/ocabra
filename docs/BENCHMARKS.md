@@ -20,7 +20,10 @@ burbujas independientes, filtrar el historial, reintentar desde el modelo
 fallido y repetir una configuración. Antes de encolar muestra una duración
 estimada, su rango y confianza, con desglose por modelo: prioriza muestras
 limpias del mismo perfil y configuración, usa la mediana de la suite si no las
-hay y escala por número de casos los perfiles de Corrala e IFEval. La primera
+hay y escala por número de casos los perfiles de Corrala e IFEval. Una cadena
+reanudada suma sus tramos útiles, pero descarta todo lo anterior a una
+contaminación tardía; los modelos ya aceptados de una ejecución activa se
+incorporan sin esperar a que termine la cola completa. La primera
 preparación del dataset y las pausas por tráfico se señalan como tiempo no
 incluido. Los resultados conocidos de Escriba,
 Corrala, BFCL e IFEval se normalizan para ofrecer rankings por métrica y prueba,
