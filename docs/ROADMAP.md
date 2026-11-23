@@ -228,8 +228,10 @@ Implementado:
   reutilizables, programarlos por días/hora/zona sin solapes y comparar hasta
   cuatro ejecuciones contra una referencia histórica por suite. La UI separa
   resultados, seguimiento y lanzamiento, y presenta rankings gráficos por
-  métrica con agregados ponderados cuando la suite los permite. Uso y contrato en
-  `docs/BENCHMARKS.md`.
+  métrica con agregados ponderados cuando la suite los permite. La portada
+  añade un ranking global explicable por modelo+backend, perfiles de pesos,
+  cobertura mínima, cohortes de versión/GPU y frontera calidad-rendimiento.
+  Uso y contrato en `docs/BENCHMARKS.md`.
 
 ---
 

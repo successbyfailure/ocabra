@@ -7,7 +7,9 @@ la comparación.
 
 Los datos y la lógica de evaluación permanecen en el repositorio de cada
 aplicación. oCabra solo contiene el contrato de ejecución, ejecuta el runner
-declarado y conserva su resultado sin recalcular la puntuación.
+declarado y conserva su resultado sin recalcular la puntuación oficial. La UI
+puede derivar una valoración multicriterio para comparar modelos, pero no la
+escribe sobre el resultado original.
 
 ## Ejecución desde la UI
 
@@ -21,6 +23,32 @@ líderes y tabla comparativa; Corrala añade un agregado de calidad ponderado po
 casos. El JSON bruto siempre se conserva y puede descargarse junto con el
 entorno de cada intento. Un esquema nuevo muestra como alternativa sus métricas
 escalares, sin ocultar los datos.
+
+### Ranking global
+
+La portada de Resultados clasifica la combinación exacta `perfil + backend`,
+no un nombre de modelo ambiguo. El perfil predeterminado **Producción
+equilibrada** reparte 100 puntos así: Corrala 20, Escriba 20, BFCL 20, IFEval
+15, fiabilidad 10, rendimiento 10 y eficiencia GPU 5. También hay perfiles de
+calidad, latencia e infraestructura eficiente, además de pesos personalizados.
+
+La calidad conserva la escala absoluta que devuelve cada scorer. Para Escriba
+se usa la media armónica de cobertura y precisión; Corrala usa su agregado por
+casos; BFCL e IFEval usan respectivamente `non_live_accuracy` (o la métrica de
+la suite disponible) y `strict_prompt_accuracy`. Los errores observados en las
+peticiones reducen la fiabilidad. Rendimiento y eficiencia se normalizan dentro
+de cada ejecución, donde todos los participantes compartieron suite, para no
+comparar directamente latencias de cargas distintas; la eficiencia divide
+además por el número de GPU usadas.
+
+Una batería ausente aporta cero en vez de redistribuir su peso. El modelo debe
+tener al menos dos de las cuatro dimensiones de calidad para entrar en la
+clasificación; los resultados parciales siguen visibles, pero sin puesto. La UI
+muestra cobertura, contribución de cada factor, fuentes y frontera de Pareto
+calidad-rendimiento. Los filtros de versión de oCabra y hardware permiten
+restringir el cálculo a una cohorte homogénea. Para BFCL se prefiere `core`
+sobre `simple_python` y para IFEval `full` sobre `quick`; dentro de la misma
+suite se toma el resultado limpio más reciente de cada perfil/backend.
 
 La unidad de trabajo es `aplicación + suite + modelo`: los modelos se ejecutan
 secuencialmente para que una contaminación afecte solo al modelo en curso. La
