@@ -179,7 +179,10 @@ export function BenchmarkModelRanking({ runs }: { runs: BenchmarkRun[] }) {
   const practicalTies = new Set(eligible.filter((row) => leader && leader.score - row.score < 1).map((row) => row.id))
   const fastest = [...eligible].sort((left, right) => right.performance - left.performance)[0]
   const mostReliable = [...eligible].sort((left, right) => right.reliability - left.reliability)[0]
-  const chartRows = rows.slice(0, 12).map((row) => ({ ...row, label: shortModel(row.model) }))
+  const chartRows = scatterPointRows(rows.slice(0, 12)).map((row) => ({
+    ...row,
+    label: shortModel(row.pointLabel),
+  }))
   const scatterRows = scatterPointRows(eligible)
   const activeSelectedId = rows.some((row) => row.id === selectedId) ? selectedId : null
   const toggleSelection = (id: string) => setSelectedId((current) => current === id ? null : id)

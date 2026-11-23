@@ -12,7 +12,7 @@ function run(
   suite: string,
   profile: string,
   quality: number,
-  options: { backend?: string; version?: string; gpu?: string; speed?: number; errors?: number } = {},
+  options: { backend?: string; version?: string; gpu?: string; speed?: number; errors?: number; recordBackend?: boolean } = {},
 ): BenchmarkRun {
   const metrics = app === "corrala"
     ? { metrics: [{ model: profile, suite: "routing", runs: 10, status: "completed", quality: { pass_rate: quality, primary_rate: quality, errors: options.errors ?? 0 }, speed: { latency_s_p50: options.speed ?? 2 } }] }
@@ -51,7 +51,7 @@ function run(
       status: "completed",
       environment: {
         software: { ocabra: options.version ?? "0.128.0" },
-        model: { profile, backends: [options.backend ?? "llama_cpp"] },
+        model: { profile, backends: options.recordBackend === false ? [] : [options.backend ?? "llama_cpp"] },
         hardware: { gpus: [{ index: 0, name: options.gpu ?? "RTX 3090" }] },
         requests: { count: 10, errors: options.errors ?? 0 },
       },
@@ -96,6 +96,21 @@ describe("global benchmark ranking", () => {
 
     expect(ranking.find((row) => row.model === "partial")).toMatchObject({ eligible: false, coverage: 0.25 })
     expect(ranking[0].model).toBe("covered")
+  })
+
+  it("merges legacy results without backend into the profile's only known backend", () => {
+    const ranking = buildModelRanking([
+      run("bfcl", "core", "bonsai", 0.8, { recordBackend: false }),
+      run("ifeval", "full", "bonsai", 0.8, { backend: "llamacpp_mks" }),
+    ], balanced)
+
+    expect(ranking).toHaveLength(1)
+    expect(ranking[0]).toMatchObject({
+      model: "bonsai",
+      backend: "llamacpp_mks",
+      dimensions: expect.arrayContaining(["bfcl", "ifeval"]),
+      eligible: true,
+    })
   })
 
   it("filters cohorts by the recorded oCabra version and GPU", () => {

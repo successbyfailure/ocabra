@@ -69,6 +69,7 @@ interface Observation {
 }
 
 const QUALITY_DIMENSIONS: RankingDimension[] = ["corrala", "escriba", "bfcl", "ifeval"]
+const UNKNOWN_BACKEND = "backend no informado"
 
 export const RANKING_PROFILES: RankingProfile[] = [
   {
@@ -127,7 +128,7 @@ function latestAttempt(run: BenchmarkRun, profile: string): BenchmarkAttempt | u
 }
 
 function attemptBackend(attempt: BenchmarkAttempt | undefined): string {
-  return attempt?.environment.model?.backends?.join("+") || "backend no informado"
+  return attempt?.environment.model?.backends?.join("+") || UNKNOWN_BACKEND
 }
 
 function attemptHardware(attempt: BenchmarkAttempt | undefined): string {
@@ -231,6 +232,20 @@ function observations(runs: BenchmarkRun[], filters: RankingFilters): Observatio
         efficiency: 0,
       })
     })
+  })
+
+  const knownBackends = new Map<string, Set<string>>()
+  result.forEach((item) => {
+    if (item.backend === UNKNOWN_BACKEND) return
+    const values = knownBackends.get(item.profile) ?? new Set<string>()
+    values.add(item.backend)
+    knownBackends.set(item.profile, values)
+  })
+  result.forEach((item) => {
+    const candidates = knownBackends.get(item.profile)
+    if (item.backend !== UNKNOWN_BACKEND || candidates?.size !== 1) return
+    item.backend = [...candidates][0]
+    item.identity = `${item.profile}::${item.backend}`
   })
 
   const byRun = new Map<string, Observation[]>()
