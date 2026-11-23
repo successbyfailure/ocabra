@@ -44,7 +44,7 @@ function parseCorrala(
   result: Record<string, unknown>,
 ): BenchmarkResultRow[] {
   if (!Array.isArray(result.metrics)) return []
-  return result.metrics.flatMap((candidate, index) => {
+  const rows = result.metrics.flatMap((candidate, index) => {
     const row = asRecord(candidate)
     if (!row) return []
     const quality = asRecord(row.quality) ?? {}
@@ -63,6 +63,33 @@ function parseCorrala(
       raw: row,
     }]
   })
+  if (rows.length < 2) return rows
+
+  const weighted = result.metrics.flatMap((candidate) => {
+    const row = asRecord(candidate)
+    const quality = asRecord(row?.quality)
+    const runs = row?.runs
+    return row && quality && typeof runs === "number" ? [{ row, quality, runs }] : []
+  })
+  const total = weighted.reduce((sum, item) => sum + item.runs, 0)
+  if (total === 0) return rows
+  const average = (key: string) => weighted.reduce((sum, item) => (
+    sum + (typeof item.quality[key] === "number" ? item.quality[key] * item.runs : 0)
+  ), 0) / total
+  const errors = weighted.reduce((sum, item) => (
+    sum + (typeof item.quality.errors === "number" ? item.quality.errors : 0)
+  ), 0)
+  return [{
+    model: rows[0].model,
+    scope: `Global · ${total} casos`,
+    status: rows.every((row) => row.status === "completed") ? "completed" : null,
+    metrics: present([
+      metric("pass_rate", "Calidad", average("pass_rate"), "percent", "higher"),
+      metric("primary_rate", "Primaria", average("primary_rate"), "percent", "higher"),
+      metric("errors", "Errores", errors, "integer", "lower"),
+    ]),
+    raw: result,
+  }, ...rows]
 }
 
 function parseEscriba(

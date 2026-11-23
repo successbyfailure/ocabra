@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import {
   Activity, AlertTriangle, Ban, BarChart3, CheckCircle2, ChevronDown, CircleDot,
-  Clipboard, Clock3, Copy, Cpu, CalendarDays, GitCommit, Loader2, Pause, Play, Plus,
+  Clipboard, Clock3, Copy, Cpu, CalendarDays, GitCommit, ListChecks, Loader2, Pause, Play, Plus,
   RefreshCw, RotateCcw, Save, Search, Server, Star, Terminal, Trash2, X, XCircle,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -11,8 +11,7 @@ import type {
   BenchmarkScheduleInput,
   ModelProfile,
 } from "@/types"
-import { BenchmarkResults } from "./benchmarks/BenchmarkResults"
-import { BenchmarkHistory } from "./benchmarks/BenchmarkHistory"
+import { BenchmarkResultsDashboard } from "./benchmarks/BenchmarkResultsDashboard"
 
 const ACTIVE_STATUSES: BenchmarkRunStatus[] = [
   "queued", "running", "pausing", "paused", "cancelling",
@@ -123,6 +122,7 @@ export function benchmarkModelGroups(
 }
 
 export function Benchmarks() {
+  const [view, setView] = useState<"results" | "runs" | "launch">("results")
   const [catalog, setCatalog] = useState<BenchmarkAppCatalog[]>([])
   const [profiles, setProfiles] = useState<ModelProfile[]>([])
   const [runs, setRuns] = useState<BenchmarkRun[]>([])
@@ -225,6 +225,7 @@ export function Benchmarks() {
       toast.success("Benchmark añadido a la cola")
       setModels([])
       await refresh()
+      setView("runs")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "No se pudo encolar")
     } finally {
@@ -302,6 +303,7 @@ export function Benchmarks() {
       await api.benchmarks.schedules.run(schedule.id)
       toast.success("Plan añadido a la cola")
       await refresh()
+      setView("runs")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "No se pudo ejecutar el plan")
     } finally { setBusyId(null) }
@@ -416,13 +418,28 @@ export function Benchmarks() {
         </button>
       </header>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <nav className="flex w-full gap-1 overflow-x-auto rounded-xl border border-border bg-card p-1" aria-label="Secciones de benchmarks">
+        {([
+          ["results", "Resultados", <BarChart3 size={15} />, runs.filter((run) => run.status === "completed" && Object.keys(run.result).length > 0).length],
+          ["runs", "Ejecuciones", <ListChecks size={15} />, summary.active],
+          ["launch", "Lanzar pruebas", <Plus size={15} />, schedules.filter((schedule) => schedule.enabled).length],
+        ] as const).map(([key, label, icon, count]) => (
+          <button key={key} type="button" onClick={() => setView(key)} className={`inline-flex min-w-max flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors ${view === key ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}>
+            {icon}{label}{count > 0 && <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${view === key ? "bg-primary-foreground/15" : "bg-muted"}`}>{count}</span>}
+          </button>
+        ))}
+      </nav>
+
+      {view === "results" && <BenchmarkResultsDashboard runs={runs} />}
+
+      {view === "runs" && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <SummaryCard icon={<CircleDot size={16} />} label="En curso" value={summary.active} tone="sky" />
         <SummaryCard icon={<CheckCircle2 size={16} />} label="Completadas" value={summary.completed} tone="emerald" />
         <SummaryCard icon={<XCircle size={16} />} label="Fallidas" value={summary.failed} tone="red" />
         <SummaryCard icon={<AlertTriangle size={16} />} label="Intentos descartados" value={summary.contaminated} tone="amber" />
-      </div>
+      </div>}
 
+      {view === "launch" && <>
       <section className="rounded-xl border border-border bg-card">
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">
           <Plus size={17} className="text-primary" />
@@ -550,9 +567,9 @@ export function Benchmarks() {
           </article>
         ))}</div>}
       </section>
+      </>}
 
-      <BenchmarkHistory runs={runs} />
-
+      {view === "runs" && (
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div><h2 className="font-medium">Ejecuciones</h2><p className="text-xs text-muted-foreground">{visibleRuns.length} de {runs.length}</p></div>
@@ -570,6 +587,7 @@ export function Benchmarks() {
             onRetry={() => void retry(run)} onRerun={() => void rerun(run)} onBaseline={() => void setBaseline(run)} onToggleLog={() => toggleLog(run.id)} onRefreshLog={() => void loadLog(run.id, false)} />
         ))}
       </section>
+      )}
     </div>
   )
 }
@@ -629,7 +647,6 @@ function RunCard({ run, busy, log, logOpen, onPause, onResume, onCancel, onRetry
 
         {run.pauseReason && <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"><Activity size={14} className="mt-0.5 shrink-0" />{run.pauseReason === "external_traffic" ? "Pausado por tráfico externo. Se reanudará automáticamente cuando el servidor quede libre." : "Pausado manualmente. Usa Reanudar cuando quieras continuar."}</div>}
         {run.error && <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{run.error}</div>}
-        {Object.keys(run.result).length > 0 && <BenchmarkResults run={run} />}
         {run.attempts.length > 0 && <Attempts attempts={run.attempts} />}
       </div>
 

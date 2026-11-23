@@ -61,6 +61,22 @@ describe("benchmark result adapters", () => {
     })
   })
 
+  it("adds a case-weighted global quality row for Corrala", () => {
+    const rows = parseBenchmarkResults({
+      model: { metrics: [
+        { model: "model", suite: "routing", runs: 10, quality: { pass_rate: 0.8, primary_rate: 0.9, errors: 0 }, speed: {} },
+        { model: "model", suite: "loops", runs: 5, quality: { pass_rate: 0.2, primary_rate: 0.4, errors: 1 }, speed: {} },
+      ] },
+    })
+
+    expect(rows[0].scope).toBe("Global · 15 casos")
+    expect(Object.fromEntries(rows[0].metrics.map((metric) => [metric.key, metric.value]))).toMatchObject({
+      pass_rate: 0.6,
+      primary_rate: 0.7333333333333333,
+      errors: 1,
+    })
+  })
+
   it("highlights the best comparable metric and falls back for unknown runners", () => {
     const rows = parseBenchmarkResults({
       fast: { nested: { score: 0.75 }, status: "ok" },
