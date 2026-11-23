@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { paretoIds } from "@/pages/benchmarks/BenchmarkModelRanking"
+import { paretoIds, scatterPointRows } from "@/pages/benchmarks/BenchmarkModelRanking"
 import {
   buildModelRanking,
   RANKING_PROFILES,
@@ -119,5 +119,19 @@ describe("global benchmark ranking", () => {
       contributions: { corrala: 0, escriba: 0, bfcl: 0, ifeval: 0, reliability: 0, performance: 0, efficiency: 0 },
     })
     expect([...paretoIds([row("balanced", 80, 80), row("slow", 90, 60), row("dominated", 70, 70)])].sort()).toEqual(["balanced", "slow"])
+  })
+
+  it("labels every scatter point and disambiguates duplicate models by backend", () => {
+    const rows = buildModelRanking([
+      run("bfcl", "core", "same-model", 0.8, { backend: "llama_cpp" }),
+      run("ifeval", "full", "same-model", 0.8, { backend: "llama_cpp" }),
+      run("bfcl", "core", "same-model", 0.9, { backend: "ollama" }),
+      run("ifeval", "full", "same-model", 0.9, { backend: "ollama" }),
+    ], balanced)
+
+    expect(scatterPointRows(rows).map((row) => row.pointLabel).sort()).toEqual([
+      "same-model · llama_cpp",
+      "same-model · ollama",
+    ])
   })
 })
