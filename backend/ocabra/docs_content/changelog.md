@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.128.0 — 2026-11-23
+
+### Nuevo
+
+- **Resultados de benchmarks como vista principal.** La página separa la
+  comparativa, el seguimiento de ejecuciones y el lanzamiento de nuevas
+  pruebas. Los resultados ofrecen rankings gráficos por métrica y prueba,
+  líderes, detalle tabular e histórico; Corrala añade una calidad global
+  ponderada por el número real de casos.
+
+---
+
 ## 0.127.5 — 2026-11-22
 
 ### Arreglos

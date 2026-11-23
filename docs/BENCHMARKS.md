@@ -11,14 +11,16 @@ declarado y conserva su resultado sin recalcular la puntuación.
 
 ## Ejecución desde la UI
 
-La página **Benchmarks** (rol `model_manager`) agrupa los perfiles por modelo y
-permite seleccionar sus backends como burbujas independientes, filtrar el
-historial, reintentar desde el modelo fallido, repetir una configuración y
-consultar resultados, intentos y logs. Los resultados conocidos de Escriba y
-Corrala se normalizan solo para presentarlos en una tabla comparativa; el JSON
-bruto siempre se conserva y puede descargarse junto con el entorno de cada
-intento. Un resultado con un esquema
-nuevo muestra como alternativa sus métricas escalares, sin ocultar los datos.
+La página **Benchmarks** (rol `model_manager`) abre en **Resultados** y separa
+tres espacios: comparativa gráfica, ejecuciones/histórico y lanzamiento de
+pruebas. Agrupa los perfiles por modelo y permite seleccionar sus backends como
+burbujas independientes, filtrar el historial, reintentar desde el modelo
+fallido y repetir una configuración. Los resultados conocidos de Escriba,
+Corrala, BFCL e IFEval se normalizan para ofrecer rankings por métrica y prueba,
+líderes y tabla comparativa; Corrala añade un agregado de calidad ponderado por
+casos. El JSON bruto siempre se conserva y puede descargarse junto con el
+entorno de cada intento. Un esquema nuevo muestra como alternativa sus métricas
+escalares, sin ocultar los datos.
 
 La unidad de trabajo es `aplicación + suite + modelo`: los modelos se ejecutan
 secuencialmente para que una contaminación afecte solo al modelo en curso. La

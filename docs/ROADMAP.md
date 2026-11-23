@@ -226,7 +226,9 @@ Implementado:
   contaminados por tráfico interactivo. Cada intento registra versiones,
   backend, nodo y todas las GPU usadas. También permite guardar planes
   reutilizables, programarlos por días/hora/zona sin solapes y comparar hasta
-  cuatro ejecuciones contra una referencia histórica por suite. Uso y contrato en
+  cuatro ejecuciones contra una referencia histórica por suite. La UI separa
+  resultados, seguimiento y lanzamiento, y presenta rankings gráficos por
+  métrica con agregados ponderados cuando la suite los permite. Uso y contrato en
   `docs/BENCHMARKS.md`.
 
 ---
