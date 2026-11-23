@@ -27,7 +27,7 @@ const FALLBACK_SECONDS: Record<string, number> = {
   "corrala/llm": 8 * 60,
   "bfcl/simple_python": 20 * 60,
   "bfcl/core": 90 * 60,
-  "ifeval/quick": 10 * 60,
+  "ifeval/quick": 15 * 60,
   "ifeval/full": 100 * 60,
   "escriba/llm": 3 * 60,
   "escriba/stt": 12 * 60,
@@ -88,13 +88,28 @@ function workloadScale(
   return null
 }
 
-function usableAttempt(run: BenchmarkRun, model: string): number[] {
-  return run.attempts.flatMap((attempt) => {
-    if (attempt.model !== model || attempt.status !== "completed") return []
-    if (attempt.environment.requests?.count === 0) return []
-    const seconds = durationSeconds(attempt.startedAt, attempt.finishedAt)
-    return seconds === null ? [] : [seconds]
+function modelRunSample(run: BenchmarkRun, model: string): number[] {
+  const attempts = run.attempts
+    .filter((attempt) => attempt.model === model)
+    .sort((left, right) => left.attemptNumber - right.attemptNumber)
+  let completedIndex = -1
+  attempts.forEach((attempt, index) => {
+    if (attempt.status === "completed") completedIndex = index
   })
+  if (completedIndex < 0) return []
+  let chainStart = 0
+  attempts.slice(0, completedIndex).forEach((attempt, index) => {
+    if (attempt.status === "contaminated") chainStart = index + 1
+  })
+  const chain = attempts.slice(chainStart, completedIndex + 1)
+  const requestCounts = chain.map((attempt) => attempt.environment.requests?.count)
+  if (requestCounts.every((count) => count !== undefined) && requestCounts.reduce((sum, count) => sum + (count ?? 0), 0) === 0) {
+    return []
+  }
+  const seconds = chain.reduce((sum, attempt) => (
+    sum + (durationSeconds(attempt.startedAt, attempt.finishedAt) ?? 0)
+  ), 0)
+  return seconds > 0 ? [seconds] : []
 }
 
 function ranges(seconds: number, confidence: EstimateConfidence): [number, number] {
@@ -110,11 +125,11 @@ function modelEstimate(
   suiteArgs: string[],
   model: string,
 ): ModelTimeEstimate {
-  const completed = runs.filter((run) => run.status === "completed")
-  const exactRuns = completed.filter((run) => (
+  const historical = runs.filter((run) => run.status !== "queued" && run.status !== "cancelled")
+  const exactRuns = historical.filter((run) => (
     run.app === app && run.suite === suite && argsKey(run.suiteArgs) === argsKey(suiteArgs)
   ))
-  const direct = exactRuns.flatMap((run) => usableAttempt(run, model))
+  const direct = exactRuns.flatMap((run) => modelRunSample(run, model))
   let seconds: number
   let confidence: EstimateConfidence
   let source: EstimateSource
@@ -126,9 +141,9 @@ function modelEstimate(
     source = "model_history"
     samples = direct.length
   } else {
-    const scaledModel = completed.flatMap((run) => {
+    const scaledModel = historical.flatMap((run) => {
       const scale = workloadScale(run.app, run.suite, run.suiteArgs, app, suite, suiteArgs)
-      return scale === null ? [] : usableAttempt(run, model).map((value) => value * scale)
+      return scale === null ? [] : modelRunSample(run, model).map((value) => value * scale)
     })
     if (scaledModel.length > 0) {
       seconds = median(scaledModel)
@@ -136,17 +151,17 @@ function modelEstimate(
       source = "scaled_model_history"
       samples = scaledModel.length
     } else {
-      const suiteSamples = exactRuns.flatMap((run) => run.models.flatMap((candidate) => usableAttempt(run, candidate)))
+      const suiteSamples = exactRuns.flatMap((run) => run.models.flatMap((candidate) => modelRunSample(run, candidate)))
       if (suiteSamples.length > 0) {
         seconds = median(suiteSamples)
         confidence = suiteSamples.length >= 3 ? "medium" : "low"
         source = "suite_history"
         samples = suiteSamples.length
       } else {
-        const scaledSuite = completed.flatMap((run) => {
+        const scaledSuite = historical.flatMap((run) => {
           const scale = workloadScale(run.app, run.suite, run.suiteArgs, app, suite, suiteArgs)
           if (scale === null) return []
-          return run.models.flatMap((candidate) => usableAttempt(run, candidate).map((value) => value * scale))
+          return run.models.flatMap((candidate) => modelRunSample(run, candidate).map((value) => value * scale))
         })
         if (scaledSuite.length > 0) {
           seconds = median(scaledSuite)

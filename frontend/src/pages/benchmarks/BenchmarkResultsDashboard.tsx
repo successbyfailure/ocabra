@@ -15,6 +15,12 @@ import { BenchmarkHistory } from "./BenchmarkHistory"
 import { BenchmarkModelRanking } from "./BenchmarkModelRanking"
 import { BenchmarkResults } from "./BenchmarkResults"
 import {
+  BENCHMARK_TOOLTIP_ITEM_STYLE,
+  BENCHMARK_TOOLTIP_LABEL_STYLE,
+  BENCHMARK_TOOLTIP_STYLE,
+  BENCHMARK_TOOLTIP_WRAPPER_STYLE,
+} from "./chartStyles"
+import {
   formatMetric,
   parseBenchmarkResults,
   type BenchmarkMetric,
@@ -181,7 +187,7 @@ export function BenchmarkResultsDashboard({ runs }: { runs: BenchmarkRun[] }) {
                     <div><h3 className="text-sm font-medium">Clasificación</h3><p className="text-xs text-muted-foreground">{metricDefinition?.better === "lower" ? "Menos es mejor" : "Más es mejor"}</p></div>
                     <div className="flex flex-wrap justify-end gap-1.5">{metrics.map((metric) => <button key={metric.key} type="button" onClick={() => setMetricKey(metric.key)} className={`rounded-md px-2 py-1 text-xs ${effectiveMetric === metric.key ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:text-foreground"}`}>{metric.label}</button>)}</div>
                   </div>
-                  {chartData.length > 0 ? <div className="mt-3" style={{ height: Math.max(260, chartData.length * 38) }}><ResponsiveContainer width="100%" height="100%"><BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 28 }}><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="hsl(var(--border))" /><XAxis type="number" tickFormatter={(value) => chartTick(Number(value), metricDefinition)} tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }} axisLine={false} tickLine={false} /><YAxis type="category" dataKey="model" width={180} tick={{ fontSize: 11, fill: "hsl(var(--foreground))" }} axisLine={false} tickLine={false} /><Tooltip cursor={{ fill: "hsl(var(--muted) / 0.35)" }} contentStyle={{ background: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 12 }} formatter={(value) => [metricDefinition ? formatMetric({ ...metricDefinition, value: Number(value) }) : String(value), metricDefinition?.label ?? "Valor"]} /><Bar dataKey="value" radius={[0, 5, 5, 0]}>{chartData.map((item, index) => <Cell key={item.model} fill={index === 0 ? "hsl(var(--primary))" : "hsl(var(--primary) / 0.42)"} />)}</Bar></BarChart></ResponsiveContainer></div> : <p className="py-12 text-center text-sm text-muted-foreground">No hay valores numéricos comparables.</p>}
+                  {chartData.length > 0 ? <div className="mt-3" style={{ height: Math.max(260, chartData.length * 38) }}><ResponsiveContainer width="100%" height="100%"><BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 28 }}><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="hsl(var(--border))" /><XAxis type="number" tickFormatter={(value) => chartTick(Number(value), metricDefinition)} tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }} axisLine={false} tickLine={false} /><YAxis type="category" dataKey="model" width={180} tick={{ fontSize: 11, fill: "hsl(var(--foreground))" }} axisLine={false} tickLine={false} /><Tooltip cursor={{ fill: "hsl(var(--muted) / 0.35)" }} contentStyle={BENCHMARK_TOOLTIP_STYLE} wrapperStyle={BENCHMARK_TOOLTIP_WRAPPER_STYLE} labelStyle={BENCHMARK_TOOLTIP_LABEL_STYLE} itemStyle={BENCHMARK_TOOLTIP_ITEM_STYLE} formatter={(value) => [metricDefinition ? formatMetric({ ...metricDefinition, value: Number(value) }) : String(value), metricDefinition?.label ?? "Valor"]} /><Bar dataKey="value" radius={[0, 5, 5, 0]}>{chartData.map((item, index) => <Cell key={item.model} fill={index === 0 ? "hsl(var(--primary))" : "hsl(var(--primary) / 0.42)"} />)}</Bar></BarChart></ResponsiveContainer></div> : <p className="py-12 text-center text-sm text-muted-foreground">No hay valores numéricos comparables.</p>}
                 </div>
 
                 <div className="space-y-3">

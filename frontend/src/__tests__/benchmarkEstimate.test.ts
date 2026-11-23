@@ -95,8 +95,28 @@ describe("benchmark time estimate", () => {
       completedRun({ app: "ifeval", suite: "quick", attemptSeconds: 3, requestCount: 0 }),
     ], "ifeval", "quick", [], ["model-a"])
 
-    expect(estimate?.models[0]).toMatchObject({ source: "fallback", seconds: 600, samples: 0 })
+    expect(estimate?.models[0]).toMatchObject({ source: "fallback", seconds: 900, samples: 0 })
     expect(estimate?.confidence).toBe("low")
+  })
+
+  it("learns from resumed models in an active run without counting discarded chains", () => {
+    const run = completedRun({ app: "ifeval", suite: "quick", attemptSeconds: 400 })
+    const finalAttempt = run.attempts[0]
+    run.status = "running"
+    run.currentModelIndex = 1
+    run.currentModel = "model-b"
+    run.finishedAt = null
+    run.models = ["model-a", "model-b"]
+    run.attempts = [
+      { ...finalAttempt, id: "discarded-1", attemptNumber: 1, status: "interrupted", startedAt: "2026-11-23T00:00:00Z", finishedAt: "2026-11-23T00:03:20Z" },
+      { ...finalAttempt, id: "discarded-2", attemptNumber: 2, status: "contaminated", startedAt: "2026-11-23T00:03:20Z", finishedAt: "2026-11-23T00:08:20Z" },
+      { ...finalAttempt, id: "resumed-1", attemptNumber: 3, status: "interrupted", startedAt: "2026-11-23T00:08:20Z", finishedAt: "2026-11-23T00:11:40Z" },
+      { ...finalAttempt, id: "accepted", attemptNumber: 4, status: "completed", startedAt: "2026-11-23T00:11:40Z", finishedAt: "2026-11-23T00:18:20Z" },
+    ]
+
+    const estimate = estimateBenchmarkTime([run], "ifeval", "quick", [], ["model-a"])
+
+    expect(estimate?.models[0]).toMatchObject({ source: "model_history", seconds: 600 })
   })
 
   it("formats useful human durations", () => {

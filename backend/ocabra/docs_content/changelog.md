@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.130.1 — 2026-11-23
+
+### Arreglos
+
+- **Las estimaciones incluyen el trabajo previo a una reanudación.** Si un
+  modelo se pausa o falla y continúa desde checkpoint, se suman los tramos de
+  la cadena aceptada; un intento descartado por contaminación tardía reinicia
+  la cadena. Los modelos ya aceptados de una ejecución todavía activa también
+  alimentan inmediatamente el cálculo.
+- **Los gráficos de benchmarks recuperan contraste y contexto.** Los tooltips
+  tienen fondo opaco, borde y sombra, y el diagrama calidad-rendimiento muestra
+  los nombres de ambos ejes.
+
 ## 0.130.0 — 2026-11-23
 
 ### Nuevo

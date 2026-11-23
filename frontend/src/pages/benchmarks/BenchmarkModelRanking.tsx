@@ -15,6 +15,14 @@ import {
 } from "recharts"
 import type { BenchmarkRun } from "@/types"
 import {
+  BENCHMARK_TOOLTIP_ITEM_STYLE,
+  BENCHMARK_TOOLTIP_LABEL_STYLE,
+  BENCHMARK_TOOLTIP_STYLE,
+  BENCHMARK_TOOLTIP_WRAPPER_STYLE,
+  PERFORMANCE_AXIS_LABEL,
+  QUALITY_AXIS_LABEL,
+} from "./chartStyles"
+import {
   buildModelRanking,
   DEFAULT_CUSTOM_WEIGHTS,
   normalizeWeights,
@@ -198,13 +206,13 @@ export function BenchmarkModelRanking({ runs }: { runs: BenchmarkRun[] }) {
             <div className="rounded-lg border border-border bg-background p-3">
               <h3 className="flex items-center gap-1.5 text-sm font-medium"><CircleGauge size={15} /> Clasificación ponderada</h3>
               <p className="text-xs text-muted-foreground">La cobertura incompleta reduce la puntuación total.</p>
-              <div className="mt-3" style={{ height: Math.max(280, chartRows.length * 34) }}><ResponsiveContainer width="100%" height="100%"><BarChart data={chartRows} layout="vertical" margin={{ left: 4, right: 24 }}><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="hsl(var(--border))" /><XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} axisLine={false} tickLine={false} /><YAxis type="category" dataKey="label" width={180} tick={{ fontSize: 10, fill: "hsl(var(--foreground))" }} axisLine={false} tickLine={false} /><Tooltip formatter={(value) => [`${Number(value).toFixed(1)} / 100`, "Puntuación"]} contentStyle={{ background: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 12 }} /><Bar dataKey="score" radius={[0, 5, 5, 0]}>{chartRows.map((row, index) => <Cell key={row.id} fill={!row.eligible ? "hsl(var(--muted-foreground) / 0.25)" : index === 0 ? "hsl(var(--primary))" : "hsl(var(--primary) / 0.45)"} />)}</Bar></BarChart></ResponsiveContainer></div>
+              <div className="mt-3" style={{ height: Math.max(280, chartRows.length * 34) }}><ResponsiveContainer width="100%" height="100%"><BarChart data={chartRows} layout="vertical" margin={{ left: 4, right: 24 }}><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="hsl(var(--border))" /><XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} axisLine={false} tickLine={false} /><YAxis type="category" dataKey="label" width={180} tick={{ fontSize: 10, fill: "hsl(var(--foreground))" }} axisLine={false} tickLine={false} /><Tooltip formatter={(value) => [`${Number(value).toFixed(1)} / 100`, "Puntuación"]} contentStyle={BENCHMARK_TOOLTIP_STYLE} wrapperStyle={BENCHMARK_TOOLTIP_WRAPPER_STYLE} labelStyle={BENCHMARK_TOOLTIP_LABEL_STYLE} itemStyle={BENCHMARK_TOOLTIP_ITEM_STYLE} /><Bar dataKey="score" radius={[0, 5, 5, 0]}>{chartRows.map((row, index) => <Cell key={row.id} fill={!row.eligible ? "hsl(var(--muted-foreground) / 0.25)" : index === 0 ? "hsl(var(--primary))" : "hsl(var(--primary) / 0.45)"} />)}</Bar></BarChart></ResponsiveContainer></div>
             </div>
 
             <div className="rounded-lg border border-border bg-background p-3">
               <h3 className="flex items-center gap-1.5 text-sm font-medium"><Cpu size={15} /> Calidad frente a rendimiento</h3>
               <p className="text-xs text-muted-foreground">Los puntos destacados no están dominados en ambos ejes.</p>
-              <div className="mt-3 h-[280px]"><ResponsiveContainer width="100%" height="100%"><ScatterChart margin={{ top: 8, right: 16, bottom: 10, left: 0 }}><CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" /><XAxis type="number" dataKey="quality" name="Calidad" domain={[0, 100]} unit="%" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} /><YAxis type="number" dataKey="performance" name="Rendimiento" domain={[0, 100]} unit="%" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} /><ZAxis range={[80, 80]} /><Tooltip cursor={{ strokeDasharray: "3 3" }} formatter={(value, name) => [`${Number(value).toFixed(1)}%`, name]} labelFormatter={(_, payload) => payload[0]?.payload?.model ?? ""} contentStyle={{ background: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 12 }} /><Scatter data={eligible}>{eligible.map((row) => <Cell key={row.id} fill={pareto.has(row.id) ? "hsl(var(--primary))" : "hsl(var(--muted-foreground) / 0.55)"} />)}</Scatter></ScatterChart></ResponsiveContainer></div>
+              <div className="mt-3 h-[320px]"><ResponsiveContainer width="100%" height="100%"><ScatterChart margin={{ top: 8, right: 20, bottom: 34, left: 22 }}><CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" /><XAxis type="number" dataKey="quality" name="Calidad" domain={[0, 100]} unit="%" tickMargin={6} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} label={{ value: QUALITY_AXIS_LABEL, position: "insideBottom", offset: -22, fill: "hsl(var(--foreground))", fontSize: 11 }} /><YAxis type="number" dataKey="performance" name="Rendimiento" domain={[0, 100]} unit="%" tickMargin={6} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} label={{ value: PERFORMANCE_AXIS_LABEL, angle: -90, position: "insideLeft", offset: -10, fill: "hsl(var(--foreground))", fontSize: 11 }} /><ZAxis range={[80, 80]} /><Tooltip cursor={{ stroke: "hsl(var(--muted-foreground))", strokeDasharray: "3 3" }} formatter={(value, name) => [`${Number(value).toFixed(1)}%`, name]} labelFormatter={(_, payload) => payload[0]?.payload?.model ?? ""} contentStyle={BENCHMARK_TOOLTIP_STYLE} wrapperStyle={BENCHMARK_TOOLTIP_WRAPPER_STYLE} labelStyle={BENCHMARK_TOOLTIP_LABEL_STYLE} itemStyle={BENCHMARK_TOOLTIP_ITEM_STYLE} /><Scatter data={eligible}>{eligible.map((row) => <Cell key={row.id} fill={pareto.has(row.id) ? "hsl(var(--primary))" : "hsl(var(--muted-foreground) / 0.55)"} />)}</Scatter></ScatterChart></ResponsiveContainer></div>
             </div>
           </div>
 

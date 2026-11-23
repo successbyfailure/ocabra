@@ -4,6 +4,11 @@ import {
   rankedMetricRows,
 } from "@/pages/benchmarks/BenchmarkResultsDashboard"
 import type { BenchmarkResultRow } from "@/pages/benchmarks/resultAdapters"
+import {
+  BENCHMARK_TOOLTIP_STYLE,
+  PERFORMANCE_AXIS_LABEL,
+  QUALITY_AXIS_LABEL,
+} from "@/pages/benchmarks/chartStyles"
 
 function row(model: string, value: number, better: "higher" | "lower" = "higher"): BenchmarkResultRow {
   return {
@@ -26,5 +31,11 @@ describe("benchmark results dashboard", () => {
       { key: "simple_accuracy", label: "Simple", value: 0.8, format: "percent", better: "higher" },
       { key: "non_live_accuracy", label: "Non-live", value: 0.7, format: "percent", better: "higher" },
     ])).toBe("non_live_accuracy")
+  })
+
+  it("uses opaque tooltips and names both axes of the Pareto chart", () => {
+    expect(BENCHMARK_TOOLTIP_STYLE).toMatchObject({ backgroundColor: "#09090b", opacity: 1 })
+    expect(QUALITY_AXIS_LABEL).toContain("Calidad")
+    expect(PERFORMANCE_AXIS_LABEL).toContain("Rendimiento")
   })
 })
