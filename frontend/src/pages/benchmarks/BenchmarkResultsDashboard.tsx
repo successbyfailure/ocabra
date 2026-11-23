@@ -12,6 +12,7 @@ import {
 } from "recharts"
 import type { BenchmarkRun } from "@/types"
 import { BenchmarkHistory } from "./BenchmarkHistory"
+import { BenchmarkModelRanking } from "./BenchmarkModelRanking"
 import { BenchmarkResults } from "./BenchmarkResults"
 import {
   formatMetric,
@@ -136,6 +137,7 @@ export function BenchmarkResultsDashboard({ runs }: { runs: BenchmarkRun[] }) {
 
   return (
     <div className="space-y-6">
+      <BenchmarkModelRanking runs={completed} />
       <section className="overflow-hidden rounded-xl border border-border bg-card">
         <div className="flex flex-wrap items-end justify-between gap-4 border-b border-border px-4 py-4">
           <div>

@@ -16,6 +16,16 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.129.0 — 2026-11-23
+
+### Nuevo
+
+- **Ranking explicable de modelos y backends.** Resultados combina Corrala,
+  Escriba, BFCL e IFEval con fiabilidad, rendimiento y eficiencia GPU. Incluye
+  perfiles de pesos, configuración personalizada, cobertura mínima, filtros por
+  versión/hardware, desglose de la puntuación y frontera de Pareto; nunca
+  modifica las métricas oficiales guardadas por cada benchmark.
+
 ## 0.128.0 — 2026-11-23
 
 ### Nuevo
