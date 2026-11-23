@@ -13,7 +13,9 @@ import type {
 } from "@/types"
 import { BenchmarkResultsDashboard } from "./benchmarks/BenchmarkResultsDashboard"
 import { BenchmarkTimeEstimate } from "./benchmarks/BenchmarkTimeEstimate"
-import { estimateBenchmarkTime } from "./benchmarks/benchmarkEstimate"
+import {
+  estimateBenchmarkRemaining, estimateBenchmarkTime, formatEstimatedDuration,
+} from "./benchmarks/benchmarkEstimate"
 
 const ACTIVE_STATUSES: BenchmarkRunStatus[] = [
   "queued", "running", "pausing", "paused", "cancelling",
@@ -44,6 +46,12 @@ const PHASE_LABEL: Record<string, string> = {
   cancelled: "Cancelado",
   completed: "Finalizado",
   failed: "Fallido",
+}
+
+const TEST_STAGE_LABEL: Record<string, string> = {
+  generating: "Generando respuestas",
+  scoring: "Calculando puntuación",
+  completed: "Prueba completada",
 }
 
 const WEEKDAYS = ["L", "M", "X", "J", "V", "S", "D"]
@@ -593,7 +601,7 @@ export function Benchmarks() {
 
         {!loading && visibleRuns.length === 0 && <div className="rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">{runs.length === 0 ? "No hay benchmarks todavía." : "Ninguna ejecución coincide con los filtros."}</div>}
         {visibleRuns.map((run) => (
-          <RunCard key={run.id} run={run} busy={busyId === run.id} log={logs[run.id]} logOpen={openLogs.has(run.id)}
+          <RunCard key={run.id} run={run} history={runs} busy={busyId === run.id} log={logs[run.id]} logOpen={openLogs.has(run.id)}
             onPause={() => void control(run, "pause")} onResume={() => void control(run, "resume")} onCancel={() => void control(run, "cancel")}
             onRetry={() => void retry(run)} onRerun={() => void rerun(run)} onBaseline={() => void setBaseline(run)} onToggleLog={() => toggleLog(run.id)} onRefreshLog={() => void loadLog(run.id, false)} />
         ))}
@@ -608,12 +616,18 @@ function SummaryCard({ icon, label, value, tone }: { icon: ReactNode; label: str
   return <div className="flex items-center gap-3 rounded-xl border border-border bg-card p-3"><span className={`rounded-lg p-2 ${colors[tone]}`}>{icon}</span><div><p className="text-xl font-semibold tabular-nums">{value}</p><p className="text-xs text-muted-foreground">{label}</p></div></div>
 }
 
-function RunCard({ run, busy, log, logOpen, onPause, onResume, onCancel, onRetry, onRerun, onBaseline, onToggleLog, onRefreshLog }: {
-  run: BenchmarkRun; busy: boolean; log?: string[]; logOpen: boolean; onPause: () => void; onResume: () => void;
+function RunCard({ run, history, busy, log, logOpen, onPause, onResume, onCancel, onRetry, onRerun, onBaseline, onToggleLog, onRefreshLog }: {
+  run: BenchmarkRun; history: BenchmarkRun[]; busy: boolean; log?: string[]; logOpen: boolean; onPause: () => void; onResume: () => void;
   onCancel: () => void; onRetry: () => void; onRerun: () => void; onBaseline: () => void; onToggleLog: () => void; onRefreshLog: () => void
 }) {
   const progress = run.models.length > 0 ? Math.round((run.currentModelIndex / run.models.length) * 100) : 0
   const terminal = ["completed", "failed", "cancelled"].includes(run.status)
+  const testProgress = run.testProgress
+  const testPercent = testProgress
+    ? Math.round((testProgress.completed / testProgress.total) * 100)
+    : null
+  const showTestProgress = Boolean(run.currentModel) && !["completed", "cancelled"].includes(run.status)
+  const remaining = estimateBenchmarkRemaining(history, run)
   const copyLog = async () => {
     try {
       await navigator.clipboard.writeText((log ?? []).join("\n"))
@@ -650,8 +664,22 @@ function RunCard({ run, busy, log, logOpen, onPause, onResume, onCancel, onRetry
           </div>
         </div>
 
-        <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted"><div className={`h-full transition-all ${run.status === "failed" ? "bg-destructive" : "bg-primary"}`} style={{ width: `${progress}%` }} /></div>
-        <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-muted-foreground"><span>{run.currentModelIndex}/{run.models.length} modelos aceptados · {progress}%</span><span className="font-mono">{run.currentModel ? `Ahora: ${run.currentModel}` : run.models.join(", ")}</span></div>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium">Progreso total</span><span className="text-muted-foreground">{run.currentModelIndex}/{run.models.length} modelos aceptados · {progress}%{remaining && remaining.totalSeconds > 0 ? ` · ≈ ${formatEstimatedDuration(remaining.totalSeconds)} restantes` : ""}</span></div>
+        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="Progreso total" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><div className={`h-full transition-all ${run.status === "failed" ? "bg-destructive" : "bg-primary"}`} style={{ width: `${progress}%` }} /></div>
+        <div className="mt-2 text-right text-xs text-muted-foreground"><span className="font-mono">{run.currentModel ? `Ahora: ${run.currentModel}` : run.models.join(", ")}</span></div>
+
+        {showTestProgress && <div className="mt-3 rounded-lg border border-border bg-background/60 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium">Progreso de la prueba actual</span><span className="font-mono text-muted-foreground">{run.currentModel}</span></div>
+          <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="Progreso de la prueba actual" aria-valuemin={0} aria-valuemax={testProgress?.total} aria-valuenow={testProgress?.completed}>
+            {testProgress
+              ? <div className="h-full bg-sky-400 transition-all duration-500" style={{ width: `${testPercent}%` }} />
+              : <div className="h-full w-2/5 animate-pulse rounded-full bg-sky-400/50" />}
+          </div>
+          <div className="mt-1.5 flex flex-wrap justify-between gap-2 text-xs text-muted-foreground">
+            <span>{testProgress ? `${testProgress.completed}/${testProgress.total} ${testProgress.unit} · ${testPercent}%` : "Esperando progreso estructurado del runner"}</span>
+            <span>{testProgress ? TEST_STAGE_LABEL[testProgress.stage] ?? testProgress.stage : PHASE_LABEL[run.phase] ?? run.phase}{remaining?.currentSeconds !== null && remaining?.currentSeconds !== undefined ? ` · ≈ ${formatEstimatedDuration(remaining.currentSeconds)} restantes` : ""}</span>
+          </div>
+        </div>}
         {run.phase && <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-sky-500/10 px-2 py-1 text-xs text-sky-300"><Loader2 size={11} className={ACTIVE_STATUSES.includes(run.status) && run.status !== "paused" ? "animate-spin" : ""} />{PHASE_LABEL[run.phase] ?? run.phase}</div>}
 
         <ExecutionEnvironment attempt={[...run.attempts].reverse().find((attempt) => Object.keys(attempt.environment ?? {}).length > 0)} />

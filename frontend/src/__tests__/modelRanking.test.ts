@@ -36,6 +36,7 @@ function run(
     pauseReason: null,
     currentModelIndex: 1,
     currentModel: null,
+    testProgress: null,
     result: { [profile]: metrics },
     contaminatedAttempts: 0,
     error: null,

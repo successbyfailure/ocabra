@@ -7,6 +7,7 @@ function run(id: string, model: string, score: number, baseline = false): Benchm
     id, app: "ifeval", suite: "quick", revision: "abc", models: [model], suiteArgs: [],
     status: "completed", phase: "completed", scheduleId: null, isBaseline: baseline,
     autoPause: true, pauseReason: null, currentModelIndex: 1, currentModel: null,
+    testProgress: null,
     result: { [model]: { benchmark: "ifeval", model, status: "completed", cases: 50,
       metrics: { strict_prompt_accuracy: score, latency_s_p50: 2 } } },
     contaminatedAttempts: 0, error: null, externalActivityAt: null,

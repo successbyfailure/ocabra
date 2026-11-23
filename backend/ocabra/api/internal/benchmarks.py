@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -140,6 +141,54 @@ def _attempt_payload(attempt) -> dict[str, object]:
     }
 
 
+def _test_progress_payload(run: BenchmarkRun) -> dict[str, object] | None:
+    """Read the bounded runner progress contract from the current attempt workspace."""
+    if not run.current_model:
+        return None
+    attempt = next(
+        (item for item in reversed(run.attempts) if item.model == run.current_model),
+        None,
+    )
+    if attempt is None:
+        return None
+    try:
+        root = Path(settings.benchmark_dir).resolve()
+        workspace = Path(attempt.workspace_path).resolve()
+        if not workspace.is_relative_to(root):
+            return None
+        path = workspace / "progress.json"
+        if not path.is_file() or path.stat().st_size > 4096:
+            return None
+        progress = json.loads(path.read_text(encoding="utf-8"))
+        completed = progress.get("completed")
+        total = progress.get("total")
+        unit = progress.get("unit")
+        stage = progress.get("stage")
+        if (
+            not isinstance(completed, int)
+            or isinstance(completed, bool)
+            or not isinstance(total, int)
+            or isinstance(total, bool)
+            or total <= 0
+            or completed < 0
+            or completed > total
+            or not isinstance(unit, str)
+            or not 0 < len(unit) <= 30
+            or not isinstance(stage, str)
+            or not 0 < len(stage) <= 40
+        ):
+            return None
+        return {
+            "completed": completed,
+            "total": total,
+            "unit": unit,
+            "stage": stage,
+            "updatedAt": datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat(),
+        }
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
 def _run_payload(run: BenchmarkRun, *, include_attempts: bool = True) -> dict[str, object]:
     return {
         "id": str(run.id),
@@ -156,6 +205,7 @@ def _run_payload(run: BenchmarkRun, *, include_attempts: bool = True) -> dict[st
         "pauseReason": run.pause_reason,
         "currentModelIndex": run.current_model_index,
         "currentModel": run.current_model,
+        "testProgress": _test_progress_payload(run) if include_attempts else None,
         "result": run.result,
         "contaminatedAttempts": run.contaminated_attempts,
         "error": run.error,

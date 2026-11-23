@@ -2221,6 +2221,13 @@ export interface BenchmarkRun {
   pauseReason: "manual" | "external_traffic" | null;
   currentModelIndex: number;
   currentModel: string | null;
+  testProgress: {
+    completed: number;
+    total: number;
+    unit: string;
+    stage: string;
+    updatedAt: string;
+  } | null;
   result: Record<string, Record<string, unknown>>;
   contaminatedAttempts: number;
   error: string | null;

@@ -62,6 +62,13 @@ La unidad de trabajo es `aplicación + suite + modelo`: los modelos se ejecutan
 secuencialmente para que una contaminación afecte solo al modelo en curso. La
 barra de progreso cuenta únicamente modelos aceptados; el historial de
 intentos explica cuáles se descartaron y si coincidieron con tráfico externo.
+Una segunda barra muestra los casos completados dentro del modelo actual en los
+runners que publican avance estructurado; durante preparación o en runners
+externos sin ese contrato se mantiene indeterminada. El tiempo restante de la
+prueba combina ese avance observado con el histórico del mismo perfil, y el
+tiempo total añade los modelos aún pendientes. Solo suma tramos efectivos de
+ejecución: el tiempo pausado y todo lo anterior al último intento contaminado
+quedan fuera.
 
 El ejecutor crea una identidad y una API key internas efímeras. Mientras corre
 observa las peticiones en vuelo de `ModelManager`; cualquier petición de otra
@@ -144,6 +151,8 @@ y `final` (83 × 3 pasadas).
 Las revisiones de BFCL e IFEval están fijadas a un commit, no a una rama
 móvil. Sus adaptadores viven en oCabra, guardan una respuesta tras cada caso y
 aceptan `--skip-done`; por tanto una pausa continúa por el primer caso pendiente.
+También escriben atómicamente el avance por casos en la ruta indicada por
+`OCABRA_BENCHMARK_PROGRESS_PATH`, incluida la fase de scoring.
 La primera ejecución crea entornos aislados con `uv` dentro del cache de
 benchmarks. BFCL instala el proyecto oficial completo y ese primer arranque es
 sensiblemente más lento; no modifica el entorno Python de la API.

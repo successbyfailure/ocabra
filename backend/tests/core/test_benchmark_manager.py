@@ -318,6 +318,41 @@ def test_run_payload_exposes_phase_and_reproducible_attempt_environment() -> Non
     assert payload["attempts"][0]["environment"] == environment
 
 
+def test_run_payload_reads_bounded_progress_from_current_workspace(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    now = datetime.now(UTC)
+    workspace = tmp_path / "attempt-1"
+    workspace.mkdir()
+    (workspace / "progress.json").write_text(
+        json.dumps({"completed": 17, "total": 50, "unit": "casos", "stage": "generating"})
+    )
+    monkeypatch.setattr("ocabra.api.internal.benchmarks.settings.benchmark_dir", str(tmp_path))
+    attempt = SimpleNamespace(
+        id=uuid.uuid4(), model="model", attempt_number=1, status="running",
+        workspace_path=str(workspace), environment={}, return_code=None,
+        external_requests=[], error=None, started_at=now, finished_at=None, result=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(), app="ifeval", suite="quick", revision="abc", models=["model"],
+        suite_args=[], status="running", phase="running", auto_pause=True,
+        schedule_id=None, is_baseline=False, pause_reason=None, current_model_index=0,
+        current_model="model", result={}, contaminated_attempts=0, error=None,
+        external_activity_at=None, created_at=now, started_at=now, finished_at=None,
+        attempts=[attempt],
+    )
+
+    payload = _run_payload(run)
+
+    assert payload["testProgress"] == {
+        "completed": 17,
+        "total": 50,
+        "unit": "casos",
+        "stage": "generating",
+        "updatedAt": payload["testProgress"]["updatedAt"],
+    }
+
+
 @pytest.mark.requires_db
 @pytest.mark.asyncio
 async def test_retry_keeps_completed_models_and_reuses_failed_checkpoint(tmp_path: Path) -> None:

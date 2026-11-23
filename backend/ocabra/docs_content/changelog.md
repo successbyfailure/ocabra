@@ -16,6 +16,25 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.131.0 — 2026-11-23
+
+### Nuevo
+
+- **Progreso interno y tiempo restante en benchmarks.** El seguimiento separa
+  los modelos aceptados de los casos completados en la prueba actual. IFEval y
+  BFCL informan cada caso y la fase de scoring; los demás runners muestran
+  actividad indeterminada hasta que adopten el mismo contrato.
+- **Estimación viva de finalización.** Cada ejecución muestra cuánto queda para
+  el modelo actual y para la cola completa, combinando el ritmo observado con
+  el histórico del mismo perfil. Las pausas y los intentos descartados por
+  contaminación no inflan la estimación.
+
+### API
+
+- `GET /ocabra/benchmarks/runs` y su detalle añaden `testProgress` con
+  `completed`, `total`, `unit`, `stage` y `updatedAt`, o `null` cuando el runner
+  no ofrece avance estructurado.
+
 ## 0.130.1 — 2026-11-23
 
 ### Arreglos

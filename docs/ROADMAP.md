@@ -232,7 +232,9 @@ Implementado:
   añade un ranking global explicable por modelo+backend, perfiles de pesos,
   cobertura mínima, cohortes de versión/GPU y frontera calidad-rendimiento. El
   lanzamiento estima duración y rango desde el histórico limpio, con escalado
-  por carga y desglose por modelo.
+  por carga y desglose por modelo. El seguimiento separa el avance total por
+  modelos del avance interno por casos de la prueba actual y estima el tiempo
+  restante de ambos sin contar pausas ni intentos contaminados.
   Uso y contrato en `docs/BENCHMARKS.md`.
 
 ---

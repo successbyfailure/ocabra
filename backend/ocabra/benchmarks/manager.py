@@ -547,7 +547,14 @@ class BenchmarkManager:
             command.extend(suite.resume_args)
         await self._set_phase(run_id, "running")
         started_at = datetime.now(UTC)
-        outcome = await self._run_process(run_id, command, source, log_path, detect_external=True)
+        outcome = await self._run_process(
+            run_id,
+            command,
+            source,
+            log_path,
+            detect_external=True,
+            progress_path=workspace / "progress.json",
+        )
         finished_at = datetime.now(UTC)
         await self._set_phase(run_id, "finalizing")
         # StatsMiddleware records at response completion. Give its short DB
@@ -590,6 +597,7 @@ class BenchmarkManager:
         log_path: Path,
         *,
         detect_external: bool,
+        progress_path: Path | None = None,
     ) -> ProcessOutcome:
         env = dict(os.environ)
         assert self._identity is not None
@@ -603,6 +611,8 @@ class BenchmarkManager:
         )
         if await self._run_app(run_id) == "corrala":
             env["CORRALA_BENCH_DATABASE_URL"] = await self._corrala_database_url()
+        if progress_path is not None:
+            env["OCABRA_BENCHMARK_PROGRESS_PATH"] = str(progress_path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         external: list[dict[str, object]] = []
         with log_path.open("a", encoding="utf-8") as log:

@@ -23,6 +23,12 @@ export interface BenchmarkTimeEstimate {
   models: ModelTimeEstimate[]
 }
 
+export interface BenchmarkRemainingEstimate {
+  currentSeconds: number | null
+  totalSeconds: number
+  confidence: EstimateConfidence
+}
+
 const FALLBACK_SECONDS: Record<string, number> = {
   "corrala/llm": 8 * 60,
   "bfcl/simple_python": 20 * 60,
@@ -229,6 +235,60 @@ export function estimateBenchmarkTime(
     confidence,
     historicalModels,
     models: estimates,
+  }
+}
+
+function usefulCurrentSeconds(run: BenchmarkRun, now: Date): number {
+  if (!run.currentModel) return 0
+  const attempts = run.attempts
+    .filter((attempt) => attempt.model === run.currentModel)
+    .sort((left, right) => left.attemptNumber - right.attemptNumber)
+  let chainStart = 0
+  attempts.forEach((attempt, index) => {
+    if (attempt.status === "contaminated") chainStart = index + 1
+  })
+  return attempts.slice(chainStart).reduce((sum, attempt) => {
+    const runningEnd = attempt.status === "running" && ["running", "pausing", "cancelling"].includes(run.status)
+      ? now.toISOString()
+      : attempt.finishedAt
+    return sum + (durationSeconds(attempt.startedAt, runningEnd) ?? 0)
+  }, 0)
+}
+
+export function estimateBenchmarkRemaining(
+  runs: BenchmarkRun[],
+  run: BenchmarkRun,
+  now = new Date(),
+): BenchmarkRemainingEstimate | null {
+  if (["completed", "failed", "cancelled"].includes(run.status) || run.models.length === 0) return null
+
+  const currentIndex = Math.min(run.currentModelIndex, run.models.length)
+  const pendingModels = run.models.slice(run.currentModel ? currentIndex + 1 : currentIndex)
+  const pending = estimateBenchmarkTime(runs, run.app, run.suite, run.suiteArgs, pendingModels)
+  let currentSeconds: number | null = null
+  let confidence: EstimateConfidence = pending?.confidence ?? "low"
+
+  if (run.currentModel) {
+    const historical = modelEstimate(runs, run.app, run.suite, run.suiteArgs, run.currentModel)
+    const elapsed = usefulCurrentSeconds(run, now)
+    let projected = historical.seconds
+    const progress = run.testProgress
+    if (progress && progress.completed > 0 && progress.total > 0 && elapsed > 0) {
+      const observedProjection = elapsed / Math.min(1, progress.completed / progress.total)
+      const observedWeight = Math.min(0.85, progress.completed / Math.min(progress.total, 10))
+      projected = historical.seconds * (1 - observedWeight) + observedProjection * observedWeight
+    }
+    currentSeconds = Math.max(0, projected - elapsed)
+    if (run.testProgress?.stage === "scoring" && currentSeconds < 30) currentSeconds = 30
+    confidence = historical.confidence
+  }
+
+  return {
+    currentSeconds,
+    totalSeconds: (currentSeconds ?? 0)
+      + (pending?.models.reduce((sum, item) => sum + item.seconds, 0) ?? 0)
+      + (run.currentModel ? 0 : pending?.setupSeconds ?? 0),
+    confidence,
   }
 }
 

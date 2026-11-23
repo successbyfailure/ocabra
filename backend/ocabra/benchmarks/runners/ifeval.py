@@ -29,6 +29,28 @@ def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     temporary.replace(path)
 
 
+def _write_progress(completed: int, total: int, stage: str) -> None:
+    raw_path = os.environ.get("OCABRA_BENCHMARK_PROGRESS_PATH")
+    if not raw_path:
+        return
+    path = Path(raw_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "completed": completed,
+                "total": total,
+                "unit": "casos",
+                "stage": stage,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
 def _request(prompt: str, model: str) -> tuple[str, float, dict[str, int]]:
     base_url = os.environ["OPENAI_COMPATIBLE_URL"].rstrip("/")
     endpoint = f"{base_url}/v1/chat/completions"
@@ -116,6 +138,7 @@ def main() -> int:
             row["prompt"]: row
             for row in (json.loads(line) for line in responses_path.read_text().splitlines() if line)
         }
+    _write_progress(len(completed), len(inputs), "generating")
     for index, item in enumerate(inputs, 1):
         prompt = item["prompt"]
         if prompt in completed:
@@ -128,6 +151,7 @@ def main() -> int:
             **usage,
         }
         _write_jsonl(responses_path, [completed[row["prompt"]] for row in inputs if row["prompt"] in completed])
+        _write_progress(len(completed), len(inputs), "generating")
         print(f"IFEval {index}/{len(inputs)}", flush=True)
 
     uv = shutil.which("uv")
@@ -137,6 +161,7 @@ def main() -> int:
     nltk_data = cache_root / "nltk_data"
     nltk_data.mkdir(parents=True, exist_ok=True)
     scorer_env = {**os.environ, "NLTK_DATA": str(nltk_data)}
+    _write_progress(len(completed), len(inputs), "scoring")
     subprocess.run(
         [
             *_uv_python(uv),
@@ -184,6 +209,7 @@ def main() -> int:
         },
     }
     (output / "results.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    _write_progress(len(inputs), len(inputs), "completed")
     return 0
 
 

@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,6 +60,69 @@ def _number(value: str | None) -> float | None:
         return None
 
 
+def _write_progress(completed: int, total: int, stage: str) -> None:
+    raw_path = os.environ.get("OCABRA_BENCHMARK_PROGRESS_PATH")
+    if not raw_path or total <= 0:
+        return
+    path = Path(raw_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "completed": min(completed, total),
+                "total": total,
+                "unit": "casos",
+                "stage": stage,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _line_count(path: Path) -> int:
+    try:
+        with path.open(encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return 0
+
+
+def _expanded_categories(
+    categories: list[str], collection_mapping: dict[str, list[str]],
+) -> list[str]:
+    expanded: list[str] = []
+    for category in categories:
+        for item in collection_mapping.get(category, [category]):
+            if item not in expanded:
+                expanded.append(item)
+    return expanded
+
+
+def _watch_generation_progress(
+    project: Path,
+    result_root: Path,
+    categories: list[str],
+    version_prefix: str,
+    stop: threading.Event,
+) -> None:
+    total = sum(
+        _line_count(project / "bfcl_eval" / "data" / f"{version_prefix}_{category}.json")
+        for category in categories
+    )
+    while True:
+        completed = sum(
+            _line_count(path)
+            for category in categories
+            for path in result_root.rglob(f"{version_prefix}_{category}_result.json")
+        )
+        _write_progress(completed, total, "generating")
+        if stop.wait(1):
+            return
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-root", type=Path, required=True)
@@ -75,6 +139,10 @@ def main() -> int:
     os.environ["OPENAI_API_KEY"] = os.environ["OPENAI_COMPATIBLE_KEY"]
 
     from bfcl_eval._llm_response_generation import main as generate  # noqa: PLC0415
+    from bfcl_eval.constants.category_mapping import (  # noqa: PLC0415
+        TEST_COLLECTION_MAPPING,
+        VERSION_PREFIX,
+    )
     from bfcl_eval.constants.model_config import MODEL_CONFIG_MAPPING, ModelConfig  # noqa: PLC0415
     from bfcl_eval.eval_checker.eval_runner import main as evaluate  # noqa: PLC0415
     from bfcl_eval.model_handler.api_inference.openai_completion import (  # noqa: PLC0415
@@ -94,15 +162,32 @@ def main() -> int:
     result_dir = f"ocabra_bfcl_raw_{_safe_model(model)}"
     score_dir = f"ocabra_bfcl_scores_{_safe_model(model)}"
     categories = [item.strip() for item in args.categories.split(",") if item.strip()]
-    generate(
-        SimpleNamespace(
-            model=[model], test_category=categories, temperature=0.001,
-            include_input_log=False, exclude_state_log=False, num_gpus=1,
-            num_threads=1, gpu_memory_utilization=0.9, backend="sglang",
-            skip_server_setup=True, local_model_path=None, result_dir=result_dir,
-            allow_overwrite=False, run_ids=False,
-        )
+    expanded = _expanded_categories(categories, TEST_COLLECTION_MAPPING)
+    total = sum(
+        _line_count(project / "bfcl_eval" / "data" / f"{VERSION_PREFIX}_{category}.json")
+        for category in expanded
     )
+    stop = threading.Event()
+    watcher = threading.Thread(
+        target=_watch_generation_progress,
+        args=(project, project / result_dir, expanded, VERSION_PREFIX, stop),
+        daemon=True,
+    )
+    watcher.start()
+    try:
+        generate(
+            SimpleNamespace(
+                model=[model], test_category=categories, temperature=0.001,
+                include_input_log=False, exclude_state_log=False, num_gpus=1,
+                num_threads=1, gpu_memory_utilization=0.9, backend="sglang",
+                skip_server_setup=True, local_model_path=None, result_dir=result_dir,
+                allow_overwrite=False, run_ids=False,
+            )
+        )
+    finally:
+        stop.set()
+        watcher.join(timeout=2)
+    _write_progress(total, total, "scoring")
     evaluate([model], categories, result_dir, score_dir, partial_eval=False)
 
     score_path = project / score_dir / "data_non_live.csv"
@@ -134,6 +219,7 @@ def main() -> int:
         "metrics": metrics,
     }
     (output / "results.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    _write_progress(total, total, "completed")
     return 0
 
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+  estimateBenchmarkRemaining,
   estimateBenchmarkTime,
   formatEstimatedDuration,
 } from "@/pages/benchmarks/benchmarkEstimate"
@@ -31,6 +32,7 @@ function completedRun(options: {
     pauseReason: null,
     currentModelIndex: 1,
     currentModel: null,
+    testProgress: null,
     result: { [model]: { status: "completed" } },
     contaminatedAttempts: 0,
     error: null,
@@ -117,6 +119,49 @@ describe("benchmark time estimate", () => {
     const estimate = estimateBenchmarkTime([run], "ifeval", "quick", [], ["model-a"])
 
     expect(estimate?.models[0]).toMatchObject({ source: "model_history", seconds: 600 })
+  })
+
+  it("estimates the current test and complete queue from live case progress", () => {
+    const history = completedRun({ app: "ifeval", suite: "quick", model: "model-a", attemptSeconds: 100 })
+    const active = completedRun({ app: "ifeval", suite: "quick", model: "model-a", attemptSeconds: 100 })
+    active.id = "active"
+    active.status = "running"
+    active.phase = "running"
+    active.models = ["model-a", "model-b"]
+    active.currentModelIndex = 0
+    active.currentModel = "model-a"
+    active.finishedAt = null
+    active.testProgress = { completed: 5, total: 10, unit: "casos", stage: "generating", updatedAt: "2026-11-23T00:00:50Z" }
+    active.attempts = [{
+      ...active.attempts[0], status: "running", startedAt: "2026-11-23T00:00:00Z", finishedAt: null,
+    }]
+
+    const remaining = estimateBenchmarkRemaining(
+      [history, active], active, new Date("2026-11-23T00:00:50Z"),
+    )
+
+    expect(remaining?.currentSeconds).toBeCloseTo(50)
+    expect(remaining?.totalSeconds).toBeCloseTo(150)
+  })
+
+  it("does not count time spent paused as useful benchmark time", () => {
+    const history = completedRun({ app: "ifeval", suite: "quick", attemptSeconds: 100 })
+    const paused = completedRun({ app: "ifeval", suite: "quick", attemptSeconds: 100 })
+    paused.status = "paused"
+    paused.phase = "paused"
+    paused.currentModelIndex = 0
+    paused.currentModel = "model-a"
+    paused.finishedAt = null
+    paused.testProgress = { completed: 5, total: 10, unit: "casos", stage: "generating", updatedAt: "2026-11-23T00:00:50Z" }
+    paused.attempts = [{
+      ...paused.attempts[0], status: "interrupted", startedAt: "2026-11-23T00:00:00Z", finishedAt: "2026-11-23T00:00:50Z",
+    }]
+
+    const remaining = estimateBenchmarkRemaining(
+      [history, paused], paused, new Date("2026-11-23T01:00:00Z"),
+    )
+
+    expect(remaining?.currentSeconds).toBeCloseTo(50)
   })
 
   it("formats useful human durations", () => {

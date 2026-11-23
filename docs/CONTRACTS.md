@@ -537,7 +537,10 @@ fallidas y continúa en el modelo actual reutilizando su checkpoint. Los estados
 `queued|running|pausing|paused|cancelling|completed|failed|cancelled`.
 `phase` detalla el trabajo dentro del estado (`checkout|preparing|running|finalizing`
 y las fases terminales o de espera) para no presentar una preparación larga como
-si el proceso estuviera bloqueado.
+si el proceso estuviera bloqueado. El payload de detalle incluye además
+`testProgress` cuando el runner publica avance estructurado: `completed`, `total`,
+`unit`, `stage` y `updatedAt`. Es un snapshot efímero del intento actual, no una
+métrica oficial del resultado.
 
 `BenchmarkManager` ejecuta una sola unidad `app + suite + model` a la vez. Usa
 un usuario/API key internos para distinguir sus peticiones en
@@ -562,6 +565,11 @@ con benchmarks públicos fijados a revisión (BFCL e IFEval). Estos últimos usa
 un checkout parcial y un `local_runner` de oCabra para adaptar la API OpenAI y
 normalizar la salida, pero ejecutan el dataset y el scorer de la revisión
 oficial. Cada adaptador escribe checkpoint por caso antes de atender una pausa.
+El manager les pasa `OCABRA_BENCHMARK_PROGRESS_PATH`; el runner actualiza esa
+ruta de forma atómica con un JSON acotado
+`{"completed": N, "total": M, "unit": "casos", "stage": "generating|scoring|completed"}`.
+IFEval y BFCL implementan este contrato; los runners externos que todavía no lo
+hacen se presentan como progreso indeterminado.
 
 Workspaces y logs viven bajo `benchmark_dir` (`/data/benchmarks` por defecto,
 volumen persistente). Corrala usa una base separada cuyo nombre contiene

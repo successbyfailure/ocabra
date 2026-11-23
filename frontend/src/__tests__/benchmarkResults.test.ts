@@ -117,7 +117,7 @@ describe("benchmark result adapters", () => {
       id: "run-1", app: "ifeval", suite: "quick", revision: "abc", models: ["qwen"],
       suiteArgs: [], status: "completed", phase: "completed", autoPause: true,
       scheduleId: null, isBaseline: false,
-      pauseReason: null, currentModelIndex: 1, currentModel: null,
+      pauseReason: null, currentModelIndex: 1, currentModel: null, testProgress: null,
       result: { qwen: { score: 1 } }, contaminatedAttempts: 0, error: null,
       externalActivityAt: null, createdAt: "2026-01-01T00:00:00Z",
       startedAt: "2026-01-01T00:00:01Z", finishedAt: "2026-01-01T00:01:00Z",
