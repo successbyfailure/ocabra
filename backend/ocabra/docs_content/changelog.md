@@ -16,6 +16,17 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.132.0 — 2026-11-24
+
+### Nuevo
+
+- **Retención de estadísticas (opcional).** Las tablas de estadísticas
+  (`gpu_stats`, `server_stats`, `request_stats`) ya pueden podarse
+  automáticamente por antigüedad. Viene **desactivada**: no se borra nada hasta
+  que la actives en Ajustes. Al activarla, por defecto conserva `request_stats`
+  365 días y las muestras de GPU/servidor 90 días (configurable por tabla;
+  0 = conservar siempre).
+
 ## 0.131.0 — 2026-11-23
 
 ### Nuevo
