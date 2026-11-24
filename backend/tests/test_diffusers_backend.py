@@ -66,10 +66,14 @@ async def test_load_and_unload_with_subprocess_mock(tmp_path):
     backend = DiffusersBackend()
     fake_process = DummyProcess()
 
+    async def _stop(process, **_kwargs):
+        process.terminate()
+
     with (
         patch("ocabra.backends.diffusers_backend.settings.models_dir", str(models_dir)),
         patch.object(backend, "_assign_port", new=AsyncMock(return_value=18077)),
-        patch.object(backend, "_wait_until_healthy", new=AsyncMock(return_value=None)),
+        patch("ocabra.backends.diffusers_backend.wait_until_healthy", new=AsyncMock(return_value=None)),
+        patch("ocabra.backends.diffusers_backend.stop_process", new=_stop),
         patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)) as spawn,
     ):
         info = await backend.load(model_id, [1])

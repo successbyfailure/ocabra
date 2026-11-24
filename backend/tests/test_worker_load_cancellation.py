@@ -66,6 +66,12 @@ async def _hang(**_kwargs) -> None:
     await asyncio.sleep(3600)
 
 
+async def _stop(process, **_kwargs) -> None:
+    """Stand-in for ``_process.stop_process`` that marks the fake terminated
+    instead of signalling a real process group (REF-02)."""
+    process.terminate()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("module_name", "class_name"), BACKENDS)
 async def test_cancelling_the_load_kills_the_worker(module_name, class_name, tmp_path, monkeypatch):
@@ -73,7 +79,8 @@ async def test_cancelling_the_load_kills_the_worker(module_name, class_name, tmp
     process = _Process()
 
     with (
-        patch.object(backend, "_wait_until_healthy", new=_hang),
+        patch(f"{module_name}.wait_until_healthy", new=_hang),
+        patch(f"{module_name}.stop_process", new=_stop),
         patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)),
     ):
         task = asyncio.create_task(backend.load("some-model", [0], port=18555))
@@ -99,7 +106,8 @@ async def test_unload_during_the_load_finds_the_worker(module_name, class_name, 
     process = _Process()
 
     with (
-        patch.object(backend, "_wait_until_healthy", new=_hang),
+        patch(f"{module_name}.wait_until_healthy", new=_hang),
+        patch(f"{module_name}.stop_process", new=_stop),
         patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)),
     ):
         task = asyncio.create_task(backend.load("some-model", [0], port=18556))

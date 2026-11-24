@@ -28,7 +28,6 @@ import asyncio
 import json
 import os
 import sys
-import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -37,6 +36,12 @@ import httpx
 import structlog
 
 from ocabra.backends._health_http import health_client
+from ocabra.backends._process import (
+    health_check_port,
+    open_worker_log,
+    stop_process,
+    wait_until_healthy,
+)
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -187,21 +192,26 @@ class ComfyUIVideoBackend(BackendInterface):
         for arg in cfg.get("comfy_args") or []:
             cmd.append(f"--comfy-arg={arg}")
 
-        log_path = f"/tmp/comfyui_video_worker_{model_id.replace('/', '_')}.log"
+        log_handle, _ = open_worker_log(f"comfyui_video_worker_{model_id}")
+        # start_new_session so stop_process can killpg the worker's child
+        # ComfyUI instead of orphaning it.
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=open(log_path, "ab"),  # noqa: ASYNC230,SIM115 — fd de vida larga para el hijo
+            stderr=log_handle,
             env=env,
+            start_new_session=True,
         )
         self._processes[model_id] = process
         self._comfy_ports[model_id] = comfy_port
         try:
-            await self._wait_until_healthy(port=port, process=process, timeout_s=300)
+            await wait_until_healthy(
+                port=port, process=process, timeout_s=300, label="ComfyUI video"
+            )
         except BaseException:
             if self._processes.get(model_id) is process:
                 self._processes.pop(model_id, None)
-            await self._terminate_process(process)
+            await stop_process(process)
             self._release_aux_port(self._comfy_ports.pop(model_id, 0))
             raise
 
@@ -232,7 +242,7 @@ class ComfyUIVideoBackend(BackendInterface):
         self._configs.pop(model_id, None)
         port = self._comfy_ports.pop(model_id, 0)
         if process is not None:
-            await self._terminate_process(process)
+            await stop_process(process)
         self._release_aux_port(port)
         logger.info("comfyui_video_worker_unloaded", model_id=model_id)
 
@@ -240,7 +250,7 @@ class ComfyUIVideoBackend(BackendInterface):
         worker = self._workers.get(model_id)
         if worker is None:
             return False
-        return await self._health_check_port(worker.port)
+        return await health_check_port(worker.port)
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         return BackendCapabilities(video_generation=True, streaming=False)
@@ -288,34 +298,3 @@ class ComfyUIVideoBackend(BackendInterface):
             return r.json() if r.status_code == 200 else None
         except Exception:  # noqa: BLE001 — informativo
             return None
-
-    # ── Internos ────────────────────────────────────────────────────────
-    async def _wait_until_healthy(
-        self, *, port: int, process: asyncio.subprocess.Process, timeout_s: int
-    ) -> None:
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if process.returncode is not None:
-                raise RuntimeError(f"ComfyUI video worker exited with code {process.returncode}")
-            if await self._health_check_port(port):
-                return
-            await asyncio.sleep(1)
-        raise TimeoutError(f"ComfyUI video worker health check timed out after {timeout_s}s")
-
-    async def _health_check_port(self, port: int) -> bool:
-        try:
-            client = health_client()
-            response = await client.get(f"http://127.0.0.1:{port}/health", timeout=2.0)
-            return response.status_code == 200 and bool(response.json().get("ok", False))
-        except Exception:  # noqa: BLE001
-            return False
-
-    async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=30)
-        except TimeoutError:
-            process.kill()
-            await process.wait()

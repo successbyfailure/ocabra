@@ -17,7 +17,6 @@ import json
 import math
 import os
 import sys
-import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -26,7 +25,12 @@ import httpx
 import structlog
 
 from ocabra.backends._fs import total_file_size
-from ocabra.backends._health_http import health_client
+from ocabra.backends._process import (
+    health_check_port,
+    open_worker_log,
+    stop_process,
+    wait_until_healthy,
+)
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -135,11 +139,13 @@ class MageFlowBackend(BackendInterface):
             str(port),
         ]
 
+        log_handle, _ = open_worker_log(f"mageflow_worker_{model_id}")
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=open(f"/tmp/mageflow_worker_{model_id.replace('/', '_')}.log", "ab"),  # noqa: ASYNC230 — fd real y de vida larga que consume create_subprocess_exec; no admite envoltorio async
+            stderr=log_handle,
             env=env,
+            start_new_session=True,
         )
 
         # Registered before the health wait so unload() can find it while it is
@@ -149,11 +155,13 @@ class MageFlowBackend(BackendInterface):
         self._processes[model_id] = process
         try:
             # Mage-Flow load is heavy (~70s: 4B DiT + Qwen3-VL text encoder + VAE).
-            await self._wait_until_healthy(port=port, process=process, timeout_s=300)
+            await wait_until_healthy(
+                port=port, process=process, timeout_s=300, label="Mage-Flow"
+            )
         except BaseException:
             if self._processes.get(model_id) is process:
                 self._processes.pop(model_id, None)
-            await self._terminate_process(process)
+            await stop_process(process)
             raise
 
         vram_estimate = await self.get_vram_estimate_mb(model_id)
@@ -181,14 +189,14 @@ class MageFlowBackend(BackendInterface):
         self._workers.pop(model_id, None)
         if process is None:
             return
-        await self._terminate_process(process)
+        await stop_process(process)
         logger.info("mageflow_worker_unloaded", model_id=model_id)
 
     async def health_check(self, model_id: str) -> bool:
         worker = self._workers.get(model_id)
         if worker is None:
             return False
-        return await self._health_check_port(worker.port)
+        return await health_check_port(worker.port)
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         return BackendCapabilities(image_generation=True, streaming=False)
@@ -218,38 +226,6 @@ class MageFlowBackend(BackendInterface):
 
     async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
         raise RuntimeError("Mage-Flow backend does not support streaming")
-
-    async def _wait_until_healthy(
-        self, *, port: int, process: asyncio.subprocess.Process, timeout_s: int
-    ) -> None:
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if process.returncode is not None:
-                raise RuntimeError(f"Mage-Flow worker exited with code {process.returncode}")
-            if await self._health_check_port(port):
-                return
-            await asyncio.sleep(1)
-        raise TimeoutError(f"Mage-Flow worker health check timed out after {timeout_s}s")
-
-    async def _health_check_port(self, port: int) -> bool:
-        try:
-            client = health_client()
-            response = await client.get(f"http://127.0.0.1:{port}/health", timeout=2.0)
-            if response.status_code != 200:
-                return False
-            return bool(response.json().get("ok", False))
-        except Exception:
-            return False
-
-    async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=30)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
 
     def _worker_script_path(self) -> Path:
         repo_root = Path(__file__).resolve().parents[2]

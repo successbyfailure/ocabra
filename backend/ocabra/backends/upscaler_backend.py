@@ -11,7 +11,6 @@ import asyncio
 import json
 import os
 import sys
-import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -19,7 +18,12 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends._health_http import health_client
+from ocabra.backends._process import (
+    health_check_port,
+    open_worker_log,
+    stop_process,
+    wait_until_healthy,
+)
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -126,11 +130,13 @@ class UpscalerBackend(BackendInterface):
             "--port", str(port),
         ]
 
+        log_handle, _ = open_worker_log(f"upscaler_worker_{model_id}")
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=open(f"/tmp/upscaler_worker_{model_id.replace('/', '_')}.log", "ab"),  # noqa: ASYNC230 — fd real y de vida larga que consume create_subprocess_exec; no admite envoltorio async
+            stderr=log_handle,
             env=env,
+            start_new_session=True,
         )
 
         # Registered before the health wait so unload() can find it while it is
@@ -139,11 +145,13 @@ class UpscalerBackend(BackendInterface):
         # loading the model on the GPU with nobody tracking it.
         self._processes[model_id] = process
         try:
-            await self._wait_until_healthy(port=port, process=process, timeout_s=120)
+            await wait_until_healthy(
+                port=port, process=process, timeout_s=120, label="Upscaler"
+            )
         except BaseException:
             if self._processes.get(model_id) is process:
                 self._processes.pop(model_id, None)
-            await self._terminate_process(process)
+            await stop_process(process)
             raise
 
         info = WorkerInfo(
@@ -167,14 +175,14 @@ class UpscalerBackend(BackendInterface):
         self._workers.pop(model_id, None)
         if process is None:
             return
-        await self._terminate_process(process)
+        await stop_process(process)
         logger.info("upscaler_worker_unloaded", model_id=model_id)
 
     async def health_check(self, model_id: str) -> bool:
         worker = self._workers.get(model_id)
         if worker is None:
             return False
-        return await self._health_check_port(worker.port)
+        return await health_check_port(worker.port)
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         return BackendCapabilities(video_upscaling=True, image_upscaling=True, streaming=False)
@@ -250,35 +258,3 @@ class UpscalerBackend(BackendInterface):
             }
             media_type = response.headers.get("content-type", "image/png")
             return response.content, media_type, stats
-
-    async def _wait_until_healthy(
-        self, *, port: int, process: asyncio.subprocess.Process, timeout_s: int
-    ) -> None:
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if process.returncode is not None:
-                raise RuntimeError(f"Upscaler worker exited with code {process.returncode}")
-            if await self._health_check_port(port):
-                return
-            await asyncio.sleep(1)
-        raise TimeoutError(f"Upscaler worker health check timed out after {timeout_s}s")
-
-    async def _health_check_port(self, port: int) -> bool:
-        try:
-            client = health_client()
-            response = await client.get(f"http://127.0.0.1:{port}/health", timeout=2.0)
-            if response.status_code != 200:
-                return False
-            return bool(response.json().get("ok", False))
-        except Exception:
-            return False
-
-    async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=30)
-        except TimeoutError:
-            process.kill()
-            await process.wait()

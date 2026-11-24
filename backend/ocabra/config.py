@@ -212,6 +212,10 @@ class Settings(BaseSettings):
     default_gpu_index: int = 1
     worker_port_range_start: int = 18000
     worker_port_range_end: int = 19000
+    # Persistent directory for backend worker logs (one file per worker). Lives
+    # on the data volume so logs survive a container recreate; backends fall
+    # back to /tmp with a warning when this path can't be created/written.
+    worker_log_dir: str = "/data/logs/workers"
     # Raised from 0.85 → 0.90: gives ~1.2 GB extra headroom for KV cache on
     # a 24 GB card without risking OOM, and matches vLLM 0.28+ recommended
     # defaults for AWQ INT4 weights.

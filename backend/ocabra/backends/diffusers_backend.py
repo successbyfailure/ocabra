@@ -11,7 +11,12 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.backends._health_http import health_client
+from ocabra.backends._process import (
+    health_check_port,
+    open_worker_log,
+    stop_process,
+    wait_until_healthy,
+)
 from ocabra.backends.base import (
     BackendCapabilities,
     BackendInstallSpec,
@@ -210,16 +215,16 @@ class DiffusersBackend(BackendInterface):
             str(port),
         ]
 
+        # stderr to a persistent file so worker crashes (OOM, missing deps, …)
+        # that would otherwise surface as opaque 500s can be diagnosed; appends
+        # across reloads instead of truncating like the old /tmp path did.
+        log_handle, _ = open_worker_log(f"diffusers_worker_{model_id}")
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            # stderr to file so we can diagnose worker crashes (OOM, missing
-            # deps, etc.) that would otherwise show up as opaque 500s. Keeping
-            # this on disk is fine — file is overwritten on each (re)load.
-            stderr=open(  # noqa: ASYNC230 — fd real y de vida larga que consume create_subprocess_exec; no admite envoltorio async
-                f"/tmp/diffusers_worker_{model_id.replace('/', '_')}.log", "wb"
-            ),
+            stderr=log_handle,
             env=env,
+            start_new_session=True,
         )
 
         # Registered before the health wait so unload() can find it while it is
@@ -232,11 +237,13 @@ class DiffusersBackend(BackendInterface):
             # family with GGUF Q5_K_M + NF4 loads sequentially and can take
             # 3-5 min on the first cold read (weights come from ZFS, then
             # bitsandbytes converts NF4 blocks on GPU). Give it 600s.
-            await self._wait_until_healthy(port=port, process=process, timeout_s=600)
+            await wait_until_healthy(
+                port=port, process=process, timeout_s=600, label="Diffusers"
+            )
         except BaseException:
             if self._processes.get(model_id) is process:
                 self._processes.pop(model_id, None)
-            await self._terminate_process(process)
+            await stop_process(process)
             raise
 
         vram_estimate = await self.get_vram_estimate_mb(model_id, extra_config=extra_config)
@@ -268,14 +275,14 @@ class DiffusersBackend(BackendInterface):
         if process is None:
             return
 
-        await self._terminate_process(process)
+        await stop_process(process)
         logger.info("diffusers_worker_unloaded", model_id=model_id)
 
     async def health_check(self, model_id: str) -> bool:
         worker = self._workers.get(model_id)
         if worker is None:
             return False
-        return await self._health_check_port(worker.port)
+        return await health_check_port(worker.port)
 
     async def get_capabilities(self, model_id: str) -> BackendCapabilities:
         # Query the worker's /info so we can flag ``image_editing`` accurately:
@@ -397,46 +404,6 @@ class DiffusersBackend(BackendInterface):
 
     async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
         raise RuntimeError("Diffusers backend does not support streaming")
-
-    async def _wait_until_healthy(
-        self,
-        *,
-        port: int,
-        process: asyncio.subprocess.Process,
-        timeout_s: int,
-    ) -> None:
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if process.returncode is not None:
-                raise RuntimeError(f"Diffusers worker exited with code {process.returncode}")
-            if await self._health_check_port(port):
-                return
-            await asyncio.sleep(1)
-
-        raise TimeoutError(f"Diffusers worker health check timed out after {timeout_s}s")
-
-    async def _health_check_port(self, port: int) -> bool:
-        try:
-            client = health_client()
-            response = await client.get(f"http://127.0.0.1:{port}/health", timeout=2.0)
-            if response.status_code != 200:
-                return False
-            data = response.json()
-            return bool(data.get("ok", False))
-        except Exception:
-            return False
-
-    async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=30)
-            return
-        except TimeoutError:
-            process.kill()
-            await process.wait()
 
     async def _assign_port(self) -> int:
         raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")
