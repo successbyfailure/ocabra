@@ -22,11 +22,11 @@ from ocabra.api.openai._deps import (
     merge_profile_defaults,
     read_json_object,
     resolve_profile,
-    to_backend_body,
 )
 from ocabra.api.openai._schemas import OllamaEmbedRequest, validate_body
 from ocabra.api.openai.embeddings import _truncate_and_renormalize
 from ocabra.core.federation import note_federation_fallback
+from ocabra.core.inference.pipeline import RequestDescriptor, run_request
 from ocabra.core.privacy import preview as privacy_preview
 from ocabra.core.request_telemetry import mark_prefill_since
 
@@ -37,6 +37,23 @@ from .chat import _native_backend_model_name
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+# REF-01 fase C: el despacho no nativo de /api/embed delega en el motor de flujo
+# único. Igual que /v1/embeddings (fase A): sin reja de reparto justo (conserva
+# su concurrencia alta, ver ``project_embeddings_inflight_cap``). A diferencia de
+# /v1, NO honra la desconexión del cliente, para conservar el comportamiento
+# actual de la capa Ollama (matriz /api/embed: Fair=N, Desconexión=N). La
+# federación y la resolución (con fallback legacy y la rama nativa del daemon
+# Ollama) se hacen inline en el handler, así que ``federate=None`` y se pasa el
+# par ya resuelto por ``preresolved``.
+_OLLAMA_EMBED_DESCRIPTOR = RequestDescriptor(
+    request_kind="embeddings",
+    capability="embeddings",
+    dispatch_path="/v1/embeddings",
+    federates=False,
+    honors_disconnect=False,
+    applies_fair_share=False,
+)
 
 
 async def _run_embeddings(
@@ -177,8 +194,11 @@ async def _run_embeddings(
     raw_input = merged_body.get("input") or merged_body.get("prompt") or ""
     forward_started = time.monotonic()
 
-    try:
-        if state.backend_type == "ollama":
+    if state.backend_type == "ollama":
+        # Rama nativa: despacho al daemon Ollama (``/api/embed`` o el legacy
+        # ``/api/embeddings`` por input). Se queda inline —el motor despacharía
+        # a /v1/embeddings, otra ruta— con su propio mapeo de errores.
+        try:
             result, vectors = await _embed_with_ollama(
                 worker_pool,
                 worker_key,
@@ -187,16 +207,28 @@ async def _run_embeddings(
                 raw_input,
                 legacy=legacy,
             )
-        else:
-            payload = {"model": state.backend_model_id, "input": raw_input}
-            if dimensions is not None:
-                payload["dimensions"] = dimensions
-            result = await worker_pool.forward_request(
-                worker_key, "/v1/embeddings", to_backend_body(state, payload)
-            )
-            vectors = [item.get("embedding", []) for item in result.get("data", [])]
-    except dispatch_error_types() as exc:
-        raise_dispatch_error(exc)
+        except dispatch_error_types() as exc:
+            raise_dispatch_error(exc)
+    else:
+        # Despacho no nativo por el motor de flujo único (REF-01 fase C): el
+        # motor aplica ``to_backend_body`` y mapea los errores de worker igual
+        # que /v1. El ``profile`` puede ser ``None`` en la vía legacy.
+        payload: dict = {"model": state.backend_model_id, "input": raw_input}
+        if dimensions is not None:
+            payload["dimensions"] = dimensions
+        outcome = await run_request(
+            request,
+            descriptor=_OLLAMA_EMBED_DESCRIPTOR,
+            body=payload,
+            user=user,
+            model_manager=model_manager,
+            profile_registry=profile_registry,
+            worker_pool=worker_pool,
+            federate=None,
+            preresolved=(profile, state),
+        )
+        result = outcome.result
+        vectors = [item.get("embedding", []) for item in result.get("data", [])]
 
     # Un embedding es todo prefill: con este tiempo el middleware de stats
     # calcula los tokens/s que el worker no devuelve.

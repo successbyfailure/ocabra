@@ -260,6 +260,7 @@ async def run_request(
     on_dispatch_error: OnDispatchError | None = None,
     dispatch: DispatchStep | None = None,
     router_capability: Any = _UNSET,
+    preresolved: tuple[Any, Any] | None = None,
 ) -> Response | RequestOutcome:
     """Ejecuta el flujo único de petición, paso a paso, en orden.
 
@@ -294,30 +295,46 @@ async def run_request(
     workers nativos multipart/binarios que no caben en ``forward_request``) y
     devuelve su ``Response`` directamente, sin tocar ``to_backend_body`` ni la
     admisión. ``None`` = camino de despacho estándar.
+
+    ``preresolved``: ``(profile, state)`` ya resuelto por el handler. La capa
+    Ollama necesita el ``state`` por adelantado para ramificar a su passthrough
+    nativo (``/api/chat`` del daemon) o a su fallback legacy ANTES del despacho,
+    algo que el paso de resolución del motor no puede decidir. Cuando se pasa,
+    el motor se salta federación (ya hecha inline) y resolución, y trata ``body``
+    como el cuerpo OpenAI ya fusionado (no se vuelven a aplicar los defaults del
+    perfil). ``profile`` puede ser ``None`` en la vía legacy (sin perfil): en ese
+    caso las cabeceras de estado usan ``worker_key`` como base.
     """
     model_id = str(body.get("model") or "")
     effective_router_capability = (
         router_capability if router_capability is not _UNSET else descriptor.router_capability
     )
 
-    # Paso federate_or_local: si un peer tiene el modelo caliente, sirve allí.
-    if descriptor.federates and federate is not None:
-        fed_resp = await federate(model_id, body)
-        if fed_resp is not None:
-            return fed_resp
+    if preresolved is not None:
+        # El handler ya federó (inline) y resolvió: usar su par (profile, state)
+        # y su cuerpo ya fusionado tal cual.
+        profile, state = preresolved
+        merged_body = body
+    else:
+        # Paso federate_or_local: si un peer tiene el modelo caliente, sirve allí.
+        if descriptor.federates and federate is not None:
+            fed_resp = await federate(model_id, body)
+            if fed_resp is not None:
+                return fed_resp
 
-    # Pasos authorize + route + plan_runtime + ensure_loaded.
-    router_resolver = getattr(request.app.state, "router_resolver", None)
-    profile, state = await resolve_profile(
-        model_id,
-        model_manager,
-        profile_registry,
-        user=user,
-        request_body=(body if descriptor.routes_request_body else None),
-        router_resolver=router_resolver,
-        request_state=request.state,
-        required_capability=effective_router_capability,
-    )
+        # Pasos authorize + route + plan_runtime + ensure_loaded.
+        router_resolver = getattr(request.app.state, "router_resolver", None)
+        profile, state = await resolve_profile(
+            model_id,
+            model_manager,
+            profile_registry,
+            user=user,
+            request_body=(body if descriptor.routes_request_body else None),
+            router_resolver=router_resolver,
+            request_state=request.state,
+            required_capability=effective_router_capability,
+        )
+        merged_body = merge_profile_defaults(profile, body)
 
     # Paso capability-check (tras la resolución, como hoy). La etiqueta humana
     # del mensaje se conserva: chat dice "chat completions", no "chat".
@@ -325,7 +342,6 @@ async def run_request(
         state, descriptor.capability, descriptor.capability_label or descriptor.capability
     )
 
-    merged_body = merge_profile_defaults(profile, body)
     # El worker que ``resolve_profile`` cargó: su clave incluye el preset de
     # runtime, que ``compute_worker_key(base, load_overrides)`` no ve.
     worker_key = state.model_id
@@ -427,8 +443,11 @@ async def run_request(
                 return rerouted
         raise_inference_dispatch_error(exc)
 
+    # ``profile`` puede ser ``None`` en la vía legacy de Ollama (``preresolved``
+    # sin perfil): se usa el ``worker_key`` como base del estado.
+    base_model_id = profile.base_model_id if profile is not None else worker_key
     response_headers = await ocabra_response_headers(
-        request, model_manager, worker_key, profile.base_model_id
+        request, model_manager, worker_key, base_model_id
     )
     return RequestOutcome(
         result=result,
