@@ -19,18 +19,39 @@ import base64
 import io
 import math
 import os
-import re
 import struct
-import subprocess
+import sys
 import tempfile
 import wave
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _audio_common import (  # noqa: E402
+    FORMAT_CONTENT_TYPES,
+)
+from _audio_common import (
+    encode_audio as _encode_audio,
+)
+from _audio_common import (
+    make_streaming_wav_header as _make_streaming_wav_header,
+)
+from _audio_common import (
+    split_sentences as _split_sentences,
+)
+from _audio_common import (
+    wav_params as _wav_params,
+)
+from _audio_common import (
+    wav_to_pcm as _wav_to_pcm,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -59,19 +80,6 @@ OPENAI_TO_CUSTOMVOICE: dict[str, str] = {
 }
 
 OPENAI_VOICES = ("alloy", "echo", "fable", "nova", "onyx", "shimmer")
-
-FORMAT_CONTENT_TYPES: dict[str, str] = {
-    "mp3":  "audio/mpeg",
-    "opus": "audio/ogg; codecs=opus",
-    "aac":  "audio/aac",
-    "flac": "audio/flac",
-    "wav":  "audio/wav",
-    "pcm":  "audio/pcm",
-}
-
-# Minimum sentence length (chars) before we yield a TTS chunk in stream mode.
-# Prevents synthesizing ultra-short fragments like "Ok." alone.
-_MIN_SENTENCE_CHARS = 8
 
 SUPPORTED_LANGUAGES = [
     "Auto", "Chinese", "English", "Japanese", "Korean",
@@ -256,166 +264,6 @@ def _decode_audio(reference_audio: str) -> str:
     tmp.write(data)
     tmp.close()
     return tmp.name
-
-
-# ---------------------------------------------------------------------------
-# Audio format conversion
-# ---------------------------------------------------------------------------
-
-def _wav_params(wav_bytes: bytes) -> tuple[int, int, int]:
-    """Return (sample_rate, channels, sample_width_bits) from WAV header."""
-    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-        return wf.getframerate(), wf.getnchannels(), wf.getsampwidth() * 8
-
-
-def _wav_to_pcm(wav_bytes: bytes) -> bytes:
-    """Strip WAV header and return raw PCM16LE frames."""
-    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-        return wf.readframes(wf.getnframes())
-
-
-def _make_streaming_wav_header(sample_rate: int, channels: int, bits: int) -> bytes:
-    """44-byte RIFF/WAV header with 0xFFFFFFFF sizes for unknown-length streaming.
-
-    Most decoders (including Android MediaPlayer) accept this for progressive playback.
-    """
-    byte_rate   = sample_rate * channels * bits // 8
-    block_align = channels * bits // 8
-    return struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF", 0xFFFF_FFFF, b"WAVE",
-        b"fmt ", 16, 1, channels, sample_rate, byte_rate, block_align, bits,
-        b"data", 0xFFFF_FFFF,
-    )
-
-
-def _soundfile_encode(wav_bytes: bytes, fmt: str) -> bytes | None:
-    """Encode WAV bytes to *fmt* using soundfile (in-process, no subprocess).
-
-    Returns encoded bytes on success, ``None`` on failure.
-    Supports: mp3, ogg/opus, flac.
-    """
-    try:
-        import numpy as np
-        import soundfile as sf
-    except ImportError:
-        return None
-
-    sf_format_map: dict[str, tuple[str, str | None]] = {
-        "mp3":  ("MP3",  None),
-        "opus": ("OGG",  "VORBIS"),
-        "flac": ("FLAC", None),
-    }
-    entry = sf_format_map.get(fmt)
-    if entry is None:
-        return None
-
-    sf_format, sf_subtype = entry
-    try:
-        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-            sr = wf.getframerate()
-            frames = wf.readframes(wf.getnframes())
-        pcm16 = np.frombuffer(frames, dtype=np.int16)
-        samples = pcm16.astype(np.float32) / 32768.0
-
-        out = io.BytesIO()
-        kwargs: dict = {"format": sf_format}
-        if sf_subtype:
-            kwargs["subtype"] = sf_subtype
-        sf.write(out, samples, sr, **kwargs)
-        return out.getvalue()
-    except Exception:
-        return None
-
-
-def _ffmpeg_encode(wav_bytes: bytes, fmt: str) -> bytes:
-    """Encode WAV bytes to *fmt*.
-
-    Tries soundfile first (fast, in-process).  Falls back to ffmpeg subprocess
-    if available.  Returns original WAV bytes if all methods fail.
-    """
-    import logging
-
-    # ---- soundfile (preferred) ----
-    encoded = _soundfile_encode(wav_bytes, fmt)
-    if encoded:
-        return encoded
-
-    # ---- ffmpeg subprocess (fallback) ----
-    _codec: dict[str, list[str]] = {
-        "mp3":  ["-f", "mp3",  "-codec:a", "libmp3lame", "-q:a", "4"],
-        "opus": ["-f", "ogg",  "-codec:a", "opus", "-strict", "-2", "-b:a", "64k"],
-        "aac":  ["-f", "adts", "-codec:a", "aac",        "-b:a", "128k"],
-        "flac": ["-f", "flac", "-codec:a", "flac"],
-    }
-    codec_args = _codec.get(fmt)
-    if not codec_args:
-        return wav_bytes
-
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "wav", "-i", "pipe:0",
-        *codec_args,
-        "pipe:1",
-    ]
-    try:
-        result = subprocess.run(cmd, input=wav_bytes, capture_output=True, timeout=60)
-        if result.returncode == 0 and result.stdout:
-            return result.stdout
-        logging.getLogger(__name__).warning(
-            "ffmpeg encode failed for %s (rc=%d): %s",
-            fmt, result.returncode, result.stderr[:200].decode(errors="replace"),
-        )
-    except Exception as exc:
-        logging.getLogger(__name__).warning("ffmpeg encode error for %s: %s", fmt, exc)
-    return wav_bytes  # fallback to WAV
-
-
-def _encode_audio(wav_bytes: bytes, fmt: str) -> tuple[bytes, str]:
-    """Convert internal WAV bytes to the requested *fmt*.
-
-    Returns (encoded_bytes, content_type).
-    """
-    fmt = fmt.lower().strip()
-    content_type = FORMAT_CONTENT_TYPES.get(fmt, "audio/wav")
-    if fmt == "wav":
-        return wav_bytes, content_type
-    if fmt == "pcm":
-        return _wav_to_pcm(wav_bytes), content_type
-    return _ffmpeg_encode(wav_bytes, fmt), content_type
-
-
-# ---------------------------------------------------------------------------
-# Sentence splitting
-# ---------------------------------------------------------------------------
-
-def _split_sentences(text: str) -> list[str]:
-    """Split *text* into sentences suitable for progressive TTS synthesis.
-
-    Fragments shorter than _MIN_SENTENCE_CHARS are merged with the next sentence
-    to avoid synthesising tiny clips (e.g. "Ok.") that sound unnatural in isolation.
-    """
-    # Split on .!?…; followed by whitespace, or on newlines
-    raw = re.split(r"(?<=[.!?…;])\s+|\n+", text.strip())
-
-    result: list[str] = []
-    buf = ""
-    for part in raw:
-        part = part.strip()
-        if not part:
-            continue
-        buf = (buf + " " + part).strip() if buf else part
-        # Yield when buffer ends with a sentence-ending punctuation and is long enough
-        if len(buf) >= _MIN_SENTENCE_CHARS and re.search(r"[.!?…;]$", buf):
-            result.append(buf)
-            buf = ""
-    if buf:
-        # Short remainder — merge with last sentence to avoid tiny fragments
-        if result and len(buf) < _MIN_SENTENCE_CHARS:
-            result[-1] = result[-1] + " " + buf
-        else:
-            result.append(buf)
-    return result or [text.strip()]
 
 
 def _synthesize_qwen(

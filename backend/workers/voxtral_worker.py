@@ -17,9 +17,7 @@ import asyncio
 import io
 import os
 import re
-import struct
 import sys
-import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -32,6 +30,24 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _audio_common import (  # noqa: E402
+    FORMAT_CONTENT_TYPES,
+)
+from _audio_common import (
+    make_streaming_wav_header as _make_streaming_wav_header,
+)
+from _audio_common import (
+    soundfile_encode as _soundfile_encode,
+)
+from _audio_common import (
+    split_sentences as _split_sentences,
+)
+from _audio_common import (
+    wav_params as _wav_params,
+)
+from _audio_common import (
+    wav_to_pcm as _wav_to_pcm,
+)
 from process_guard import parent_death_preexec  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -56,16 +72,6 @@ OPENAI_TO_VOXTRAL: dict[str, str] = {
     "shimmer": "emma",
 }
 
-FORMAT_CONTENT_TYPES: dict[str, str] = {
-    "mp3":  "audio/mpeg",
-    "opus": "audio/ogg; codecs=opus",
-    "aac":  "audio/aac",
-    "flac": "audio/flac",
-    "wav":  "audio/wav",
-    "pcm":  "audio/pcm",
-}
-
-_MIN_SENTENCE_CHARS = 8
 
 SUPPORTED_LANGUAGES = [
     "English", "French", "Spanish", "German", "Italian",
@@ -225,57 +231,6 @@ async def _wait_vllm_healthy(port: int, timeout_s: int = 300) -> bool:
 # Audio helpers (same as tts_worker.py)
 # ---------------------------------------------------------------------------
 
-def _wav_params(wav_bytes: bytes) -> tuple[int, int, int]:
-    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-        return wf.getframerate(), wf.getnchannels(), wf.getsampwidth() * 8
-
-
-def _wav_to_pcm(wav_bytes: bytes) -> bytes:
-    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-        return wf.readframes(wf.getnframes())
-
-
-def _make_streaming_wav_header(sample_rate: int, channels: int, bits: int) -> bytes:
-    byte_rate   = sample_rate * channels * bits // 8
-    block_align = channels * bits // 8
-    return struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF", 0xFFFF_FFFF, b"WAVE",
-        b"fmt ", 16, 1, channels, sample_rate, byte_rate, block_align, bits,
-        b"data", 0xFFFF_FFFF,
-    )
-
-
-def _soundfile_encode(wav_bytes: bytes, fmt: str) -> bytes | None:
-    try:
-        import numpy as np
-        import soundfile as sf
-    except ImportError:
-        return None
-    sf_map: dict[str, tuple[str, str | None]] = {
-        "mp3": ("MP3", None), "opus": ("OGG", "VORBIS"), "flac": ("FLAC", None),
-    }
-    entry = sf_map.get(fmt)
-    if not entry:
-        return None
-    sf_format, sf_subtype = entry
-    try:
-        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-            sr = wf.getframerate()
-            frames = wf.readframes(wf.getnframes())
-        import numpy as np
-        pcm16 = np.frombuffer(frames, dtype=np.int16)
-        samples = pcm16.astype(np.float32) / 32768.0
-        out = io.BytesIO()
-        kw: dict = {"format": sf_format}
-        if sf_subtype:
-            kw["subtype"] = sf_subtype
-        sf.write(out, samples, sr, **kw)
-        return out.getvalue()
-    except Exception:
-        return None
-
-
 def _encode_audio(wav_bytes: bytes, fmt: str) -> tuple[bytes, str]:
     fmt = fmt.lower().strip()
     content_type = FORMAT_CONTENT_TYPES.get(fmt, "audio/wav")
@@ -287,26 +242,6 @@ def _encode_audio(wav_bytes: bytes, fmt: str) -> tuple[bytes, str]:
     if encoded:
         return encoded, content_type
     return wav_bytes, "audio/wav"  # fallback
-
-
-def _split_sentences(text: str) -> list[str]:
-    raw = re.split(r"(?<=[.!?…;])\s+|\n+", text.strip())
-    result: list[str] = []
-    buf = ""
-    for part in raw:
-        part = part.strip()
-        if not part:
-            continue
-        buf = (buf + " " + part).strip() if buf else part
-        if len(buf) >= _MIN_SENTENCE_CHARS and re.search(r"[.!?…;]$", buf):
-            result.append(buf)
-            buf = ""
-    if buf:
-        if result and len(buf) < _MIN_SENTENCE_CHARS:
-            result[-1] = result[-1] + " " + buf
-        else:
-            result.append(buf)
-    return result or [text.strip()]
 
 
 def _map_voice(voice: str) -> str:

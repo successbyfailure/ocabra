@@ -18,17 +18,37 @@ import asyncio
 import io
 import logging
 import os
-import re
-import struct
-import subprocess
+import sys
 import wave
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _audio_common import (  # noqa: E402
+    FORMAT_CONTENT_TYPES,
+)
+from _audio_common import (
+    encode_audio as _encode_audio,
+)
+from _audio_common import (
+    make_streaming_wav_header as _make_streaming_wav_header,
+)
+from _audio_common import (
+    split_sentences as _split_sentences,
+)
+from _audio_common import (
+    wav_params as _wav_params,
+)
+from _audio_common import (
+    wav_to_pcm as _wav_to_pcm,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -59,17 +79,6 @@ CHATTERBOX_LANGUAGES = [
     "et",
     "mt",
 ]
-
-FORMAT_CONTENT_TYPES: dict[str, str] = {
-    "mp3": "audio/mpeg",
-    "opus": "audio/ogg; codecs=opus",
-    "aac": "audio/aac",
-    "flac": "audio/flac",
-    "wav": "audio/wav",
-    "pcm": "audio/pcm",
-}
-
-_MIN_SENTENCE_CHARS = 8
 
 # Default sample rate for Chatterbox output
 _DEFAULT_SAMPLE_RATE = 24000
@@ -190,149 +199,6 @@ def _tensor_to_wav(audio_tensor: Any, sample_rate: int) -> bytes:
     else:
         audio_np = audio_tensor
     return _numpy_to_wav(audio_np, sample_rate)
-
-
-def _wav_params(wav_bytes: bytes) -> tuple[int, int, int]:
-    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-        return wf.getframerate(), wf.getnchannels(), wf.getsampwidth() * 8
-
-
-def _wav_to_pcm(wav_bytes: bytes) -> bytes:
-    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-        return wf.readframes(wf.getnframes())
-
-
-def _make_streaming_wav_header(sample_rate: int, channels: int, bits: int) -> bytes:
-    byte_rate = sample_rate * channels * bits // 8
-    block_align = channels * bits // 8
-    return struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF",
-        0xFFFF_FFFF,
-        b"WAVE",
-        b"fmt ",
-        16,
-        1,
-        channels,
-        sample_rate,
-        byte_rate,
-        block_align,
-        bits,
-        b"data",
-        0xFFFF_FFFF,
-    )
-
-
-def _soundfile_encode(wav_bytes: bytes, fmt: str) -> bytes | None:
-    try:
-        import numpy as np
-        import soundfile as sf
-    except ImportError:
-        return None
-    sf_map: dict[str, tuple[str, str | None]] = {
-        "mp3": ("MP3", None),
-        "opus": ("OGG", "VORBIS"),
-        "flac": ("FLAC", None),
-    }
-    entry = sf_map.get(fmt)
-    if not entry:
-        return None
-    sf_format, sf_subtype = entry
-    try:
-        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-            sr = wf.getframerate()
-            frames = wf.readframes(wf.getnframes())
-        pcm16 = np.frombuffer(frames, dtype=np.int16)
-        samples = pcm16.astype(np.float32) / 32768.0
-        out = io.BytesIO()
-        kw: dict = {"format": sf_format}
-        if sf_subtype:
-            kw["subtype"] = sf_subtype
-        sf.write(out, samples, sr, **kw)
-        return out.getvalue()
-    except Exception:
-        return None
-
-
-def _ffmpeg_encode(wav_bytes: bytes, fmt: str) -> bytes:
-    """Encode WAV bytes to *fmt* via soundfile or ffmpeg fallback."""
-    import logging
-
-    encoded = _soundfile_encode(wav_bytes, fmt)
-    if encoded:
-        return encoded
-
-    _codec: dict[str, list[str]] = {
-        "mp3": ["-f", "mp3", "-codec:a", "libmp3lame", "-q:a", "4"],
-        "opus": ["-f", "ogg", "-codec:a", "opus", "-strict", "-2", "-b:a", "64k"],
-        "aac": ["-f", "adts", "-codec:a", "aac", "-b:a", "128k"],
-        "flac": ["-f", "flac", "-codec:a", "flac"],
-    }
-    codec_args = _codec.get(fmt)
-    if not codec_args:
-        return wav_bytes
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "wav",
-        "-i",
-        "pipe:0",
-        *codec_args,
-        "pipe:1",
-    ]
-    try:
-        result = subprocess.run(cmd, input=wav_bytes, capture_output=True, timeout=60)
-        if result.returncode == 0 and result.stdout:
-            return result.stdout
-        logging.getLogger(__name__).warning(
-            "ffmpeg encode failed for %s (rc=%d): %s",
-            fmt,
-            result.returncode,
-            result.stderr[:200].decode(errors="replace"),
-        )
-    except Exception as exc:
-        logging.getLogger(__name__).warning("ffmpeg encode error for %s: %s", fmt, exc)
-    return wav_bytes
-
-
-def _encode_audio(wav_bytes: bytes, fmt: str) -> tuple[bytes, str]:
-    fmt = fmt.lower().strip()
-    content_type = FORMAT_CONTENT_TYPES.get(fmt, "audio/wav")
-    if fmt == "wav":
-        return wav_bytes, content_type
-    if fmt == "pcm":
-        return _wav_to_pcm(wav_bytes), content_type
-    return _ffmpeg_encode(wav_bytes, fmt), content_type
-
-
-# ---------------------------------------------------------------------------
-# Sentence splitting
-# ---------------------------------------------------------------------------
-
-
-def _split_sentences(text: str) -> list[str]:
-    raw = re.split(r"(?<=[.!?…;])\s+|\n+", text.strip())
-    result: list[str] = []
-    buf = ""
-    for part in raw:
-        part = part.strip()
-        if not part:
-            continue
-        buf = (buf + " " + part).strip() if buf else part
-        if len(buf) >= _MIN_SENTENCE_CHARS and re.search(r"[.!?…;]$", buf):
-            result.append(buf)
-            buf = ""
-    if buf:
-        if result and len(buf) < _MIN_SENTENCE_CHARS:
-            result[-1] = result[-1] + " " + buf
-        else:
-            result.append(buf)
-    return result or [text.strip()]
 
 
 # ---------------------------------------------------------------------------
