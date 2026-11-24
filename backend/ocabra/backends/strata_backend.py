@@ -8,12 +8,10 @@ import os
 import secrets
 import signal
 import tempfile
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
 import structlog
 
 from ocabra.backends._health_http import health_client
@@ -272,34 +270,6 @@ class StrataBackend(BackendInterface):
     def request_headers(self, model_id: str) -> dict[str, str]:
         worker = self._worker(model_id)
         return {"Authorization": f"Bearer {worker.api_key}"}
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        worker = self._worker(model_id)
-        payload = {**body, "model": worker.served_model}
-        timeout = float(worker.config["ocabra"].get("request_timeout_s") or _REQUEST_TIMEOUT_S)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"http://127.0.0.1:{worker.port}{path}",
-                json=payload,
-                headers={"Authorization": f"Bearer {worker.api_key}"},
-            )
-            response.raise_for_status()
-            return response.json()
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        worker = self._worker(model_id)
-        payload = {**body, "model": worker.served_model}
-        timeout = float(worker.config["ocabra"].get("request_timeout_s") or _REQUEST_TIMEOUT_S)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream(
-                "POST",
-                f"http://127.0.0.1:{worker.port}{path}",
-                json=payload,
-                headers={"Authorization": f"Bearer {worker.api_key}"},
-            ) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    yield chunk
 
     @staticmethod
     def _options(extra: dict[str, Any]) -> dict[str, Any]:

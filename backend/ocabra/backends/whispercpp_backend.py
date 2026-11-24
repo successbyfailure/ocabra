@@ -24,7 +24,6 @@ import json
 import os
 import signal
 import tempfile
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -595,7 +594,20 @@ class WhisperCppBackend(BackendInterface):
     async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         return 0
 
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
+    async def run_transcription(self, model_id: str, path: str, body: dict) -> Any:
+        """Transcribe through whisper-server, orchestrating diarization.
+
+        ``whisper-server`` is a native binary with no in-process pyannote, so
+        when ``diarize`` is requested this launches/reuses the diarization
+        sidecar and merges its speaker labels into the segments. Called from
+        ``api/openai/audio.py`` (the generic dispatch path POSTs plain
+        transcriptions directly and cannot do this). Keyed by
+        ``backend_model_id`` like every ``self._processes`` entry — pass that,
+        not the canonical worker key.
+
+        Was ``forward_request`` (REF-04): the real dispatch never called it, so
+        it is a named backend method now, not a fake interface override.
+        """
         entry = self._processes.get(model_id)
         if not entry:
             raise KeyError(f"No whisper.cpp worker for model '{model_id}'")
@@ -645,17 +657,6 @@ class WhisperCppBackend(BackendInterface):
         if requested_format in {"json", "verbose_json"}:
             return diar_response.json()
         return diar_response.text
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        payload = await self.forward_request(model_id, path, body)
-        if isinstance(payload, (dict, list)):
-            yield json.dumps(payload).encode("utf-8")
-            return
-        if isinstance(payload, str):
-            yield payload.encode("utf-8")
-            return
-        if isinstance(payload, bytes):
-            yield payload
 
     async def _wait_for_startup(self, model_id: str, port: int, timeout_s: int) -> None:
         deadline = asyncio.get_running_loop().time() + timeout_s

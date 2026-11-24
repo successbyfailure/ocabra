@@ -1,9 +1,7 @@
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from ocabra.backends.base import WorkerInfo
 from ocabra.backends.whisper_backend import (
     DIARIZATION_OVERHEAD_MB,
     WhisperBackend,
@@ -64,45 +62,6 @@ async def test_whisper_vram_lookup_diarization_variant_adds_overhead():
 
     vram = await backend.get_vram_estimate_mb("openai/whisper-medium::diarize")
     assert vram == 3000 + DIARIZATION_OVERHEAD_MB
-
-
-@pytest.mark.asyncio
-async def test_whisper_forward_request_reformats_openai_transcription_payload():
-    backend = WhisperBackend()
-    backend._workers["openai/whisper-small"] = SimpleNamespace(
-        info=WorkerInfo(
-            backend_type="whisper",
-            model_id="openai/whisper-small",
-            gpu_indices=[0],
-            port=18001,
-            pid=1000,
-            vram_used_mb=1200,
-        ),
-        process=SimpleNamespace(returncode=None),
-    )
-
-    response = _DummyResponse(payload={"text": "hola mundo"})
-    dummy_client = _DummyClient(response)
-
-    with patch("ocabra.backends.whisper_backend.httpx.AsyncClient", return_value=dummy_client):
-        payload = await backend.forward_request(
-            "openai/whisper-small",
-            "/transcribe",
-            {
-                "file": ("sample.wav", b"binary-audio", "audio/wav"),
-                "language": "es",
-                "response_format": "json",
-                "timestamp_granularities": ["segment"],
-            },
-        )
-
-    assert payload == {"text": "hola mundo"}
-    assert len(dummy_client.calls) == 1
-    sent = dummy_client.calls[0]
-    assert sent["files"]["file"][0] == "sample.wav"
-    assert sent["files"]["file"][2] == "audio/wav"
-    assert sent["data"]["language"] == "es"
-    assert sent["data"]["timestamp_granularities"] == ["segment"]
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from ocabra.backends.base import WorkerInfo
 from ocabra.backends.diffusers_backend import DiffusersBackend
 
 
@@ -87,40 +86,6 @@ async def test_load_and_unload_with_subprocess_mock(tmp_path):
 
         await backend.unload(model_id)
         assert fake_process.terminated is True
-
-
-@pytest.mark.asyncio
-async def test_forward_request_translates_openai_size():
-    backend = DiffusersBackend()
-    backend._workers["flux-1"] = WorkerInfo(
-        backend_type="diffusers",
-        model_id="flux-1",
-        gpu_indices=[1],
-        port=18123,
-        pid=9001,
-        vram_used_mb=12000,
-    )
-
-    recorder: dict = {}
-
-    def _client_factory(*args, **kwargs):
-        return DummyAsyncClient(recorder)
-
-    body = {
-        "prompt": "a cat in space",
-        "n": 2,
-        "size": "1792x1024",
-        "response_format": "b64_json",
-    }
-
-    with patch("httpx.AsyncClient", new=_client_factory):
-        response = await backend.forward_request("flux-1", "/v1/images/generations", body)
-
-    assert recorder["url"].endswith("/generate")
-    assert recorder["json"]["width"] == 1792
-    assert recorder["json"]["height"] == 1024
-    assert recorder["json"]["num_images"] == 2
-    assert response["data"] == [{"b64_json": "abc123"}]
 
 
 def test_detect_pipeline_class_from_model_index(tmp_path):

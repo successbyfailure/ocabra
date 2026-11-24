@@ -1,8 +1,6 @@
 """MockBackend for testing — simulates load/unload without real processes."""
 
 import asyncio
-from collections.abc import AsyncIterator
-from typing import Any
 
 from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
 
@@ -42,10 +40,3 @@ class MockBackend(BackendInterface):
     async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         return self._vram_mb
 
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        return {"mock": True, "model_id": model_id, "path": path}
-
-    async def forward_stream(
-        self, model_id: str, path: str, body: dict
-    ) -> AsyncIterator[bytes]:
-        yield b"data: {}\n\n"

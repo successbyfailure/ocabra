@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -408,29 +407,6 @@ class BitnetBackend(BackendInterface):
             default_model_vram_mb=_DEFAULT_MODEL_MB,
             models_dir=getattr(settings, "models_dir", None),
         )
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        entry = self._processes.get(model_id)
-        if not entry:
-            raise KeyError(f"No BitNet worker for model '{model_id}'")
-        port = entry.port
-        url = f"http://127.0.0.1:{port}{path}"
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(url, json=body)
-            response.raise_for_status()
-            return response.json()
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        entry = self._processes.get(model_id)
-        if not entry:
-            raise KeyError(f"No BitNet worker for model '{model_id}'")
-        port = entry.port
-        url = f"http://127.0.0.1:{port}{path}"
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("POST", url, json=body) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    yield chunk
 
     def _build_options(
         self, extra_config: dict[str, Any], is_prismml: bool = False

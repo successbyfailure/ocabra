@@ -10,10 +10,8 @@ OpenAI ``/v1/audio/transcriptions`` route posts to.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -275,41 +273,6 @@ class VibeAsrBackend(BackendInterface):
     async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         # CPU-first backend; no VRAM reservation.
         return 0
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        worker = self._workers.get(model_id)
-        if not worker:
-            raise KeyError(f"VibeASR worker for '{model_id}' is not loaded")
-        endpoint = path if path.startswith("/") else f"/{path}"
-
-        name, data, content_type = _extract_audio_file(body)
-        files = {"file": (name, data, content_type)}
-        form_data: dict[str, str] = {}
-        if body.get("language"):
-            form_data["language"] = str(body["language"])
-        if body.get("response_format"):
-            form_data["response_format"] = str(body["response_format"])
-        if body.get("temperature") is not None:
-            form_data["temperature"] = str(body["temperature"])
-
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            response = await client.post(
-                f"http://127.0.0.1:{worker.info.port}{endpoint}", files=files, data=form_data
-            )
-        response.raise_for_status()
-        response_format = str(body.get("response_format", "json")).lower()
-        if response_format in {"json", "verbose_json"}:
-            return response.json()
-        return response.text
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        payload = await self.forward_request(model_id, path, body)
-        if isinstance(payload, (dict, list)):
-            yield json.dumps(payload).encode("utf-8")
-        elif isinstance(payload, str):
-            yield payload.encode("utf-8")
-        elif isinstance(payload, bytes):
-            yield payload
 
     async def _wait_until_healthy(self, model_id: str, timeout_s: int = 300) -> bool:
         attempts = max(1, timeout_s * 2)

@@ -1,4 +1,3 @@
-from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
 
@@ -342,12 +341,3 @@ class OllamaBackend(BackendInterface):
             logger.warning("ollama_vram_estimate_failed", model_id=model_id, error=str(exc))
         return 0
 
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        raise RuntimeError(f"Ollama backend does not support direct forwarding on path '{path}'")
-
-    async def forward_stream(
-        self, model_id: str, path: str, body: dict
-    ) -> AsyncIterator[bytes]:
-        _ = model_id, path, body
-        if False:
-            yield b""

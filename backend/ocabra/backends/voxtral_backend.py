@@ -5,7 +5,6 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -228,45 +227,6 @@ class VoxtralBackend(BackendInterface):
             if key in normalized:
                 return mb
         return 8192
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        worker = self._workers.get(model_id)
-        if not worker:
-            raise KeyError(f"Voxtral worker for '{model_id}' is not loaded")
-        endpoint = path if path.startswith("/") else f"/{path}"
-        if endpoint == "/voices":
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(f"http://127.0.0.1:{worker.info.port}/voices")
-            r.raise_for_status()
-            return r.json()
-
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            r = await client.post(
-                f"http://127.0.0.1:{worker.info.port}{endpoint}", json=body,
-            )
-        r.raise_for_status()
-        return {
-            "content": r.content,
-            "content_type": r.headers.get("content-type", "audio/mpeg"),
-        }
-
-    async def forward_stream(
-        self, model_id: str, path: str, body: dict,
-    ) -> AsyncIterator[bytes]:
-        worker = self._workers.get(model_id)
-        if not worker:
-            raise KeyError(f"Voxtral worker for '{model_id}' is not loaded")
-        endpoint = path if path.startswith("/") else f"/{path}"
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream(
-                "POST",
-                f"http://127.0.0.1:{worker.info.port}{endpoint}",
-                json=body,
-            ) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    if chunk:
-                        yield chunk
 
     async def _wait_until_healthy(self, model_id: str, timeout_s: int = 300) -> bool:
         attempts = max(1, timeout_s * 2)

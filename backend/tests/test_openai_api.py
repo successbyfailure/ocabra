@@ -2810,12 +2810,12 @@ class TestTranscriptionDiarizeCapabilityGate:
 class TestTranscriptionDiarizeRouting:
     """2026-11-05: the capability gate alone wasn't enough — the endpoint's
     main path posts directly to the worker's own /transcribe (bypassing
-    backend.forward_request() entirely), which is where WhisperCppBackend's
+    backend.run_transcription() entirely), which is where WhisperCppBackend's
     diarization-sidecar orchestration actually lives. Caught live: diarize=true
     against a loaded whisper_cpp model returned 200 with whisper.cpp's own
     native 'speaker: "?"' stub, never touching the sidecar at all, because the
     endpoint's direct-call path has no idea the sidecar exists. Must route
-    through backend.forward_request() specifically when backend_type is
+    through backend.run_transcription() specifically when backend_type is
     whisper_cpp and diarize is requested; every other combination keeps using
     the original direct call unchanged."""
 
@@ -2824,11 +2824,11 @@ class TestTranscriptionDiarizeRouting:
         app = _make_app(model_state=_audio_state("whisper_cpp"))
         backend = MagicMock()
         backend.health_check = AsyncMock(return_value=True)
-        backend.forward_request = AsyncMock(return_value=diarize_result)
+        backend.run_transcription = AsyncMock(return_value=diarize_result)
         app.state.worker_pool.get_backend = AsyncMock(return_value=backend)
         return app, backend
 
-    def test_diarize_true_routes_through_backend_forward_request(self):
+    def test_diarize_true_routes_through_backend_run_transcription(self):
         app, backend = self._make_whispercpp_app(
             {"text": "[SPEAKER_00] hola", "segments": [], "speakers": ["SPEAKER_00"]}
         )
@@ -2846,8 +2846,8 @@ class TestTranscriptionDiarizeRouting:
 
         assert resp.status_code == 200
         assert resp.json()["speakers"] == ["SPEAKER_00"]
-        backend.forward_request.assert_awaited_once()
-        call_args = backend.forward_request.await_args
+        backend.run_transcription.assert_awaited_once()
+        call_args = backend.run_transcription.await_args
         # Regression: WhisperCppBackend (like AceStep) keys its own _processes
         # by backend_model_id (the short suffix), not the canonical
         # worker_key — passing worker_key here raised a live KeyError
@@ -2877,10 +2877,10 @@ class TestTranscriptionDiarizeRouting:
         assert resp.status_code == 200
         assert resp.text == "[SPEAKER_00] hola"
 
-    def test_diarize_false_does_not_route_through_backend_forward_request(self):
+    def test_diarize_false_does_not_route_through_backend_run_transcription(self):
         app, backend = self._make_whispercpp_app({"text": "hola"})
         # The direct-call path targets a real port nothing is listening on in
-        # this test — only asserting that forward_request is never reached,
+        # this test — only asserting that run_transcription is never reached,
         # not that the round trip itself succeeds, so just let its transport
         # failure take the existing reload-and-retry branch without erroring.
         app.state.model_manager.unload = AsyncMock()
@@ -2893,4 +2893,4 @@ class TestTranscriptionDiarizeRouting:
             files={"file": ("audio.wav", b"RIFF....", "audio/wav")},
         )
 
-        backend.forward_request.assert_not_awaited()
+        backend.run_transcription.assert_not_awaited()

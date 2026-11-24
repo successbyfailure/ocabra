@@ -14,7 +14,6 @@ import re
 import signal
 import sys
 from collections import deque
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -939,31 +938,6 @@ class VLLMBackend(BackendInterface):
                 total_mb=int(total / 1024 / 1024),
             )
         return total
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        """Proxy a request to the vLLM worker."""
-        entry = self._processes.get(model_id)
-        if not entry:
-            raise KeyError(f"No vLLM worker for model '{model_id}'")
-        _, port = entry
-        url = f"http://127.0.0.1:{port}{path}"
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.post(url, json=body)
-            resp.raise_for_status()
-            return resp.json()
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        """Stream a request to the vLLM worker, yielding raw byte chunks."""
-        entry = self._processes.get(model_id)
-        if not entry:
-            raise KeyError(f"No vLLM worker for model '{model_id}'")
-        _, port = entry
-        url = f"http://127.0.0.1:{port}{path}"
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("POST", url, json=body) as resp:
-                resp.raise_for_status()
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
 
     # ------------------------------------------------------------------
     # Internal helpers

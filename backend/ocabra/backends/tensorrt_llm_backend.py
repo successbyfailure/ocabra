@@ -8,7 +8,6 @@ import shutil
 import signal
 import subprocess
 import sys
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -364,29 +363,6 @@ class TensorRTLLMBackend(BackendInterface):
                     return int(value)
 
         return int(settings.tensorrt_llm_context_length or 0)
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        entry = self._processes.get(model_id)
-        if not entry:
-            raise KeyError(f"No TensorRT-LLM worker for model '{model_id}'")
-        port = entry.port
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(f"http://127.0.0.1:{port}{path}", json=body)
-            response.raise_for_status()
-            return response.json()
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        entry = self._processes.get(model_id)
-        if not entry:
-            raise KeyError(f"No TensorRT-LLM worker for model '{model_id}'")
-        port = entry.port
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream(
-                "POST", f"http://127.0.0.1:{port}{path}", json=body
-            ) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    yield chunk
 
     def _detect_disabled_reason(self) -> str | None:
         if not settings.tensorrt_llm_enabled:

@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -268,80 +267,6 @@ class ChatterboxBackend(BackendInterface):
         if "chatterbox" in normalized:
             return 8192
         return 4096
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        worker = self._workers.get(model_id)
-        if not worker:
-            raise KeyError(f"Chatterbox worker for '{model_id}' is not loaded")
-        endpoint = path if path.startswith("/") else f"/{path}"
-
-        if endpoint == "/voices":
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(f"http://127.0.0.1:{worker.info.port}/voices")
-            r.raise_for_status()
-            return r.json()
-
-        # Map OpenAI voice names to Chatterbox
-        openai_voice = str(body.get("voice") or "alloy").lower()
-        response_format = str(body.get("response_format") or "mp3").lower()
-        payload = {
-            "text": str(body.get("input") or ""),
-            "voice": _map_openai_voice(openai_voice),
-            "language": str(body.get("language") or "en"),
-            "speed": float(body.get("speed") or 1.0),
-            "response_format": response_format,
-        }
-        voice_ref = body.get("voice_ref") or body.get("reference_audio")
-        if voice_ref:
-            payload["voice_ref"] = voice_ref
-
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            r = await client.post(
-                f"http://127.0.0.1:{worker.info.port}{endpoint}",
-                json=payload,
-            )
-        r.raise_for_status()
-        return {
-            "content": r.content,
-            "content_type": r.headers.get(
-                "content-type", _content_type_for_format(response_format)
-            ),
-        }
-
-    async def forward_stream(
-        self,
-        model_id: str,
-        path: str,
-        body: dict,
-    ) -> AsyncIterator[bytes]:
-        worker = self._workers.get(model_id)
-        if not worker:
-            raise KeyError(f"Chatterbox worker for '{model_id}' is not loaded")
-        endpoint = path if path.startswith("/") else f"/{path}"
-
-        openai_voice = str(body.get("voice") or "alloy").lower()
-        response_format = str(body.get("response_format") or "mp3").lower()
-        payload = {
-            "text": str(body.get("input") or ""),
-            "voice": _map_openai_voice(openai_voice),
-            "language": str(body.get("language") or "en"),
-            "speed": float(body.get("speed") or 1.0),
-            "response_format": response_format,
-        }
-        voice_ref = body.get("voice_ref") or body.get("reference_audio")
-        if voice_ref:
-            payload["voice_ref"] = voice_ref
-
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream(
-                "POST",
-                f"http://127.0.0.1:{worker.info.port}{endpoint}",
-                json=payload,
-            ) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    if chunk:
-                        yield chunk
 
     async def _wait_until_healthy(self, model_id: str, timeout_s: int = 300) -> bool:
         attempts = max(1, timeout_s * 2)

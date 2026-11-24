@@ -423,6 +423,7 @@ class _ForwardPrep:
     url: str
     ollama_adapter: str | None
     requested_model: str
+    timeout_s: int
 
 
 # Substrings of a 5xx body that indicate the backend's own process died
@@ -873,6 +874,7 @@ class WorkerPool:
         self._check_circuit_breaker(model_id)
         backend = self._backends.get(worker.backend_type)
         request_headers: dict[str, str] = {}
+        timeout_s = int(settings.inference_request_timeout_seconds)
         if backend is not None:
             if self._before_prepare is not None:
                 # Room for an on-demand vision projector on a full card: the
@@ -880,7 +882,16 @@ class WorkerPool:
                 # ModelManager.make_room_for_vision).
                 await self._before_prepare(model_id, body)
             await backend.prepare_request(worker.model_id, path, body)
+            # Contract hooks (REF-04): let the backend translate the outgoing
+            # body and declare its own per-request timeout. Defaults are a
+            # no-op transform and the settings timeout, so this is inert for
+            # every backend that doesn't override them.
+            body = backend.transform_request(worker.model_id, path, body)
+            override = backend.request_timeout()
+            if override is not None:
+                timeout_s = int(override)
             request_headers = backend.request_headers(worker.model_id)
+        timeout_s = max(30, timeout_s)
         if worker.backend_type == "ollama":
             body = await self._clamp_ollama_ctx(model_id, path, body)
             requested_model = str(body.get("model") or worker.model_id)
@@ -899,6 +910,7 @@ class WorkerPool:
             url=url,
             ollama_adapter=ollama_adapter,
             requested_model=requested_model,
+            timeout_s=timeout_s,
         )
 
     async def _forward_request_unfair(self, model_id: str, path: str, body: dict) -> Any:
@@ -909,7 +921,7 @@ class WorkerPool:
         url = prep.url
         ollama_adapter = prep.ollama_adapter
         requested_model = prep.requested_model
-        timeout_s = max(30, int(settings.inference_request_timeout_seconds))
+        timeout_s = prep.timeout_s
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(float(timeout_s), connect=30.0)
@@ -1039,7 +1051,7 @@ class WorkerPool:
             # generation and free the GPU. Keep the per-request client + `async with`
             # here — a shared/persistent client or manual iteration would break this
             # and leak orphaned generations on abandoned (e.g. agentic) requests.
-            timeout_s = max(30, int(settings.inference_request_timeout_seconds))
+            timeout_s = prep.timeout_s
             try:
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(float(timeout_s), connect=30.0)

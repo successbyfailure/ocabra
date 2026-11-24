@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -357,44 +356,6 @@ class WhisperBackend(BackendInterface):
         if _should_enable_diarization(model_id, {}):
             base += DIARIZATION_OVERHEAD_MB
         return base
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        worker = self._workers.get(model_id)
-        if not worker:
-            raise KeyError(f"Whisper worker for '{model_id}' is not loaded")
-
-        endpoint = path if path.startswith("/") else f"/{path}"
-        files, form_data = _build_transcription_multipart(body)
-
-        # Same read timeout as the direct worker path in api/openai/audio.py
-        # (server-wide inference timeout, not a fixed 300 s).
-        timeout_s = float(max(60, int(settings.inference_request_timeout_seconds)))
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
-            response = await client.post(
-                f"http://127.0.0.1:{worker.info.port}{endpoint}",
-                files=files,
-                data=form_data,
-            )
-        response.raise_for_status()
-
-        response_format = str(body.get("response_format", "json")).lower()
-        if response_format in {"json", "verbose_json"}:
-            return response.json()
-
-        return response.text
-
-    async def forward_stream(
-        self, model_id: str, path: str, body: dict
-    ) -> AsyncIterator[bytes]:
-        payload = await self.forward_request(model_id, path, body)
-        if isinstance(payload, (dict, list)):
-            yield json.dumps(payload).encode("utf-8")
-            return
-        if isinstance(payload, str):
-            yield payload.encode("utf-8")
-            return
-        if isinstance(payload, bytes):
-            yield payload
 
     async def _wait_until_healthy(self, model_id: str, timeout_s: int = 90) -> bool:
         """Poll /health; return False early if the worker process has exited."""

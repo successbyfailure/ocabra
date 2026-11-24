@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -339,11 +338,17 @@ class AceStepBackend(BackendInterface):
 
     # ── request forwarding ─────────────────────────────────────────────────
 
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
+    async def generate_music(self, model_id: str, path: str, body: dict) -> Any:
         """Submit a generation task, poll until complete, return (audio_bytes, content_type, meta).
 
-        The caller (API endpoint) receives a tuple:
+        The caller (``api/openai/audio.py``) receives a tuple:
             (bytes, str, dict)  →  (audio data, MIME type, ACE-Step metadata)
+
+        ACE-Step speaks a submit/poll protocol, not a single POST, so the
+        generic dispatch path can't drive it — this named method does. Keyed by
+        ``backend_model_id`` (the short suffix), like ``self._workers``.
+
+        Was ``forward_request`` (REF-04): the real dispatch never called it.
         """
         base_url = self._worker_base_url(model_id)
         if not base_url:
@@ -452,16 +457,6 @@ class AceStepBackend(BackendInterface):
             elapsed_s=round(elapsed, 1),
         )
         return (audio_bytes, content_type, meta)
-
-    async def forward_stream(
-        self, model_id: str, path: str, body: dict
-    ) -> AsyncIterator[bytes]:
-        result = await self.forward_request(model_id, path, body)
-        if isinstance(result, tuple):
-            audio_bytes, _ct, _meta = result
-            yield audio_bytes
-        elif isinstance(result, bytes):
-            yield result
 
     # ── helpers ────────────────────────────────────────────────────────────
 

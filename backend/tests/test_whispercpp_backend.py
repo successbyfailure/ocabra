@@ -224,7 +224,7 @@ async def test_ensure_diarization_worker_concurrent_calls_launch_once(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_forward_request_diarize_merges_sidecar_response(tmp_path: Path) -> None:
+async def test_run_transcription_diarize_merges_sidecar_response(tmp_path: Path) -> None:
     """diarize=true must: (1) force verbose_json against whisper-server so
     there are segments to hand off, (2) post audio + those segments to the
     diarization sidecar, (3) return the sidecar's merged response instead of
@@ -273,7 +273,7 @@ async def test_forward_request_diarize_merges_sidecar_response(tmp_path: Path) -
             backend, "_ensure_diarization_worker", new=AsyncMock(return_value=fake_sidecar)
         ) as ensure_sidecar,
     ):
-        result = await backend.forward_request(
+        result = await backend.run_transcription(
             "m", "/transcribe", {"file": b"RIFF....", "diarize": "true"}
         )
 
@@ -284,7 +284,7 @@ async def test_forward_request_diarize_merges_sidecar_response(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_forward_request_without_diarize_skips_sidecar() -> None:
+async def test_run_transcription_without_diarize_skips_sidecar() -> None:
     backend = WhisperCppBackend()
     proc = _fake_process()
     backend._processes["m"] = type(
@@ -301,7 +301,7 @@ async def test_forward_request_without_diarize_skips_sidecar() -> None:
         patch("httpx.AsyncClient.post", new=AsyncMock(return_value=transcribe_response)),
         patch.object(backend, "_ensure_diarization_worker", new=AsyncMock()) as ensure_sidecar,
     ):
-        result = await backend.forward_request("m", "/transcribe", {"file": b"RIFF...."})
+        result = await backend.run_transcription("m", "/transcribe", {"file": b"RIFF...."})
 
     assert result == {"text": "hola", "segments": []}
     ensure_sidecar.assert_not_awaited()
@@ -318,7 +318,7 @@ async def test_forward_request_without_diarize_skips_sidecar() -> None:
 # volvia como "The report on European budget was approved yesterday".
 #
 # Va en la linea de comandos y no en el formulario de cada peticion: las
-# transcripciones normales no pasan por el forward_request de este backend
+# transcripciones normales no pasan por el run_transcription de este backend
 # —el endpoint de audio las postea al worker directamente y solo enruta por
 # aqui las diarizadas—, asi que un defecto puesto en el formulario solo
 # habria arreglado la mitad de los casos. Primer intento de este arreglo,
@@ -459,7 +459,7 @@ async def test_la_ruta_diarizada_reenvia_vad_y_contexto_a_whisper_server() -> No
             new=AsyncMock(return_value=type("S", (), {"port": 19999})()),
         ),
     ):
-        await backend.forward_request(
+        await backend.run_transcription(
             "m",
             "/transcribe",
             {

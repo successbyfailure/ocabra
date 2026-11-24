@@ -28,7 +28,6 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -262,17 +261,6 @@ class ComfyUIVideoBackend(BackendInterface):
         return int(self._configs.get(model_id, {}).get("max_seconds") or DEFAULT_MAX_SECONDS)
 
     # ── Peticiones ──────────────────────────────────────────────────────
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        worker = self._workers.get(model_id)
-        if worker is None:
-            raise KeyError(f"No worker found for model '{model_id}'")
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(f"http://127.0.0.1:{worker.port}{path}", json=body)
-            response.raise_for_status()
-            return response.json()
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        raise RuntimeError("comfyui_video backend does not support streaming")
 
     async def generate_video(
         self, model_id: str, params: dict[str, Any]

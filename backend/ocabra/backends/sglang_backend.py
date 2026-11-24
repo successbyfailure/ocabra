@@ -5,7 +5,6 @@ import json
 import os
 import signal
 import sys
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -349,27 +348,6 @@ class SGLangBackend(BackendInterface):
         total_bytes = await total_file_size(model_path, "*.safetensors", "*.bin")
         estimated = int(total_bytes / 1024 / 1024 * 1.2)
         return max(_MIN_SGLANG_VRAM_MB, estimated)
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        entry = self._processes.get(model_id)
-        if not entry:
-            raise KeyError(f"No SGLang worker for model '{model_id}'")
-        port = entry.port
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(f"http://127.0.0.1:{port}{path}", json=body)
-            response.raise_for_status()
-            return response.json()
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        entry = self._processes.get(model_id)
-        if not entry:
-            raise KeyError(f"No SGLang worker for model '{model_id}'")
-        port = entry.port
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("POST", f"http://127.0.0.1:{port}{path}", json=body) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    yield chunk
 
     def _get_option(self, extra_config: dict[str, Any], key: str, default: Any) -> Any:
         nested = extra_config.get("sglang")

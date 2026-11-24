@@ -3,8 +3,6 @@ import json
 import math
 import os
 import sys
-import time
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -371,39 +369,6 @@ class DiffusersBackend(BackendInterface):
         total_bytes = sum(p.stat().st_size for p in candidates)
         total_mb = total_bytes / (1024 * 1024)
         return int(math.ceil(total_mb * 1.3))
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        worker = self._workers.get(model_id)
-        if worker is None:
-            raise KeyError(f"No worker found for model '{model_id}'")
-
-        if path.endswith("/images/generations"):
-            payload = self._translate_openai_image_request(body)
-            request_path = "/generate"
-        else:
-            payload = body
-            request_path = path
-
-        url = f"http://127.0.0.1:{worker.port}{request_path}"
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(url, json=payload)
-            response.raise_for_status()
-            worker_payload = response.json()
-
-        if request_path == "/generate":
-            return {
-                "created": int(time.time()),
-                "data": [
-                    {"b64_json": image["b64_json"]}
-                    for image in worker_payload.get("images", [])
-                    if "b64_json" in image
-                ],
-            }
-
-        return worker_payload
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        raise RuntimeError("Diffusers backend does not support streaming")
 
     async def _assign_port(self) -> int:
         raise ValueError("load() requires 'port' kwarg — assign via WorkerPool.assign_port()")

@@ -4,7 +4,6 @@ import asyncio
 import os
 import signal
 import sys
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -165,7 +164,11 @@ class LlamaCppBackend(BackendInterface):
             tags=["LLM", "GGUF", "CUDA"],
         )
 
-    def __init__(self, gpu_manager: Any | None = None) -> None:
+    def __init__(self, *, gpu_manager: Any | None = None) -> None:
+        # Keyword-only (REF-04): every caller (main.py, tests) already passes
+        # ``gpu_manager=``; this keeps construction uniform with the other
+        # backends, which take no positional args, and forbids a stray
+        # positional from binding the wrong thing.
         self._processes: dict[str, _LlamaCppWorker] = {}
         self._model_configs: dict[str, dict[str, Any]] = {}
         # The extra_config each worker was started with, so the VRAM reported
@@ -858,16 +861,6 @@ class LlamaCppBackend(BackendInterface):
             total_mb = max(1, int(options.get("model_vram_mb", 4096)))
         return max(1, int(total_mb * min(gpu_layers, total_layers) / total_layers))
 
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        entry = self._processes.get(model_id)
-        if not entry:
-            raise KeyError(f"No llama.cpp worker for model '{model_id}'")
-        port = entry.port
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(f"http://127.0.0.1:{port}{path}", json=body)
-            response.raise_for_status()
-            return response.json()
-
     def nominal_context_options(self, model_id: str) -> dict[str, int | None] | None:
         """The sizes a worker that started below its maximum may grow back to,
         or None when it runs the size it was configured with."""
@@ -1068,19 +1061,6 @@ class LlamaCppBackend(BackendInterface):
                 raise RuntimeError(f"llama.cpp rejected vision activation for model '{model_id}'")
             self._vision_active.add(model_id)
             logger.info("llama_cpp_vision_activated", model_id=model_id)
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        entry = self._processes.get(model_id)
-        if not entry:
-            raise KeyError(f"No llama.cpp worker for model '{model_id}'")
-        port = entry.port
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream(
-                "POST", f"http://127.0.0.1:{port}{path}", json=body
-            ) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    yield chunk
 
     def _build_options(self, extra_config: dict[str, Any]) -> dict[str, Any]:
         options = {

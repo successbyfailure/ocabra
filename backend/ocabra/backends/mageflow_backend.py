@@ -17,11 +17,8 @@ import json
 import math
 import os
 import sys
-from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
-import httpx
 import structlog
 
 from ocabra.backends._fs import total_file_size
@@ -212,20 +209,6 @@ class MageFlowBackend(BackendInterface):
         total_bytes = await total_file_size(model_path, "*.safetensors")  # off the loop (ASY-04)
         total_mb = total_bytes / (1024 * 1024)
         return int(math.ceil(total_mb * 1.1))
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        worker = self._workers.get(model_id)
-        if worker is None:
-            raise KeyError(f"No worker found for model '{model_id}'")
-        request_path = "/edit" if path.rstrip("/").endswith("edit") else "/generate"
-        url = f"http://127.0.0.1:{worker.port}{request_path}"
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(url, json=body)
-            response.raise_for_status()
-            return response.json()
-
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        raise RuntimeError("Mage-Flow backend does not support streaming")
 
     def _worker_script_path(self) -> Path:
         repo_root = Path(__file__).resolve().parents[2]

@@ -295,7 +295,7 @@ async def transcriptions(
 
     worker_pool = request.app.state.worker_pool
     # whisper.cpp has no in-process pyannote to lazy-load diarization into
-    # (whisper-server is a native binary) — WhisperCppBackend.forward_request()
+    # (whisper-server is a native binary) — WhisperCppBackend.run_transcription()
     # owns that orchestration (launching/reusing the diarization sidecar and
     # merging its output), so route through it instead of this endpoint's own
     # direct worker call, which only knows how to talk to whisper-server.
@@ -366,7 +366,7 @@ async def transcriptions(
                     # _processes by backend_model_id (the short suffix), not
                     # the canonical worker_key — see the ACE-Step call further
                     # down for the same gotcha.
-                    sidecar_result = await backend.forward_request(
+                    sidecar_result = await backend.run_transcription(
                         state.backend_model_id, "/transcribe", body
                     )
                 else:
@@ -1006,7 +1006,7 @@ async def generate_music(
         # ACE-Step backend stores _workers keyed by backend_model_id (the
         # short suffix like "turbo"), not the canonical worker_key
         # ("acestep/turbo"). Use backend_model_id to find the loaded worker.
-        result = await backend.forward_request(state.backend_model_id, "/generate", merged_body)
+        result = await backend.generate_music(state.backend_model_id, "/generate", merged_body)
     except TimeoutError as exc:
         raise _openai_error(
             str(exc),

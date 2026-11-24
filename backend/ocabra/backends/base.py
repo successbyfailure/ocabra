@@ -1,9 +1,10 @@
 import socket
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
@@ -198,8 +199,14 @@ class BackendInterface(ABC):
         """Load the model. Returns WorkerInfo with the running process."""
 
     @abstractmethod
-    async def unload(self, model_id: str) -> None:
-        """Unload the model and free resources."""
+    async def unload(self, model_id: str, *, endpoint_url: str | None = None) -> None:
+        """Unload the model and free resources.
+
+        ``endpoint_url`` is part of the contract only for backends that serve
+        the same model from several pool endpoints (Ollama): the caller threads
+        the worker's endpoint so the right pool is told to drop it. Every other
+        backend ignores it — one model lives in one local process.
+        """
 
     @abstractmethod
     async def health_check(self, model_id: str) -> bool:
@@ -220,20 +227,36 @@ class BackendInterface(ABC):
         available; None is fine and backends must degrade gracefully.
         """
 
-    @abstractmethod
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        """Forward a request to the worker. Returns the response."""
-
-    @abstractmethod
-    async def forward_stream(self, model_id: str, path: str, body: dict) -> AsyncIterator[bytes]:
-        """Forward a streaming request to the worker."""
-
     async def prepare_request(self, model_id: str, path: str, body: dict) -> None:
         """Prepare backend state before forwarding one inference request.
 
         Most backends need no request-time transition. Stateful runtimes can
         override this hook, for example to activate an optional multimodal
         projector before the request reaches the worker.
+        """
+        return None
+
+    def transform_request(self, model_id: str, path: str, body: dict) -> dict:
+        """Return the body to POST to the worker, possibly transformed.
+
+        The real dispatch path (``WorkerPool._prepare_forward``) POSTs the
+        returned body to the worker. Backends whose worker speaks a different
+        shape than the OpenAI/Ollama body override this to translate it. The
+        default returns the body unchanged.
+
+        This replaced the old ``forward_request``/``forward_stream`` methods,
+        which the dispatch path never called (it POSTs directly) — so those
+        were dead code that 16 test files kept validating. A backend that needs
+        a genuinely different protocol (poll loop, multipart, sidecar) exposes
+        a named method and the API layer calls it (see AceStep, whisper.cpp).
+        """
+        return body
+
+    def request_timeout(self) -> float | None:
+        """Per-request upstream timeout in seconds, or ``None`` for the default.
+
+        ``None`` means ``WorkerPool`` uses ``INFERENCE_REQUEST_TIMEOUT_SECONDS``
+        (floored at 30 s), which is what every backend uses today.
         """
         return None
 
@@ -291,36 +314,6 @@ class BackendInterface(ABC):
         """
         return set()
 
-    async def generate_text(self, model_id: str, messages: list[dict], **kwargs: Any) -> dict:
-        """Generate a text completion. Override in text-capable backends."""
-        raise NotImplementedError(f"{type(self).__name__} does not support text generation")
-
-    async def stream_text(
-        self, model_id: str, messages: list[dict], **kwargs: Any
-    ) -> AsyncIterator[bytes]:
-        """Stream a text completion. Override in text-capable backends."""
-        raise NotImplementedError(f"{type(self).__name__} does not support text streaming")
-
-    async def generate_embeddings(self, model_id: str, input: list[str], **kwargs: Any) -> dict:
-        """Generate embeddings for the given input texts."""
-        raise NotImplementedError(f"{type(self).__name__} does not support embeddings")
-
-    async def generate_image(self, model_id: str, prompt: str, **kwargs: Any) -> dict:
-        """Generate an image from a text prompt."""
-        raise NotImplementedError(f"{type(self).__name__} does not support image generation")
-
-    async def transcribe(self, model_id: str, audio: bytes, **kwargs: Any) -> dict:
-        """Transcribe audio to text."""
-        raise NotImplementedError(f"{type(self).__name__} does not support audio transcription")
-
-    async def synthesize_speech(self, model_id: str, text: str, **kwargs: Any) -> bytes:
-        """Synthesize speech from text. Returns raw audio bytes."""
-        raise NotImplementedError(f"{type(self).__name__} does not support speech synthesis")
-
-    async def rerank(self, model_id: str, query: str, documents: list[str], **kwargs: Any) -> dict:
-        """Rerank documents by relevance to the query."""
-        raise NotImplementedError(f"{type(self).__name__} does not support reranking")
-
     async def upscale_video(
         self, model_id: str, video: bytes, **kwargs: Any
     ) -> tuple[bytes, dict[str, str]]:
@@ -342,3 +335,94 @@ class BackendInterface(ABC):
         backends that advertise ``image_upscaling`` implement it.
         """
         raise NotImplementedError(f"{type(self).__name__} does not support image upscaling")
+
+
+# ----------------------------------------------------------------------------
+# Optional backend capabilities declared as Protocols (REF-04)
+# ----------------------------------------------------------------------------
+#
+# ``ModelManager`` and ``api/internal/models.py`` reach for these by
+# duck-typing (``getattr(backend, "...", default)`` / ``hasattr``), so they
+# must stay optional — adding them to ``BackendInterface`` with a default
+# would make every ``getattr`` succeed and change which branch runs. These
+# Protocols give the duck-typing a name and a signature without touching the
+# runtime shape of the backends, so callers (and readers) can see the contract
+# a backend must satisfy to be used through each of those paths. They are not
+# enforced at runtime (they describe, they don't register).
+
+
+@runtime_checkable
+class SupportsLaunchPreview(Protocol):
+    """Backends whose ``load`` can be dry-run for the model editor.
+
+    Called from ``api/internal/models.py`` to show the exact command line /
+    engine args a configuration would produce without starting anything.
+    Implemented by vLLM and the llama.cpp family.
+    """
+
+    async def preview_launch(
+        self, model_id: str, gpu_indices: list[int], extra_config: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsMemoryProfile(Protocol):
+    """Backends that can run a real memory probe (``run_probe=True``).
+
+    Called from ``api/internal/models.py`` to validate VRAM/KV with the engine
+    itself. Implemented by vLLM.
+    """
+
+    async def estimate_memory_profile(
+        self, model_id: str, *, gpu_index: int, extra_config: dict[str, Any] | None = None
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsVisionState(Protocol):
+    """Backends that load/drop a multimodal projector at runtime.
+
+    ``vision_state`` reports whether the projector is resident right now, which
+    only makes sense where vision is not fixed at launch (the llama.cpp fork).
+    Read from ``api/internal/models.py``.
+    """
+
+    def vision_state(self, model_id: str) -> str | None: ...
+
+
+@runtime_checkable
+class SupportsLiveContext(Protocol):
+    """Backends that recreate a worker's context in place, keeping its weights.
+
+    ``SUPPORTS_LIVE_CONTEXT`` gates the live-context paths in ``ModelManager``
+    and ``core/context_probe_service.py``; ``nominal_context_options`` reports
+    the sizes a worker started below its maximum may grow back to. The fork
+    backend (``llamacpp_mks``) sets the flag True.
+    """
+
+    SUPPORTS_LIVE_CONTEXT: bool
+
+    def nominal_context_options(self, model_id: str) -> dict[str, int | None] | None: ...
+
+
+@runtime_checkable
+class ResolvesModelFile(Protocol):
+    """Backends that can resolve a model id to its on-disk weight file.
+
+    Consumed from ``ModelManager`` for disk-size estimates. Implemented by the
+    llama.cpp family, BitNet and whisper.cpp.
+    """
+
+    def _resolve_model_file(self, model_id: str, extra_config: dict[str, Any]) -> Path: ...
+
+
+@runtime_checkable
+class DetectsRequestImages(Protocol):
+    """Backends that can tell whether a request body carries an image.
+
+    Consumed from ``ModelManager`` for vision admission. Implemented by the
+    llama.cpp family.
+    """
+
+    @staticmethod
+    def _contains_image(value: Any) -> bool: ...

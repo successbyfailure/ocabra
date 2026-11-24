@@ -1,9 +1,6 @@
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
-from ocabra.backends.base import WorkerInfo
 from ocabra.backends.tts_backend import OPENAI_VOICES, VOICE_MAPPINGS, TTSBackend
 
 
@@ -51,45 +48,6 @@ async def test_tts_capabilities_and_vram_lookup():
 
     vram = await backend.get_vram_estimate_mb("Qwen/Qwen3-TTS")
     assert vram == 8192
-
-
-@pytest.mark.asyncio
-async def test_tts_forward_request_returns_audio_content_and_content_type():
-    backend = TTSBackend()
-    backend._workers["Qwen/Qwen3-TTS"] = SimpleNamespace(
-        info=WorkerInfo(
-            backend_type="tts",
-            model_id="Qwen/Qwen3-TTS",
-            gpu_indices=[1],
-            port=18011,
-            pid=1010,
-            vram_used_mb=8192,
-        ),
-        process=SimpleNamespace(returncode=None),
-    )
-
-    response = _DummyResponse(
-        content=b"FAKE_MP3",
-        headers={"content-type": "audio/mpeg"},
-    )
-    dummy_client = _DummyClient(response)
-
-    with patch("ocabra.backends.tts_backend.httpx.AsyncClient", return_value=dummy_client):
-        payload = await backend.forward_request(
-            "Qwen/Qwen3-TTS",
-            "/synthesize",
-            {
-                "input": "Hola mundo",
-                "voice": "nova",
-                "response_format": "mp3",
-                "speed": 1.0,
-            },
-        )
-
-    assert payload["content"] == b"FAKE_MP3"
-    assert payload["content_type"] == "audio/mpeg"
-    sent = dummy_client.calls[0]["json"]
-    assert sent["voice"] == VOICE_MAPPINGS["qwen3-tts"]["nova"]
 
 
 def test_tts_voice_mapping_has_all_openai_voices_for_each_family():

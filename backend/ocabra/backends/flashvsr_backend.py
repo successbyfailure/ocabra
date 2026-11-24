@@ -15,7 +15,6 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -194,21 +193,6 @@ class FlashVSRBackend(BackendInterface):
 
     async def get_vram_estimate_mb(self, model_id: str, extra_config: dict | None = None) -> int:
         return _VRAM_ESTIMATE_MB
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        worker = self._workers.get(model_id)
-        if worker is None:
-            raise KeyError(f"No worker found for model '{model_id}'")
-        url = f"http://127.0.0.1:{worker.port}{path}"
-        async with httpx.AsyncClient(timeout=1800.0) as client:
-            response = await client.post(url, json=body)
-            response.raise_for_status()
-            return response.json()
-
-    async def forward_stream(
-        self, model_id: str, path: str, body: dict
-    ) -> AsyncIterator[bytes]:
-        raise RuntimeError("FlashVSR backend does not support streaming")
 
     async def upscale_video(
         self, model_id: str, video: bytes, **kwargs: Any

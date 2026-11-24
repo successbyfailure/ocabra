@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from ocabra.backends.base import BackendInterface, ModalityType
 
 # ---------------------------------------------------------------------------
@@ -104,50 +102,3 @@ class TestModalityDeclarations:
 
         modalities = TensorRTLLMBackend.supported_modalities()
         assert modalities == {ModalityType.TEXT_GENERATION}
-
-
-# ---------------------------------------------------------------------------
-# Tests: unsupported modality methods raise NotImplementedError
-# ---------------------------------------------------------------------------
-
-
-class TestUnsupportedModalityRaises:
-    @pytest.mark.asyncio
-    async def test_generate_image_on_text_backend_raises(self):
-        from ocabra.backends._mock import MockBackend
-
-        backend = MockBackend()
-        with pytest.raises(NotImplementedError, match="does not support image generation"):
-            await backend.generate_image("some-model", "a cat")
-
-    @pytest.mark.asyncio
-    async def test_transcribe_on_text_backend_raises(self):
-        from ocabra.backends._mock import MockBackend
-
-        backend = MockBackend()
-        with pytest.raises(NotImplementedError, match="does not support audio transcription"):
-            await backend.transcribe("some-model", b"audio-bytes")
-
-    @pytest.mark.asyncio
-    async def test_synthesize_speech_on_text_backend_raises(self):
-        from ocabra.backends._mock import MockBackend
-
-        backend = MockBackend()
-        with pytest.raises(NotImplementedError, match="does not support speech synthesis"):
-            await backend.synthesize_speech("some-model", "hello world")
-
-    @pytest.mark.asyncio
-    async def test_rerank_on_text_backend_raises(self):
-        from ocabra.backends._mock import MockBackend
-
-        backend = MockBackend()
-        with pytest.raises(NotImplementedError, match="does not support reranking"):
-            await backend.rerank("some-model", "query", ["doc1", "doc2"])
-
-    @pytest.mark.asyncio
-    async def test_generate_embeddings_on_base_raises(self):
-        from ocabra.backends._mock import MockBackend
-
-        backend = MockBackend()
-        with pytest.raises(NotImplementedError, match="does not support embeddings"):
-            await backend.generate_embeddings("some-model", ["text"])

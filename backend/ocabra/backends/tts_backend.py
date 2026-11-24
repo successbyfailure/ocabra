@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -266,69 +265,6 @@ class TTSBackend(BackendInterface):
             if key in normalized:
                 return size_mb
         return 4096
-
-    async def forward_request(self, model_id: str, path: str, body: dict) -> Any:
-        worker = self._workers.get(model_id)
-        if not worker:
-            raise KeyError(f"TTS worker for '{model_id}' is not loaded")
-
-        endpoint = path if path.startswith("/") else f"/{path}"
-
-        if endpoint == "/voices":
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(f"http://127.0.0.1:{worker.info.port}/voices")
-            response.raise_for_status()
-            return response.json()
-
-        response_format = str(body.get("response_format") or "mp3").lower()
-        openai_voice = str(body.get("voice") or "alloy").lower()
-        payload = {
-            "input": str(body.get("input") or ""),
-            "voice": self._map_openai_voice(model_id, openai_voice),
-            "response_format": response_format,
-            "speed": float(body.get("speed") or 1.0),
-        }
-
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(
-                f"http://127.0.0.1:{worker.info.port}{endpoint}", json=payload
-            )
-        response.raise_for_status()
-
-        return {
-            "content": response.content,
-            "content_type": response.headers.get(
-                "content-type", _content_type_for_format(response_format)
-            ),
-        }
-
-    async def forward_stream(
-        self, model_id: str, path: str, body: dict
-    ) -> AsyncIterator[bytes]:
-        worker = self._workers.get(model_id)
-        if not worker:
-            raise KeyError(f"TTS worker for '{model_id}' is not loaded")
-
-        endpoint = path if path.startswith("/") else f"/{path}"
-        response_format = str(body.get("response_format") or "mp3").lower()
-        openai_voice = str(body.get("voice") or "alloy").lower()
-        payload = {
-            "input": str(body.get("input") or ""),
-            "voice": self._map_openai_voice(model_id, openai_voice),
-            "response_format": response_format,
-            "speed": float(body.get("speed") or 1.0),
-        }
-
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream(
-                "POST",
-                f"http://127.0.0.1:{worker.info.port}{endpoint}",
-                json=payload,
-            ) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    if chunk:
-                        yield chunk
 
     async def _wait_until_healthy(self, model_id: str, retries: int = 60) -> bool:
         """Poll /health; return False early if the worker process has exited."""
