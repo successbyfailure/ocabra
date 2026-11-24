@@ -23,20 +23,22 @@ reintroducir la inversión de capas que REF-09 cerró.
 
 from __future__ import annotations
 
+import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import httpx
 from fastapi import HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from ocabra.core.inference.admission import check_capability
 from ocabra.core.inference.body import ClientGoneError, await_unless_client_gone
 from ocabra.core.inference.errors import (
     raise_inference_dispatch_error,
     raise_upstream_http_error,
+    stream_error_details,
 )
 from ocabra.core.inference.loading import ocabra_response_headers
 from ocabra.core.inference.reasoning import to_backend_body
@@ -83,6 +85,11 @@ class RequestDescriptor:
     honors_disconnect: bool = False
     applies_fair_share: bool = False
     router_capability: str | tuple[str, ...] | None = None
+    capability_label: str | None = None
+    """Etiqueta humana del paso ``capability`` en el mensaje de error (``The
+    model '…' does not support <label>``). ``None`` = usa ``capability`` como
+    etiqueta (comportamiento histórico de embeddings/pooling). Chat la fija a
+    ``"chat completions"`` para que el 400 sea byte a byte el de hoy."""
 
 
 # El ``federate`` inyectado: recibe ``(model_id, body)`` y devuelve la respuesta
@@ -92,6 +99,18 @@ FederateStep = Callable[[str, dict], Awaitable["Response | None"]]
 # Hook opcional entre ``merge`` y ``dispatch``: puede validar y lanzar (p. ej. el
 # 400 de ``dimensions`` de embeddings) con el cuerpo ya fusionado a la vista.
 PreDispatchHook = Callable[["PipelineContext"], Awaitable[None]]
+
+# Hook opcional de error de despacho (fase B): recibe la excepción cruda y el
+# contexto ANTES del mapeo por defecto. Si devuelve una ``Response`` se devuelve
+# tal cual (el reenrutado de router de chat tras ``WorkerGoneError`` /
+# ``VisionNoRoomError``); si devuelve ``None`` se aplica el mapeo de siempre
+# (``raise_inference_dispatch_error``). Ningún endpoint de embeddings/pooling lo
+# usa: su comportamiento no cambia.
+OnDispatchError = Callable[[Exception, "PipelineContext"], Awaitable["Response | None"]]
+
+# Centinela para distinguir "no se pasó override de router_capability" de
+# "se pasó None a propósito" (None = no filtrar).
+_UNSET: Any = object()
 
 
 @dataclass
@@ -127,6 +146,11 @@ class RequestOutcome:
     merged_body: dict
     response_headers: dict[str, str]
     forward_started: float
+    queue_state: dict | None = None
+    """Estado de la cola de reparto justo sondeado ANTES del despacho (solo
+    clases generativas no-batch; ``None`` para el resto). Chat lo usa para los
+    heads-up ``X-Ocabra-Slot-Queue-Saturated`` / ``X-Ocabra-KV-*`` de la
+    respuesta no-streaming."""
 
 
 def _client_disconnected_error() -> HTTPException:
@@ -190,6 +214,12 @@ def resolve_admission_kwargs(
         "slots": fairness_slots(state),
         "is_batch": is_batch_origin_request(request),
     }
+    # Telemetría de runtime (tokens/s, cold start…): chat y completions la pasan
+    # al worker cuando el middleware la colgó de ``request.state``. Inocua si no
+    # está. Solo para clases generativas (esta rama), nunca para embeddings.
+    telemetry = getattr(request_state, "runtime_telemetry", None)
+    if telemetry is not None:
+        kwargs["telemetry"] = telemetry
     if kv_capacity is not None:
         kwargs["kv_capacity_tokens"] = kv_capacity
         kwargs["kv_tokens"] = kv_tokens
@@ -207,6 +237,8 @@ async def run_request(
     worker_pool: Any,
     federate: FederateStep | None = None,
     pre_dispatch: PreDispatchHook | None = None,
+    on_dispatch_error: OnDispatchError | None = None,
+    router_capability: Any = _UNSET,
 ) -> Response | RequestOutcome:
     """Ejecuta el flujo único de petición, paso a paso, en orden.
 
@@ -216,25 +248,30 @@ async def run_request(
       :func:`resolve_profile` (hace router, ACL por usuario, elección de preset
       de runtime y disparo de carga).
     - ``federate_or_local`` → el ``callable`` ``federate`` inyectado
-      (``try_proxy_json``): corto-circuita si un peer sirve la petición.
+      (``try_proxy_json`` / ``try_proxy_stream``): corto-circuita si un peer
+      sirve la petición.
     - ``admit`` → :func:`resolve_admission_kwargs` (consciente de la clase).
-    - ``dispatch`` → ``worker_pool.forward_request`` (envuelto en
-      ``await_unless_client_gone`` cuando el descriptor honra la desconexión).
+    - ``dispatch`` → ``worker_pool.forward_request`` (no-streaming, envuelto en
+      ``await_unless_client_gone`` cuando el descriptor honra la desconexión) o
+      ``worker_pool.forward_stream`` (streaming, con peek del primer chunk).
     - ``map_error`` → :func:`raise_upstream_http_error` /
-      :func:`raise_inference_dispatch_error`.
+      :func:`raise_inference_dispatch_error`; ``on_dispatch_error`` puede
+      reenrutar antes del mapeo (router de chat tras ``WorkerGoneError`` /
+      ``VisionNoRoomError``).
 
-    Devuelve un :class:`RequestOutcome` con el resultado crudo, o la
-    ``Response`` del peer cuando la federación sirvió la petición.
+    Para una petición no-streaming devuelve un :class:`RequestOutcome` con el
+    resultado crudo; para streaming devuelve una ``StreamingResponse`` ya lista;
+    en ambos modos devuelve la ``Response`` del peer cuando la federación sirvió
+    la petición.
+
+    ``router_capability``: override por petición de la capacidad por la que el
+    router filtra destinos (chat la calcula del cuerpo + partes multimodales);
+    sin pasar = la del descriptor.
     """
-    if descriptor.streaming:
-        # La fase A solo migra endpoints no-streaming (embeddings/pooling). El
-        # camino de streaming (chat/completions) se añadirá a propósito en la
-        # fase B, con su peek del primer chunk y su reja de reparto justo.
-        raise NotImplementedError(
-            "run_request streaming path is not implemented yet (REF-01 phase B)"
-        )
-
     model_id = str(body.get("model") or "")
+    effective_router_capability = (
+        router_capability if router_capability is not _UNSET else descriptor.router_capability
+    )
 
     # Paso federate_or_local: si un peer tiene el modelo caliente, sirve allí.
     if descriptor.federates and federate is not None:
@@ -252,11 +289,14 @@ async def run_request(
         request_body=body,
         router_resolver=router_resolver,
         request_state=request.state,
-        required_capability=descriptor.router_capability,
+        required_capability=effective_router_capability,
     )
 
-    # Paso capability-check (tras la resolución, como hoy).
-    check_capability(state, descriptor.capability, descriptor.capability)
+    # Paso capability-check (tras la resolución, como hoy). La etiqueta humana
+    # del mensaje se conserva: chat dice "chat completions", no "chat".
+    check_capability(
+        state, descriptor.capability, descriptor.capability_label or descriptor.capability
+    )
 
     merged_body = merge_profile_defaults(profile, body)
     # El worker que ``resolve_profile`` cargó: su clave incluye el preset de
@@ -278,17 +318,47 @@ async def run_request(
     )
     if pre_dispatch is not None:
         # Validación específica del endpoint con el cuerpo ya fusionado a la
-        # vista (p. ej. el 400 de ``dimensions``), antes de gastar el despacho.
+        # vista (el 400 de ``dimensions`` de embeddings; en chat, las
+        # capacidades extra —tools/vision/audio/video— y el tope de salida).
         await pre_dispatch(ctx)
 
     backend_body = to_backend_body(state, merged_body)
     admission_kwargs = resolve_admission_kwargs(descriptor, request, state, user)
 
+    # Paso dispatch streaming: su propio peek del primer chunk y su relay con
+    # error en banda. Devuelve la ``StreamingResponse`` directamente.
+    if descriptor.streaming:
+        return await _dispatch_stream(
+            worker_pool=worker_pool,
+            worker_key=worker_key,
+            dispatch_path=descriptor.dispatch_path,
+            backend_body=backend_body,
+            admission_kwargs=admission_kwargs,
+        )
+
+    from ocabra.core.fair_slot_gate import KVCapacityError
     from ocabra.core.worker_pool import (
         InferenceTimeoutError,
+        VisionNoRoomError,
         WorkerDegradedError,
         WorkerGoneError,
     )
+
+    # Heads-up de cola de reparto justo, sondeado ANTES del despacho (solo clases
+    # generativas no-batch; chat lo refleja en cabeceras ``X-Ocabra-*`` de la
+    # respuesta no-streaming).
+    queue_state: dict | None = None
+    if descriptor.applies_fair_share and not admission_kwargs.get("is_batch", False):
+        from ocabra.core.inference.admission import fairness_kv_budget
+
+        _rs = request.state
+        _, _kv_tokens = fairness_kv_budget(
+            state,
+            required_tokens=getattr(_rs, "runtime_required_tokens", None),
+            effective_context=getattr(_rs, "runtime_effective_context", None),
+            reservation_tokens=getattr(_rs, "runtime_kv_reservation_tokens", None),
+        )
+        queue_state = worker_pool.peek_queue_state(worker_key, kv_tokens=_kv_tokens)
 
     forward_started = time.monotonic()
     coro = worker_pool.forward_request(
@@ -308,7 +378,18 @@ async def run_request(
         raise _client_disconnected_error() from None
     except httpx.HTTPStatusError as exc:
         raise_upstream_http_error(exc)
-    except (InferenceTimeoutError, WorkerDegradedError, WorkerGoneError) as exc:
+    except (
+        WorkerGoneError,
+        VisionNoRoomError,
+        KVCapacityError,
+        InferenceTimeoutError,
+        WorkerDegradedError,
+    ) as exc:
+        # El hook puede reenrutar (router de chat) antes del mapeo por defecto.
+        if on_dispatch_error is not None:
+            rerouted = await on_dispatch_error(exc, ctx)
+            if rerouted is not None:
+                return rerouted
         raise_inference_dispatch_error(exc)
 
     response_headers = await ocabra_response_headers(
@@ -322,4 +403,95 @@ async def run_request(
         merged_body=merged_body,
         response_headers=response_headers,
         forward_started=forward_started,
+        queue_state=queue_state,
+    )
+
+
+async def _peek_first_chunk(
+    gen: AsyncIterator[bytes],
+) -> tuple[bytes | None, Exception | None]:
+    """Avanza *gen* una vez, antes de devolver ninguna respuesta HTTP.
+
+    Permite distinguir "el backend rechazó la petición de entrada" (nada
+    enviado aún → aún se puede responder con un 4xx/5xx real) de "el backend
+    empezó a emitir y falló a mitad" (estado 200 ya comprometido → error SSE en
+    banda). Es el mismo peek que chat introdujo en v0.87.3 (BUG-17) para que un
+    rechazo no llegue como 200 con ``data: {"error": …}`` dentro del stream.
+    """
+    try:
+        first_chunk = await gen.__anext__()
+        return first_chunk, None
+    except StopAsyncIteration:
+        return None, None
+    except Exception as exc:  # noqa: BLE001 — cualquier fallo del primer intento merece un estado real
+        return None, exc
+
+
+async def _relay_stream(
+    gen: AsyncIterator[bytes],
+    first_chunk: bytes | None,
+) -> AsyncIterator[bytes]:
+    """Continúa un generador de ``forward_stream`` cuyo primer chunk ya es
+    conocido-bueno (:func:`_peek_first_chunk`), con el mismo fallback de error
+    SSE en banda que chat: una vez enviadas las cabeceras (200), un fallo a
+    mitad solo se puede comunicar como ``data: {"error": …}`` + ``[DONE]``."""
+    try:
+        if first_chunk is not None:
+            yield first_chunk
+        async for chunk in gen:
+            yield chunk
+    except Exception as exc:  # noqa: BLE001 — el error va en banda, no como estado HTTP
+        message, code = stream_error_details(exc)
+        error_payload = json.dumps(
+            {"error": {"message": message, "type": "server_error", "code": code}}
+        )
+        yield f"data: {error_payload}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+
+
+async def _dispatch_stream(
+    *,
+    worker_pool: Any,
+    worker_key: str,
+    dispatch_path: str,
+    backend_body: dict,
+    admission_kwargs: dict[str, Any],
+) -> StreamingResponse:
+    """Despacho streaming genérico: ``forward_stream`` + peek del primer chunk.
+
+    Reproduce la orquestación de streaming genérica de chat (su camino de
+    fallback ``_peek_first_chunk`` + ``_stream_chat_from``): el primer chunk se
+    espera ANTES de devolver ninguna respuesta —aún no hay cabeceras—, así que
+    un rechazo se traduce a un estado HTTP real (``raise``), igual que chat
+    (BUG-17, v0.87.3). Solo cuando el backend ya empezó a emitir se devuelve una
+    ``StreamingResponse`` cuyo relay serializa un fallo posterior como error SSE
+    en banda. NO incluye el camino de carga perezosa con keepalives ni el
+    reenrutado de router de chat, que viven en la capa ``api`` (dependen de
+    ``api/sse.py`` y del ``RouterResolver``) y se quedan en ``chat.py``.
+    """
+    from ocabra.core.fair_slot_gate import KVCapacityError
+    from ocabra.core.worker_pool import WorkerGoneError
+
+    gen = worker_pool.forward_stream(
+        worker_key,
+        dispatch_path,
+        backend_body,
+        **admission_kwargs,
+    )
+    first_chunk, first_exc = await _peek_first_chunk(gen)
+    if first_exc is not None:
+        # Nada enviado aún: estado HTTP real como hace chat (líneas 448-458).
+        if isinstance(first_exc, httpx.HTTPStatusError):
+            raise_upstream_http_error(first_exc)
+        if isinstance(first_exc, (KVCapacityError, WorkerGoneError)):
+            raise_inference_dispatch_error(first_exc)
+        message, code = stream_error_details(first_exc)
+        raise HTTPException(
+            status_code=502,
+            detail={"error": {"message": message, "type": "server_error", "code": code}},
+        )
+    return StreamingResponse(
+        _relay_stream(gen, first_chunk),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
