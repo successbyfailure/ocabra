@@ -23,9 +23,7 @@ from ocabra.agents.mcp_registry import get_registry as get_mcp_registry
 from ocabra.agents.resolver import is_agent_model, resolve_agent
 from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
-    ClientGoneError,
     EngineSuffixedModelName,
-    await_unless_client_gone,
     check_capability,
     ensure_loaded,
     fairness_kv_budget,
@@ -44,6 +42,7 @@ from ocabra.api.openai._schemas import OllamaChatRequest, validate_body
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.federation import note_federation_fallback
+from ocabra.core.inference.pipeline import RequestDescriptor, run_request
 from ocabra.core.output_limits import apply_declared_output_limit
 from ocabra.core.privacy import preview as privacy_preview
 from ocabra.database import AsyncSessionLocal
@@ -54,12 +53,10 @@ from ._shared import (
     apply_option_map,
     apply_think,
     build_native_passthrough_body,
-    dispatch_error_types,
     get_ollama_user,
     iter_sse_payloads,
     now_iso_z,
     open_stream,
-    raise_dispatch_error,
     reasoning_text,
     request_stream_usage,
     stream_error_line,
@@ -67,6 +64,26 @@ from ._shared import (
 )
 
 router = APIRouter()
+
+# REF-01 fase C: el núcleo de despacho NO-streaming de /api/chat delega en el
+# motor de flujo único (``run_request``), igual que /v1/chat/completions. La
+# federación, el dispatch de agentes, la resolución (con fallback legacy), el
+# passthrough nativo del daemon Ollama y la traducción SSE→NDJSON del streaming
+# se quedan inline. El handler resuelve primero (necesita el ``state`` para
+# ramificar a nativo/legacy) y le pasa el par al motor vía ``preresolved``; por
+# eso ``federate=None``. La etiqueta de capacidad es ``"chat"`` (no "chat
+# completions"), para conservar byte a byte el 400 de hoy.
+_CHAT_DESCRIPTOR = RequestDescriptor(
+    request_kind="chat",
+    capability="chat",
+    capability_label="chat",
+    dispatch_path="/v1/chat/completions",
+    federates=True,
+    streaming=False,
+    applies_reasoning=True,
+    honors_disconnect=True,
+    applies_fair_share=True,
+)
 
 
 def _native_backend_model_name(requested_model: str, backend_model_id: str | None) -> str:
@@ -276,23 +293,15 @@ async def chat(
             )
         return await worker_pool.forward_request(worker_key, "/api/chat", upstream_body)
 
-    # Through ``to_backend_body`` like ``/v1``: reasoning level and budget,
-    # thinking switches and message normalisation (BUG-11).
-    vllm_body = to_backend_body(
-        state, _build_vllm_chat_body(merged_body, state.backend_model_id, stream)
-    )
-    user_key = fairness_user_key(user)
-    slots = fairness_slots(state)
+    # Non-native: cuerpo traducido como ``/v1`` (razonamiento, thinking,
+    # normalización de mensajes/tool_calls — BUG-11, project_ollama_tool_calls_dropped).
+    # El preflight de KV (400 si una sola petición no cabe en el pool) se queda
+    # inline: es la misma respuesta de hoy, antes de tocar la reja de admisión.
     kv_capacity, kv_tokens = fairness_kv_budget(
         state,
         required_tokens=getattr(request.state, "runtime_required_tokens", None),
         effective_context=getattr(request.state, "runtime_effective_context", None),
         reservation_tokens=getattr(request.state, "runtime_kv_reservation_tokens", None),
-    )
-    kv_admission = (
-        {"kv_capacity_tokens": kv_capacity, "kv_tokens": kv_tokens}
-        if kv_capacity is not None
-        else {}
     )
     if kv_capacity is not None and kv_tokens > kv_capacity:
         raise HTTPException(
@@ -301,13 +310,23 @@ async def chat(
         )
 
     if stream:
+        # Streaming SSE→NDJSON: la traducción vive en la capa api (REF-09), así
+        # que el camino se queda inline. Mismo despacho que hoy.
+        vllm_body = to_backend_body(
+            state, _build_vllm_chat_body(merged_body, state.backend_model_id, True)
+        )
+        kv_admission = (
+            {"kv_capacity_tokens": kv_capacity, "kv_tokens": kv_tokens}
+            if kv_capacity is not None
+            else {}
+        )
         source = await open_stream(
             worker_pool.forward_stream(
                 worker_key,
                 "/v1/chat/completions",
                 vllm_body,
-                user_key=user_key,
-                slots=slots,
+                user_key=fairness_user_key(user),
+                slots=fairness_slots(state),
                 **telemetry_admission,
                 **kv_admission,
             )
@@ -318,38 +337,31 @@ async def chat(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    started_ns = time.monotonic_ns()
-    try:
-        # Si el cliente se va, cancelar: en la via no de streaming FastAPI deja
-        # correr el handler hasta el final y el slot de admision mas la GPU se
-        # quedan ocupados por una respuesta que ya no lee nadie (medido el
-        # 2026-11-07: cliente rendido a los ~900 s, oCabra generando hasta los
-        # 1500 s de su propio timeout).
-        result = await await_unless_client_gone(
-            request,
-            worker_pool.forward_request(
-                worker_key,
-                "/v1/chat/completions",
-                vllm_body,
-                user_key=user_key,
-                slots=slots,
-                **telemetry_admission,
-                **kv_admission,
-            ),
-        )
-    except ClientGoneError:
-        # Cancelada por desconexion del cliente: el slot y la GPU ya estan
-        # libres. 499 es el codigo canonico de "client closed request".
-        raise HTTPException(status_code=499, detail="client disconnected") from None
-    except dispatch_error_types() as exc:
-        raise_dispatch_error(exc)
-    message = _extract_chat_ollama_message(result)
-    total_duration = time.monotonic_ns() - started_ns
+    # NO-streaming por el motor de flujo único (REF-01 fase C): el reparto justo
+    # (user_key/slots/KV), la telemetría de runtime, la cancelación por
+    # desconexión del cliente y el mapeo de errores de worker los arma el motor
+    # —igual que /v1/chat/completions no-streaming—. Se le pasa el cuerpo OpenAI
+    # ya construido (``_build_vllm_chat_body``, sin ``to_backend_body``: eso lo
+    # aplica el motor) y el par ya resuelto. La respuesta se traduce de vuelta a
+    # la forma Ollama (done_reason, tool_calls, thinking, duraciones).
+    outcome = await run_request(
+        request,
+        descriptor=_CHAT_DESCRIPTOR,
+        body=_build_vllm_chat_body(merged_body, state.backend_model_id, False),
+        user=user,
+        model_manager=model_manager,
+        profile_registry=profile_registry,
+        worker_pool=worker_pool,
+        federate=None,
+        preresolved=(profile, state),
+    )
+    result = outcome.result
+    total_duration = int((time.monotonic() - outcome.forward_started) * 1_000_000_000)
     usage = result.get("usage") or {}
     return {
         "model": ollama_model,
         "created_at": now_iso_z(),
-        "message": message,
+        "message": _extract_chat_ollama_message(result),
         "done": True,
         "done_reason": _extract_finish_reason(result),
         "prompt_eval_count": int(usage.get("prompt_tokens") or 0),
