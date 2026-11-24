@@ -568,11 +568,17 @@ function toModelCapabilities(raw: unknown): ModelState["capabilities"] {
     audioOutput: Boolean(data.audio_output ?? data.audioOutput),
     videoInput: Boolean(data.video_input ?? data.videoInput),
     videoGeneration: Boolean(data.video_generation ?? data.videoGeneration),
+    videoUpscaling: Boolean(data.video_upscaling ?? data.videoUpscaling),
+    imageUpscaling: Boolean(data.image_upscaling ?? data.imageUpscaling),
     streaming: Boolean(data.streaming),
     contextLength: Number(data.context_length ?? data.contextLength ?? 0),
     nativeContextLength: Number(
       data.native_context_length ?? data.nativeContextLength ?? 0,
     ),
+    maxOutputTokens: Number(data.max_output_tokens ?? data.maxOutputTokens ?? 0),
+    parallelSlots: Number(data.parallel_slots ?? data.parallelSlots ?? 0),
+    kvCacheShared: Boolean(data.kv_cache_shared ?? data.kvCacheShared),
+    contextPerRequest: Number(data.context_per_request ?? data.contextPerRequest ?? 0),
   };
 }
 
@@ -1060,6 +1066,8 @@ export function toModelState(raw: unknown): ModelState {
     : undefined;
   return {
     modelId: String(data.model_id ?? data.modelId ?? ""),
+    backendModelId: (data.backend_model_id ?? data.backendModelId ?? null) as
+      string | null,
     maintenance: Boolean(data.maintenance),
     displayName: String(
       data.display_name ??
@@ -1113,6 +1121,9 @@ export function toModelState(raw: unknown): ModelState {
       data.can_cancel_load ?? data.canCancelLoad ?? false,
     ),
     canDownsize: Boolean(data.can_downsize ?? data.canDownsize ?? false),
+    liveContext: isRecord(data.live_context ?? data.liveContext)
+      ? ((data.live_context ?? data.liveContext) as Record<string, unknown>)
+      : null,
     schedules,
     extraConfig: toBackendExtraConfig(data.extra_config ?? data.extraConfig),
     profiles: Array.isArray(data.profiles)
@@ -1354,6 +1365,9 @@ function toLocalModel(raw: unknown): LocalModel {
     ) as LocalModel["backendType"],
     configured: Boolean(data.configured ?? false),
     source: source ?? undefined,
+    vocabSize: (data.vocab_size ?? data.vocabSize ?? null) as number | null,
+    bosId: (data.bos_id ?? data.bosId ?? null) as number | null,
+    eosId: (data.eos_id ?? data.eosId ?? null) as number | null,
   };
 }
 
@@ -1746,6 +1760,9 @@ export function toFederationPeer(raw: unknown): FederationPeer {
     last_error: (d.last_error ?? null) as string | null,
     tunnel_connected: Boolean(d.tunnel_connected ?? false),
     requests_proxied: Number(d.requests_proxied ?? 0),
+    last_proxied_at: d.last_proxied_at != null ? Number(d.last_proxied_at) : null,
+    created_at: (d.created_at ?? null) as string | null,
+    updated_at: (d.updated_at ?? null) as string | null,
     tunnel: isRecord(d.tunnel)
       ? {
           remote_node_id: (d.tunnel.remote_node_id ?? null) as string | null,
@@ -2404,6 +2421,9 @@ export const api = {
           request_defaults: data.requestDefaults,
           enabled: data.enabled,
           routing_targets: data.routingTargets,
+          ...(data.routerContext !== undefined && {
+            router_context: data.routerContext,
+          }),
         }),
       ),
 
@@ -3466,6 +3486,10 @@ export const api = {
           url: data.url,
           api_key: data.api_key,
           access_level: data.access_level,
+          ...(data.connection_mode !== undefined && {
+            connection_mode: data.connection_mode,
+          }),
+          ...(data.notes !== undefined && { notes: data.notes }),
         }),
       ),
 

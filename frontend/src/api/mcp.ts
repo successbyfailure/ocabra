@@ -43,6 +43,9 @@ function toMCPServer(raw: unknown): MCPServer {
     hasEnv: Boolean(d.has_env ?? d.hasEnv ?? false),
     hasAuth: Boolean(d.has_auth ?? d.hasAuth ?? false),
     authType: (d.auth_type ?? d.authType ?? "none") as MCPServer["authType"],
+    oauthConfig: isRecord(d.oauth_config ?? d.oauthConfig)
+      ? ((d.oauth_config ?? d.oauthConfig) as Record<string, unknown>)
+      : null,
     allowedTools: Array.isArray(d.allowed_tools ?? d.allowedTools)
       ? ((d.allowed_tools ?? d.allowedTools) as unknown[]).map(String)
       : null,
@@ -52,6 +55,7 @@ function toMCPServer(raw: unknown): MCPServer {
     toolsCacheUpdatedAt: (d.tools_cache_updated_at ?? d.toolsCacheUpdatedAt ?? null) as string | null,
     healthStatus: (d.health_status ?? d.healthStatus ?? "unknown") as MCPServer["healthStatus"],
     lastError: (d.last_error ?? d.lastError ?? null) as string | null,
+    createdBy: (d.created_by ?? d.createdBy ?? null) as string | null,
     createdAt: String(d.created_at ?? d.createdAt ?? ""),
     updatedAt: String(d.updated_at ?? d.updatedAt ?? ""),
   }

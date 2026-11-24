@@ -131,13 +131,25 @@ export interface ModelCapabilities {
   videoInput: boolean;
   /** Generación de vídeo (/v1/videos). Opcional: los fixtures antiguos no lo traen. */
   videoGeneration?: boolean;
+  /** Escalado de vídeo / imagen (upscalers). El backend los expone en
+   *  BackendCapabilities; opcionales porque los fixtures antiguos no los traen. */
+  videoUpscaling?: boolean;
+  imageUpscaling?: boolean;
   streaming: boolean;
   contextLength: number;
   nativeContextLength: number;
+  /** Tope de salida y paralelismo que publica el backend (0 = sin dato).
+   *  Opcionales: no todos los fixtures/caminos los rellenan. */
+  maxOutputTokens?: number;
+  parallelSlots?: number;
+  kvCacheShared?: boolean;
+  contextPerRequest?: number;
 }
 
 export interface ModelState {
   modelId: string;
+  /** Id nativo del runtime (backend_model_id); el canónico es modelId. */
+  backendModelId?: string | null;
   /** Modo mantenimiento: las peticiones nuevas reciben 503. */
   maintenance?: boolean;
   displayName: string;
@@ -173,6 +185,9 @@ export interface ModelState {
   runtimeSlots?: number;
   canCancelLoad?: boolean;
   canDownsize?: boolean;
+  /** Estado de contexto en vivo del worker (llama.cpp): tamaño actual, máximo,
+   *  si puede crecer… Forma libre; la consume el panel de contexto en vivo. */
+  liveContext?: Record<string, unknown> | null;
   schedules?: EvictionSchedule[];
   extraConfig?: BackendExtraConfig;
   profiles?: ModelProfile[];
@@ -588,6 +603,10 @@ export interface LocalModel {
   // blob inside Ollama's content-addressed store and can be served by our
   // llama.cpp backend without re-downloading.
   source?: "huggingface" | "gguf" | "ollama" | "ollama-shared";
+  /** Metadatos del tokenizer que trae el escaneo local (GGUF). Opcionales. */
+  vocabSize?: number | null;
+  bosId?: number | null;
+  eosId?: number | null;
 }
 
 export interface ServerConfig {
@@ -1705,6 +1724,8 @@ export interface RouterCreate {
   requestDefaults?: Record<string, unknown>;
   enabled?: boolean;
   routingTargets: string[];
+  /** Qué contexto anuncia el router (null = "max"). */
+  routerContext?: RouterContextPolicy | null;
 }
 
 /**
@@ -1797,6 +1818,10 @@ export interface FederationPeer {
   tunnel_connected: boolean;
   tunnel: FederationTunnelInfo | null;
   requests_proxied: number;
+  /** Última vez que proxyeamos una petición a este peer (epoch segundos). */
+  last_proxied_at?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface FederationNodeInfo {
@@ -2023,6 +2048,9 @@ export interface FederationPeerCreate {
   url: string;
   api_key: string;
   access_level: "inference" | "full";
+  /** "http" (marcamos nosotros) o "tunnel_in" (el peer disca hacia aquí). */
+  connection_mode?: FederationConnectionMode;
+  notes?: string | null;
 }
 
 export interface FederationPeerUpdate {

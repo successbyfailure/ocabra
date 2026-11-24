@@ -29,13 +29,17 @@ export interface MCPServer {
   hasEnv: boolean
   hasAuth: boolean
   authType: MCPAuthType
+  /** Config OAuth2 (sin secretos) cuando authType === "oauth2". */
+  oauthConfig: Record<string, unknown> | null
   allowedTools: string[] | null
   groupId: string | null
+  // El backend (MCPServerOut) no devuelve group_name; se resuelve en la UI.
   groupName: string | null
   toolsCache: MCPToolSpec[] | null
   toolsCacheUpdatedAt: string | null
   healthStatus: MCPHealthStatus
   lastError: string | null
+  createdBy: string | null
   createdAt: string
   updatedAt: string
 }
@@ -84,8 +88,10 @@ export interface Agent {
   requestDefaults: Record<string, unknown> | null
   subagentSlugs: string[]
   groupId: string | null
+  // El backend (AgentOut) no devuelve group_name; se resuelve en la UI.
   groupName: string | null
   mcpServers: AgentMCPBinding[]
+  createdBy: string | null
   createdAt: string
   updatedAt: string
 }

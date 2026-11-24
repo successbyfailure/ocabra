@@ -7,7 +7,7 @@ import type {
   PreviewResult,
   RawModel,
 } from "@/components/model-editor/types"
-import type { EvictionSchedule, LoadPolicy } from "@/types"
+import type { BackendType, EvictionSchedule, LoadPolicy } from "@/types"
 
 const enc = encodeURIComponent
 
@@ -57,14 +57,17 @@ export const modelEditorApi = {
     return request<CapacityInfo>("GET", `/ocabra/models/${enc(modelId)}/capacity${qs ? `?${qs}` : ""}`)
   },
 
-  /** PATCH en formato JSON Merge Patch: un null borra la clave guardada. */
+  /** PATCH en formato JSON Merge Patch: un null borra la clave guardada.
+   *  El backend (ModelPatch) acepta también backendType y vramEstimateMb. */
   patch: (
     modelId: string,
     body: {
       displayName?: string
+      backendType?: BackendType
       loadPolicy?: LoadPolicy
       pinPermanent?: boolean
       preferredGpu?: number | null
+      vramEstimateMb?: number | null
       extraConfig?: JsonObject
       schedules?: EvictionSchedule[]
     },

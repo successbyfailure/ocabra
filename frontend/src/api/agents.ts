@@ -61,6 +61,7 @@ function toAgent(raw: unknown): Agent {
     groupId: (d.group_id ?? d.groupId ?? null) as string | null,
     groupName: (d.group_name ?? d.groupName ?? null) as string | null,
     mcpServers: Array.isArray(rawMcp) ? (rawMcp as unknown[]).map(toBinding) : [],
+    createdBy: (d.created_by ?? d.createdBy ?? null) as string | null,
     createdAt: String(d.created_at ?? d.createdAt ?? ""),
     updatedAt: String(d.updated_at ?? d.updatedAt ?? ""),
   }
