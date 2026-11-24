@@ -803,6 +803,7 @@ function ExecutionEnvironment({ attempt }: { attempt?: BenchmarkAttempt }) {
           ...(hardware.nodes ?? []).map((node) => `Nodo ${node}`),
           environment.node?.ocabra ? `oCabra del nodo ${environment.node.ocabra}` : null,
           hardware.nodeTrafficVerified === false ? "Tráfico propio del nodo sin comprobar" : null,
+          hardware.auxiliaryNodes?.length ? `Auxiliares de la suite en ${hardware.auxiliaryNodes.join(", ")}` : null,
         ]} />
         <EnvironmentBlock icon={<Activity size={13} />} title="Carga medida" lines={[
           `${requests.count ?? 0} peticiones`,

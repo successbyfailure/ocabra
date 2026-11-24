@@ -89,6 +89,8 @@ def test_una_medida_servida_en_otro_nodo_se_detecta():
     assert BenchmarkManager._served_elsewhere({"hardware": {"nodes": ["Mapache"]}}, "Mapache") == []
     # Sin nodo pedido se mantiene el reparto normal de la federación.
     assert BenchmarkManager._served_elsewhere(env, None) == []
+    # Sin peticiones del modelo medido tampoco vale.
+    assert BenchmarkManager._served_elsewhere({"hardware": {"nodes": []}}, "Mapache")
 
 
 def _manager_with_peer(payload):

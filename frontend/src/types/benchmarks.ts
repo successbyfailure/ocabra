@@ -64,6 +64,8 @@ export interface BenchmarkAttempt {
       nodes?: string[];
       /** Nodo remoto: si se pudo leer su tráfico propio durante la medida. */
       nodeTrafficVerified?: boolean;
+      /** Dónde se sirvieron los modelos auxiliares de la suite (reranker, juez…). */
+      auxiliaryNodes?: string[];
     };
     /** Nodo remoto donde se midió: nombre, versión de oCabra y GPU. */
     node?: {

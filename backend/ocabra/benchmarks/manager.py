@@ -1035,6 +1035,17 @@ class BenchmarkManager:
             for row in rows
             if row.started_at + timedelta(milliseconds=row.duration_ms or 0) >= started_at
         ]
+        auxiliary_nodes: list[str] = []
+        if node:
+            # En un nodo remoto se describe el modelo medido. Los auxiliares
+            # que fija la suite (el reranker de Escriba, jueces…) se sirven
+            # donde estén y solo se anotan: no son lo que se mide.
+            profile = str((base.get("model") or {}).get("profile") or "")
+            measured = [row for row in rows if (row.requested_model or row.model_id) == profile]
+            auxiliary_nodes = sorted(
+                {row.remote_node_name or "local" for row in rows if row not in measured}
+            )
+            rows = measured
         gpu_manager = getattr(self._app.state, "gpu_manager", None)
         gpu_states = {}
         if node:
@@ -1092,6 +1103,8 @@ class BenchmarkManager:
         model.update(observed["model"])
         environment["model"] = model
         environment["hardware"] = observed["hardware"]
+        if auxiliary_nodes:
+            environment["hardware"]["auxiliaryNodes"] = auxiliary_nodes
         environment["requests"] = observed["requests"]
         return environment
 
@@ -1205,6 +1218,9 @@ class BenchmarkManager:
         nodes = hardware.get("nodes") if isinstance(hardware, dict) else None
         if not isinstance(nodes, list):
             return []
+        if not nodes:
+            # Ninguna petición del modelo medido: no hay nada que lo respalde.
+            return ["ninguna parte (no hay peticiones del modelo medido)"]
         wanted = node.lower()
         return [str(n) for n in nodes if str(n).lower() != wanted]
 

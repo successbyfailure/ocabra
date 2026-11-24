@@ -131,9 +131,12 @@ Lo que cambia respecto a una medida local:
   posible y el entorno lo marca como `nodeTrafficVerified: false` (sin
   comprobar, no limpio). No hay pausa durante la ejecución por tráfico del
   nodo; el intento afectado se descarta y se repite al terminar.
-- **Verificación del nodo.** Si alguna petición se sirvió en otro sitio (el
-  nodo no tenía el modelo y respondió el hub, por ejemplo), el intento falla
-  con el motivo en lugar de dar un resultado de otro hardware.
+- **Verificación del nodo.** Si alguna petición del modelo medido se sirvió en
+  otro sitio (el nodo no lo tenía y respondió el hub, por ejemplo), o no hay
+  ninguna, el intento falla con el motivo en lugar de dar un resultado de otro
+  hardware. Los modelos auxiliares que fija la suite (el reranker de la suite
+  `embeddings` de Escriba, jueces…) se sirven donde estén: no son lo que se
+  mide, y el entorno anota dónde fueron (`auxiliaryNodes`).
 - **Entorno.** Guarda el nombre del nodo, su versión de oCabra y sus GPU (con
   los índices del nodo, no los del hub).
 - **Tiempos.** El túnel añade latencia a TTFT y a la duración total, no a los
