@@ -62,6 +62,15 @@ export interface BenchmarkAttempt {
     hardware?: {
       gpus?: Array<{ index: number; name?: string | null; totalVramMb?: number | null }>;
       nodes?: string[];
+      /** Nodo remoto: si se pudo leer su tráfico propio durante la medida. */
+      nodeTrafficVerified?: boolean;
+    };
+    /** Nodo remoto donde se midió: nombre, versión de oCabra y GPU. */
+    node?: {
+      name?: string;
+      ocabra?: string;
+      online?: boolean;
+      gpus?: Array<{ index?: number; name?: string | null; totalVramMb?: number | null }>;
     };
     requests?: {
       count?: number;
@@ -90,6 +99,8 @@ export interface BenchmarkRun {
   scheduleId: string | null;
   isBaseline: boolean;
   autoPause: boolean;
+  /** Nodo de la federación donde se midió (null = este nodo). */
+  node?: string | null;
   pauseReason: "manual" | "external_traffic" | null;
   currentModelIndex: number;
   currentModel: string | null;
@@ -119,6 +130,7 @@ export interface BenchmarkSchedule {
   models: string[];
   suiteArgs: string[];
   autoPause: boolean;
+  node?: string | null;
   enabled: boolean;
   weekdays: number[];
   timeOfDay: string;
@@ -138,6 +150,7 @@ export interface BenchmarkScheduleInput {
   models: string[];
   suiteArgs?: string[];
   autoPause?: boolean;
+  node?: string | null;
   enabled?: boolean;
   weekdays: number[];
   timeOfDay: string;

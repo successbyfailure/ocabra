@@ -23,6 +23,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TextIO
 from zoneinfo import ZoneInfo
 
@@ -44,6 +45,15 @@ _SERVICE_USERNAME = "__ocabra_benchmark__"
 _SERVICE_KEY_NAME = "ocabra-benchmark"
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def node_base_url(base_url: str, node: str | None) -> str:
+    """URL base del runner: ``<base>/_node/<nodo>`` fuerza el nodo de cada petición."""
+    if not node:
+        return base_url
+    from urllib.parse import quote
+
+    return f"{base_url.rstrip('/')}/_node/{quote(node, safe='')}"
 
 
 def next_schedule_occurrence(
@@ -74,6 +84,7 @@ def run_from_schedule(schedule: BenchmarkSchedule, *, now: datetime | None = Non
         models=list(schedule.models),
         suite_args=list(schedule.suite_args),
         auto_pause=schedule.auto_pause,
+        node=schedule.node,
         phase="queued",
         schedule_id=schedule.id,
         workspace_path=str(Path(settings.benchmark_dir).resolve() / "runs" / str(run_id)),
@@ -474,7 +485,9 @@ class BenchmarkManager:
             app = APPS[run.app]
             suite = app.suites[run.suite]
             model = run.models[run.current_model_index]
-            if run.auto_pause and self._identity is not None:
+            # En un nodo remoto el tráfico del hub no comparte hardware con la
+            # medida: solo cuenta el que llega a ese nodo (se mira al terminar).
+            if run.auto_pause and self._identity is not None and not run.node:
                 active = external_active_requests(self._model_manager, self._identity)
                 if active:
                     run.status = "paused"
@@ -533,7 +546,10 @@ class BenchmarkManager:
                 raise RuntimeError(f"La preparación terminó con código {outcome.return_code}")
             (workspace / ".prepared").touch()
 
+        node = await self._run_node(run_id)
         environment = await self._base_environment(run_id, source, app, suite, model)
+        if node:
+            environment["node"] = await self._node_description(node)
         attempt = await self._create_attempt(
             run_id, model, attempt_number, workspace, log_path, environment
         )
@@ -552,8 +568,9 @@ class BenchmarkManager:
             command,
             source,
             log_path,
-            detect_external=True,
+            detect_external=not node,
             progress_path=workspace / "progress.json",
+            node=node,
         )
         finished_at = datetime.now(UTC)
         await self._set_phase(run_id, "finalizing")
@@ -561,12 +578,29 @@ class BenchmarkManager:
         # write a scheduling turn before checking for fast external requests
         # that may have started and ended between active-request polls.
         await asyncio.sleep(0.1)
-        environment = await self._complete_environment(environment, started_at, finished_at, source)
-        historical = await self._historical_external_requests(started_at, finished_at)
+        environment = await self._complete_environment(
+            environment, started_at, finished_at, source, node=node
+        )
+        historical = await self._historical_external_requests(started_at, finished_at, node=node)
+        if node:
+            peer_external, verified = await self._node_local_requests(node, started_at, finished_at)
+            historical.extend(peer_external)
+            hardware = environment.get("hardware")
+            if isinstance(hardware, dict):
+                hardware["nodeTrafficVerified"] = verified
         external = self._deduplicate_external([*outcome.external_requests, *historical])
 
         if outcome.interruption:
             await self._finish_interrupted_attempt(attempt.id, outcome, external, environment)
+            return
+        served_elsewhere = self._served_elsewhere(environment, node)
+        if served_elsewhere and outcome.return_code == 0:
+            message = (
+                f"Se pidió medir en '{node or 'local'}' pero las peticiones se sirvieron en "
+                f"{', '.join(served_elsewhere)}: el resultado no corresponde a ese nodo"
+            )
+            await self._finish_failed_attempt(attempt.id, outcome.return_code, message, environment)
+            await self._fail_run(run_id, message)
             return
         result_path = self._changed_result(dataset_root, suite.result_glob, before)
         result = await asyncio.to_thread(self._read_result, result_path) if result_path else None
@@ -598,12 +632,13 @@ class BenchmarkManager:
         *,
         detect_external: bool,
         progress_path: Path | None = None,
+        node: str | None = None,
     ) -> ProcessOutcome:
         env = dict(os.environ)
         assert self._identity is not None
         env.update(
             {
-                "OPENAI_COMPATIBLE_URL": settings.benchmark_base_url,
+                "OPENAI_COMPATIBLE_URL": node_base_url(settings.benchmark_base_url, node),
                 "OPENAI_COMPATIBLE_KEY": self._identity.raw_api_key,
                 "UV_CACHE_DIR": str(self._root / "uv" / "cache"),
                 "UV_PYTHON_INSTALL_DIR": str(self._root / "uv" / "python"),
@@ -878,22 +913,27 @@ class BenchmarkManager:
         return value
 
     async def _historical_external_requests(
-        self, started_at: datetime, finished_at: datetime
+        self, started_at: datetime, finished_at: datetime, *, node: str | None = None
     ) -> list[dict[str, object]]:
+        """Peticiones ajenas que coincidieron con la medida en el mismo hardware.
+
+        En local, cualquier petición de otro usuario en este nodo. En un nodo
+        remoto, solo las que este hub le mandó a ese nodo (las de la GPU local
+        no comparten hardware con la medida).
+        """
         assert self._identity is not None
+        conditions = [
+            RequestStat.started_at >= started_at - timedelta(hours=1),
+            RequestStat.started_at <= finished_at,
+            sa.or_(
+                RequestStat.user_id.is_(None),
+                RequestStat.user_id != self._identity.user_id,
+            ),
+        ]
+        if node:
+            conditions.append(sa.func.lower(RequestStat.remote_node_name) == node.lower())
         async with AsyncSessionLocal() as session:
-            rows = (
-                await session.execute(
-                    select(RequestStat).where(
-                        RequestStat.started_at >= started_at - timedelta(hours=1),
-                        RequestStat.started_at <= finished_at,
-                        sa.or_(
-                            RequestStat.user_id.is_(None),
-                            RequestStat.user_id != self._identity.user_id,
-                        ),
-                    )
-                )
-            ).scalars()
+            rows = (await session.execute(select(RequestStat).where(*conditions))).scalars()
             result = []
             for row in rows:
                 row_finished = row.started_at + timedelta(milliseconds=row.duration_ms or 0)
@@ -971,6 +1011,8 @@ class BenchmarkManager:
         started_at: datetime,
         finished_at: datetime,
         source: Path,
+        *,
+        node: str | None = None,
     ) -> dict[str, object]:
         """Attach the backends, nodes and physical GPUs observed in benchmark requests."""
         assert self._identity is not None
@@ -995,7 +1037,15 @@ class BenchmarkManager:
         ]
         gpu_manager = getattr(self._app.state, "gpu_manager", None)
         gpu_states = {}
-        if gpu_manager is not None:
+        if node:
+            # Los índices de GPU de las filas son los del nodo, no los nuestros.
+            peer = self._peer(node)
+            for gpu in getattr(peer, "gpus", None) or []:
+                if isinstance(gpu, dict) and isinstance(gpu.get("index"), int):
+                    gpu_states[gpu["index"]] = SimpleNamespace(
+                        name=gpu.get("name"), total_vram_mb=gpu.get("total_vram_mb")
+                    )
+        elif gpu_manager is not None:
             states = await gpu_manager.get_all_states()
             gpu_states = {state.index: state for state in states}
         observed = execution_observations(rows, gpu_states)
@@ -1048,6 +1098,115 @@ class BenchmarkManager:
     @staticmethod
     def _deduplicate_external(items: list[dict[str, object]]) -> list[dict[str, object]]:
         return list({str(item.get("requestId")): item for item in items}.values())
+
+    # ── Nodos de la federación ──────────────────────────────────────────
+    def _peer(self, node: str):
+        manager = getattr(self._app.state, "federation_manager", None)
+        if manager is None:
+            return None
+        wanted = node.lower()
+        return next(
+            (p for p in manager.get_all_peers() if wanted in {p.name.lower(), str(p.peer_id)}),
+            None,
+        )
+
+    async def _run_node(self, run_id: uuid.UUID) -> str | None:
+        async with AsyncSessionLocal() as session:
+            return (await self._get_run(session, run_id)).node
+
+    async def _node_description(self, node: str) -> dict[str, object]:
+        """Nodo, versión de oCabra y GPU del nodo remoto donde se mide."""
+        peer = self._peer(node)
+        description: dict[str, object] = {
+            "name": node,
+            "online": bool(getattr(peer, "online", False)),
+            "gpus": [
+                {
+                    "index": g.get("index"),
+                    "name": g.get("name"),
+                    "totalVramMb": g.get("total_vram_mb"),
+                }
+                for g in (getattr(peer, "gpus", None) or [])
+                if isinstance(g, dict)
+            ],
+        }
+        payload = await self._peer_json(peer, "/health")
+        if isinstance(payload, dict) and payload.get("version"):
+            description["ocabra"] = payload["version"]
+        return description
+
+    async def _peer_json(self, peer, path: str) -> object | None:
+        manager = getattr(self._app.state, "federation_manager", None)
+        if manager is None or peer is None:
+            return None
+        try:
+            response = await manager.proxy_raw(
+                peer, "GET", path, b"", {"accept": "application/json"}
+            )
+            try:
+                if response.status_code != 200:
+                    return None
+                return json.loads(await response.aread())
+            finally:
+                await response.aclose()
+        except Exception:  # noqa: BLE001 — informativo
+            return None
+
+    async def _node_local_requests(
+        self, node: str, started_at: datetime, finished_at: datetime
+    ) -> tuple[list[dict[str, object]], bool]:
+        """Tráfico que el nodo atendió por su cuenta durante la medida.
+
+        Lo que el hub le mandó ya está en nuestras estadísticas; aquí se leen
+        las peticiones recientes del propio nodo que no llegaron por la
+        federación. ``verified`` es False si no se pudieron leer (nodo con
+        acceso solo de inferencia o caído): la medida no queda limpia ni sucia,
+        queda sin comprobar.
+        """
+        peer = self._peer(node)
+        payload = await self._peer_json(peer, "/ocabra/stats/recent?limit=200")
+        rows = payload.get("requests") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return [], False
+        external: list[dict[str, object]] = []
+        for row in rows:
+            if not isinstance(row, dict) or row.get("inboundFrom"):
+                continue
+            try:
+                started = datetime.fromisoformat(str(row.get("startedAt")))
+            except ValueError:
+                continue
+            ended = started + timedelta(milliseconds=int(row.get("durationMs") or 0))
+            if ended < started_at or started > finished_at:
+                continue
+            external.append(
+                {
+                    "requestId": f"{node}:{row.get('id')}",
+                    "model": row.get("requestedModel") or row.get("modelId"),
+                    "apiKeyName": row.get("apiKeyName"),
+                    "username": row.get("username"),
+                    "startedAt": started.isoformat(),
+                    "source": f"node:{node}",
+                }
+            )
+        return external, True
+
+    @staticmethod
+    def _served_elsewhere(environment: dict[str, object], node: str | None) -> list[str]:
+        """Nodos donde se sirvió la medida que no son el pedido.
+
+        Solo con un nodo pedido: un benchmark local sigue el reparto normal de
+        la federación (un modelo que solo tiene un peer se mide allí), como
+        hasta ahora, y su entorno ya dice dónde se sirvió.
+        """
+        if not node:
+            return []
+        hardware = environment.get("hardware")
+        nodes = hardware.get("nodes") if isinstance(hardware, dict) else None
+        if not isinstance(nodes, list):
+            return []
+        wanted = node.lower()
+        return [str(n) for n in nodes if str(n).lower() != wanted]
 
     async def _corrala_database_url(self) -> str:
         url = settings.benchmark_corrala_database_url.strip()

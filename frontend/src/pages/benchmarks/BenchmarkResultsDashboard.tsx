@@ -175,6 +175,7 @@ export function BenchmarkResultsDashboard({ runs }: { runs: BenchmarkRun[] }) {
                 [<Clock3 size={15} />, "Duración", durationLabel(run)],
                 [<Gauge size={15} />, "Intentos descartados", String(run.contaminatedAttempts)],
                 [<Cpu size={15} />, "Revisión", run.revision.slice(0, 12)],
+                ...(run.node ? [[<Cpu size={15} />, "Nodo", run.node]] : []),
               ].map(([icon, label, value]) => <div key={String(label)} className="bg-card px-4 py-3"><p className="flex items-center gap-1.5 text-xs text-muted-foreground">{icon}{label}</p><p className="mt-1 font-mono text-sm font-semibold">{value}</p></div>)}
             </div>
 

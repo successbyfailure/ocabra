@@ -66,3 +66,24 @@ describe("benchmark model groups", () => {
     })).toBe("vllm 0.12.0")
   })
 })
+
+describe("benchmarks en un nodo de la federación", () => {
+  it("convierte los modelos que anuncia el peer en opciones con su categoría", async () => {
+    const { peerModelOptions } = await import("@/pages/Benchmarks")
+    const options = peerModelOptions({
+      models: [
+        { model_id: "llamacpp_mks/qwen3-embedding:0.6b", status: "loaded", profiles: ["qwen3-embedding:0.6b"],
+          capabilities: { completion: true, embeddings: true } },
+        { model_id: "llamacpp_mks/gemma4:12b", status: "configured", profiles: ["gemma4:12b"],
+          capabilities: { chat: true } },
+      ],
+    } as never)
+    expect(options.map((item) => [item.profileId, item.category])).toEqual([
+      ["qwen3-embedding:0.6b", "embedding"],
+      ["gemma4:12b", "llm"],
+    ])
+    // Las opciones del peer se agrupan igual que los perfiles locales.
+    const groups = benchmarkModelGroups(options, "escriba", "embeddings")
+    expect(groups.map((group) => group.key)).toEqual(["qwen3-embedding:0.6b"])
+  })
+})

@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.134.0 — 2026-11-24
+
+### Nuevo
+
+- **Prefijo `/_node/<nodo>/` para forzar el nodo de la federación** sin
+  cabeceras: `/_node/<nodo>/v1/chat/completions` es `/v1/chat/completions` con
+  `X-Ocabra-Node: <nodo>`. Pensado para clientes que solo dejan configurar la
+  URL base (`base_url=https://…/_node/Mapache/v1`). Vale delante de `/v1/`,
+  `/api/`, `/health`, `/version` y `/ready`. Si el nodo no tiene el modelo,
+  la petición se sirve donde se serviría sin forzar, igual que con la
+  cabecera.
+
+---
+
 ## 0.133.0 — 2026-11-24
 
 ### Cambiado

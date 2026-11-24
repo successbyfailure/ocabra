@@ -9,7 +9,7 @@ import { api } from "@/api/client"
 import { formatDateTime, formatDurationBetween } from "@/lib/format"
 import type {
   BenchmarkAppCatalog, BenchmarkAttempt, BenchmarkRun, BenchmarkRunStatus, BenchmarkSchedule,
-  BenchmarkScheduleInput,
+  BenchmarkScheduleInput, FederationPeer,
   ModelProfile,
 } from "@/types"
 import { BenchmarkResultsDashboard } from "./benchmarks/BenchmarkResultsDashboard"
@@ -79,11 +79,40 @@ function benchmarkCategories(app: string, suite: string): Set<ModelProfile["cate
   return new Set(["llm"])
 }
 
-function profileBackend(profile: ModelProfile): string {
+/** Lo que necesita el selector de modelos: un perfil local o uno anunciado por un peer. */
+export type BenchmarkModelOption = Pick<
+  ModelProfile, "profileId" | "baseModelId" | "displayName" | "category" | "isDefault"
+>
+
+function categoryFromCapabilities(caps: Record<string, boolean> | undefined): ModelProfile["category"] {
+  if (!caps) return "llm"
+  if (caps.embeddings) return "embedding"
+  if (caps.rerank || caps.score) return "rerank"
+  if (caps.audio_transcription) return "stt"
+  if (caps.tts) return "tts"
+  if (caps.image_generation || caps.image_editing) return "image"
+  return "llm"
+}
+
+/** Perfiles que un nodo de la federación anuncia, como opciones del selector. */
+export function peerModelOptions(peer: FederationPeer): BenchmarkModelOption[] {
+  return peer.models.flatMap((model) => {
+    const profiles = model.profiles.length > 0 ? model.profiles : [model.model_id]
+    return profiles.map((profileId, index) => ({
+      profileId,
+      baseModelId: model.model_id,
+      displayName: profileId,
+      category: categoryFromCapabilities(model.capabilities),
+      isDefault: index === 0,
+    }))
+  })
+}
+
+function profileBackend(profile: BenchmarkModelOption): string {
   return profile.baseModelId?.split("/", 1)[0] ?? "sin backend"
 }
 
-function logicalModelId(profile: ModelProfile): string {
+function logicalModelId(profile: BenchmarkModelOption): string {
   const value = profile.baseModelId ?? profile.profileId
   return value.includes("/") ? value.slice(value.indexOf("/") + 1) : value
 }
@@ -104,11 +133,11 @@ export function backendVersionLabel(backend: {
 }
 
 export function benchmarkModelGroups(
-  profiles: ModelProfile[], app: string, suite: string, search = "",
+  profiles: BenchmarkModelOption[], app: string, suite: string, search = "",
 ) {
   const needle = search.trim().toLocaleLowerCase()
   const categories = benchmarkCategories(app, suite)
-  const groups = new Map<string, ModelProfile[]>()
+  const groups = new Map<string, BenchmarkModelOption[]>()
   profiles.filter((item) => categories.has(item.category)).forEach((item) => {
     const key = logicalModelId(item)
     groups.set(key, [...(groups.get(key) ?? []), item])
@@ -138,6 +167,9 @@ export function Benchmarks() {
   const [revision, setRevision] = useState("")
   const [profile, setProfile] = useState("standard")
   const [autoPause, setAutoPause] = useState(true)
+  // Nodo de la federación donde medir ("" = este nodo).
+  const [node, setNode] = useState("")
+  const [peers, setPeers] = useState<FederationPeer[]>([])
   const [scheduleName, setScheduleName] = useState("")
   const [scheduleEnabled, setScheduleEnabled] = useState(false)
   const [scheduleDays, setScheduleDays] = useState<number[]>([0])
@@ -174,6 +206,10 @@ export function Benchmarks() {
       })
       .catch((error) => toast.error(error instanceof Error ? error.message : "No se pudieron cargar los benchmarks"))
       .finally(() => setLoading(false))
+    // Sin federación (o sin permiso para verla) solo se mide aquí.
+    api.federation.getPeers()
+      .then((items) => setPeers(items.filter((peer) => peer.enabled)))
+      .catch(() => setPeers([]))
   }, [])
 
   const hasActive = runs.some((run) => ACTIVE_STATUSES.includes(run.status))
@@ -187,9 +223,14 @@ export function Benchmarks() {
   const timeEstimate = useMemo(() => estimateBenchmarkTime(
     runs, appName, suiteName, suiteProfileArgs(appName, profile), models,
   ), [appName, models, profile, runs, suiteName])
+  const selectedPeer = peers.find((peer) => peer.name === node)
+  const modelOptions = useMemo<BenchmarkModelOption[]>(
+    () => (selectedPeer ? peerModelOptions(selectedPeer) : profiles),
+    [profiles, selectedPeer],
+  )
   const modelGroups = useMemo(() => {
-    return benchmarkModelGroups(profiles, appName, suiteName, modelSearch)
-  }, [appName, modelSearch, profiles, suiteName])
+    return benchmarkModelGroups(modelOptions, appName, suiteName, modelSearch)
+  }, [appName, modelSearch, modelOptions, suiteName])
   const visibleProfileIds = useMemo(() => modelGroups.flatMap((group) => group.options.map((item) => item.profileId)), [modelGroups])
 
   const visibleRuns = useMemo(() => {
@@ -197,7 +238,7 @@ export function Benchmarks() {
     return runs.filter((run) => (
       (statusFilter === "all" || run.status === statusFilter)
       && (appFilter === "all" || run.app === appFilter)
-      && (!needle || `${run.app} ${run.suite} ${run.models.join(" ")} ${run.revision}`.toLocaleLowerCase().includes(needle))
+      && (!needle || `${run.app} ${run.suite} ${run.models.join(" ")} ${run.revision} ${run.node ?? ""}`.toLocaleLowerCase().includes(needle))
     ))
   }, [appFilter, runSearch, runs, statusFilter])
 
@@ -225,7 +266,7 @@ export function Benchmarks() {
     try {
       await api.benchmarks.create({
         app: appName, suite: suiteName, models, revision,
-        suiteArgs: suiteProfileArgs(appName, profile), autoPause,
+        suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node || null,
       })
       toast.success("Benchmark añadido a la cola")
       setModels([])
@@ -240,7 +281,8 @@ export function Benchmarks() {
 
   const schedulePayload = (overrides: Partial<BenchmarkScheduleInput> = {}): BenchmarkScheduleInput => ({
     name: scheduleName.trim(), app: appName, suite: suiteName, models, revision,
-    suiteArgs: suiteProfileArgs(appName, profile), autoPause, enabled: scheduleEnabled,
+    suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node || null,
+    enabled: scheduleEnabled,
     weekdays: scheduleDays, timeOfDay: scheduleTime, timezone: scheduleTimezone,
     ...overrides,
   })
@@ -277,6 +319,7 @@ export function Benchmarks() {
     setModels(schedule.models)
     setRevision(schedule.revision)
     setAutoPause(schedule.autoPause)
+    setNode(schedule.node ?? "")
     setScheduleEnabled(schedule.enabled)
     setScheduleDays(schedule.weekdays)
     setScheduleTime(schedule.timeOfDay)
@@ -292,7 +335,7 @@ export function Benchmarks() {
       await api.benchmarks.schedules.update(schedule.id, {
         name: schedule.name, app: schedule.app, suite: schedule.suite,
         revision: schedule.revision, models: schedule.models, suiteArgs: schedule.suiteArgs,
-        autoPause: schedule.autoPause, enabled: schedule.enabled,
+        autoPause: schedule.autoPause, node: schedule.node ?? null, enabled: schedule.enabled,
         weekdays: schedule.weekdays, timeOfDay: schedule.timeOfDay,
         timezone: schedule.timezone, ...changes,
       })
@@ -342,7 +385,7 @@ export function Benchmarks() {
     try {
       await api.benchmarks.create({
         app: run.app, suite: run.suite, models: run.models, revision: run.revision,
-        suiteArgs: run.suiteArgs, autoPause: run.autoPause,
+        suiteArgs: run.suiteArgs, autoPause: run.autoPause, node: run.node ?? null,
       })
       toast.success("Configuración añadida de nuevo a la cola")
       await refresh()
@@ -474,6 +517,32 @@ export function Benchmarks() {
 
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
             <div className="space-y-3">
+              {peers.length > 0 && (
+                <div className="space-y-1.5" data-testid="benchmark-node">
+                  <label className="text-sm font-medium" htmlFor="benchmark-node-select">Nodo</label>
+                  <select
+                    id="benchmark-node-select"
+                    value={node}
+                    onChange={(event) => { setNode(event.target.value); setModels([]) }}
+                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                  >
+                    <option value="">Este nodo</option>
+                    {peers.map((peer) => (
+                      <option key={peer.peer_id} value={peer.name} disabled={!peer.online}>
+                        {peer.name}{peer.online ? "" : " (desconectado)"}
+                        {peer.gpus.length > 0 ? ` · ${peer.gpus.map((gpu) => gpu.name).join(" + ")}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedPeer && (
+                    <p className="text-xs text-muted-foreground">
+                      El runner sigue aquí y cada petición va forzada a {selectedPeer.name}. El túnel añade
+                      latencia al TTFT y a la duración, no a los tokens/s ni a los fps.
+                      {selectedPeer.access_level !== "full" && " Sin acceso completo no se puede comprobar su tráfico propio: la medida quedará sin verificar."}
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="flex items-center justify-between gap-2">
                 <label className="text-sm font-medium">Modelos</label>
                 <div className="flex gap-2 text-xs">
@@ -499,7 +568,7 @@ export function Benchmarks() {
                     </div>
                   </div>
                 ))}
-                {modelGroups.length === 0 && <p className="p-4 text-center text-xs text-muted-foreground">No hay modelos compatibles con esta suite.</p>}
+                {modelGroups.length === 0 && <p className="p-4 text-center text-xs text-muted-foreground">{selectedPeer ? `${selectedPeer.name} no anuncia modelos compatibles con esta suite (los nodos antiguos solo anuncian los que tienen cargados).` : "No hay modelos compatibles con esta suite."}</p>}
               </div>
               {models.length > 0 && (
                 <div className="flex flex-wrap gap-1.5">
@@ -572,7 +641,7 @@ export function Benchmarks() {
         <div className="flex items-center gap-2 border-b border-border px-4 py-3"><CalendarDays size={16} className="text-primary" /><div><h2 className="font-medium">Planes y horarios</h2><p className="text-xs text-muted-foreground">Las plantillas desactivadas se conservan sin lanzarse solas.</p></div></div>
         {schedules.length === 0 ? <p className="p-6 text-center text-sm text-muted-foreground">Todavía no hay planes guardados.</p> : <div className="grid gap-3 p-4 lg:grid-cols-2">{schedules.map((schedule) => (
           <article key={schedule.id} className="rounded-lg border border-border bg-background p-3">
-            <div className="flex items-start justify-between gap-3"><div><h3 className="font-medium">{schedule.name}</h3><p className="font-mono text-xs text-muted-foreground">{schedule.app}/{schedule.suite} · {schedule.models.length} modelo{schedule.models.length === 1 ? "" : "s"}</p></div><button type="button" disabled={busyId === schedule.id} onClick={() => void updateSchedule(schedule, { enabled: !schedule.enabled })} className={`rounded-full border px-2 py-1 text-xs ${schedule.enabled ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400" : "border-border text-muted-foreground"}`}>{schedule.enabled ? "Activo" : "Plantilla"}</button></div>
+            <div className="flex items-start justify-between gap-3"><div><h3 className="font-medium">{schedule.name}</h3><p className="font-mono text-xs text-muted-foreground">{schedule.app}/{schedule.suite} · {schedule.models.length} modelo{schedule.models.length === 1 ? "" : "s"}{schedule.node ? ` · en ${schedule.node}` : ""}</p></div><button type="button" disabled={busyId === schedule.id} onClick={() => void updateSchedule(schedule, { enabled: !schedule.enabled })} className={`rounded-full border px-2 py-1 text-xs ${schedule.enabled ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400" : "border-border text-muted-foreground"}`}>{schedule.enabled ? "Activo" : "Plantilla"}</button></div>
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground"><div><span className="block">Próxima</span><strong className="font-normal text-foreground">{schedule.nextRunAt ? formatDate(schedule.nextRunAt) : "No programada"}</strong></div><div><span className="block">Última</span><strong className="font-normal text-foreground">{formatDate(schedule.lastRunAt)}</strong></div><div><span className="block">Horario</span><strong className="font-normal text-foreground">{schedule.weekdays.map((day) => WEEKDAYS[day]).join(" ")} · {schedule.timeOfDay}</strong></div><div><span className="block">Zona</span><strong className="font-normal text-foreground">{schedule.timezone}</strong></div></div>
             <div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={() => void runSchedule(schedule)} disabled={busyId === schedule.id} className={ACTION_BUTTON}><Play size={12} /> Ejecutar ahora</button><button type="button" onClick={() => editSchedule(schedule)} className={ACTION_BUTTON}>Editar</button><button type="button" onClick={() => void removeSchedule(schedule)} disabled={busyId === schedule.id} className={`${ACTION_BUTTON} text-destructive`}><Trash2 size={12} /> Eliminar</button></div>
           </article>
@@ -637,6 +706,7 @@ function RunCard({ run, history, busy, log, logOpen, onPause, onResume, onCancel
             <div className="flex flex-wrap items-center gap-2">
               <h3 className="font-medium">{run.app} <span className="text-muted-foreground">·</span> {run.suite}</h3>
               <span className={`rounded border px-2 py-0.5 text-xs ${statusClass(run.status)}`}>{STATUS_LABEL[run.status]}</span>
+              {run.node && <span className="inline-flex items-center gap-1 rounded border border-violet-500/40 bg-violet-500/10 px-2 py-0.5 text-xs text-violet-300" title="Medido en este nodo de la federación"><Server size={11} /> {run.node}</span>}
               {run.isBaseline && <span className="inline-flex items-center gap-1 text-xs text-amber-400"><Star size={12} className="fill-current" /> Referencia</span>}
               {run.contaminatedAttempts > 0 && <span className="inline-flex items-center gap-1 text-xs text-amber-400"><AlertTriangle size={12} /> {run.contaminatedAttempts} descartado{run.contaminatedAttempts === 1 ? "" : "s"}</span>}
             </div>
@@ -731,6 +801,8 @@ function ExecutionEnvironment({ attempt }: { attempt?: BenchmarkAttempt }) {
         <EnvironmentBlock icon={<Server size={13} />} title="Hardware" lines={[
           ...gpus.map((gpu) => `GPU ${gpu.index}: ${gpu.name ?? "desconocida"}${gpu.totalVramMb ? ` · ${(gpu.totalVramMb / 1024).toFixed(0)} GB` : ""}`),
           ...(hardware.nodes ?? []).map((node) => `Nodo ${node}`),
+          environment.node?.ocabra ? `oCabra del nodo ${environment.node.ocabra}` : null,
+          hardware.nodeTrafficVerified === false ? "Tráfico propio del nodo sin comprobar" : null,
         ]} />
         <EnvironmentBlock icon={<Activity size={13} />} title="Carga medida" lines={[
           `${requests.count ?? 0} peticiones`,

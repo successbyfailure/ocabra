@@ -35,7 +35,12 @@ export function runFingerprint(run: BenchmarkRun, model: string): string {
   const software = attempt?.environment.software
   const backend = attempt?.environment.model?.backends?.[0]
   const gpu = attempt?.environment.hardware?.gpus?.map((item) => `GPU${item.index}`).join("+")
-  return [software?.ocabra ? `v${software.ocabra}` : null, backend, gpu].filter(Boolean).join(" · ")
+  return [
+    software?.ocabra ? `v${software.ocabra}` : null,
+    backend,
+    gpu,
+    run.node ? `en ${run.node}` : null,
+  ].filter(Boolean).join(" · ")
 }
 
 export function BenchmarkHistory({ runs }: { runs: BenchmarkRun[] }) {

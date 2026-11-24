@@ -13,6 +13,8 @@ export interface FederationPeerModel {
   model_id: string;
   status: string;
   profiles: string[];
+  /** Lo que el peer anuncia del modelo (chat, embeddings, rerank…). */
+  capabilities?: Record<string, boolean>;
 }
 
 export interface FederationPeerLoad {

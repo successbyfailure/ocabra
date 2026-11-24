@@ -127,6 +127,10 @@ function latestAttempt(run: BenchmarkRun, profile: string): BenchmarkAttempt | u
   ))
 }
 
+function withNode(backend: string, node: string | null | undefined): string {
+  return node ? `${backend} @ ${node}` : backend
+}
+
 function attemptBackend(attempt: BenchmarkAttempt | undefined): string {
   return attempt?.environment.model?.backends?.join("+") || UNKNOWN_BACKEND
 }
@@ -210,7 +214,8 @@ function observations(runs: BenchmarkRun[], filters: RankingFilters): Observatio
       const quality = observationQuality(run, profile, dimension)
       if (quality === null) return
       const speed = speedMetric(run, profile)
-      const backend = attemptBackend(attempt)
+      // El mismo modelo en otro nodo de la federación es otra fila: otro hardware.
+      const backend = withNode(attemptBackend(attempt), run.node)
       const parsed = parseBenchmarkResults({ [profile]: run.result[profile] })
       const model = parsed[0]?.model || profile
       result.push({

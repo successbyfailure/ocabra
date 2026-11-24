@@ -11,6 +11,7 @@ import asyncio
 import contextvars
 import hashlib
 import hmac
+import re
 import secrets
 import time
 import uuid
@@ -1776,6 +1777,38 @@ async def resolve_federated(
     )
 
 
+# ``/_node/<nodo>/v1/...`` es ``/v1/...`` con ``X-Ocabra-Node: <nodo>``: para
+# clientes que solo dejan configurar la URL base, como los runners de
+# benchmarks de las aplicaciones (Escriba, Corrala, BFCL), que no añaden
+# cabeceras. Solo delante de la API de inferencia y de las sondas.
+NODE_PREFIX = "/_node/"
+_NODE_PREFIX_TARGETS = ("/v1/", "/api/")
+_NODE_PREFIX_EXACT = ("/health", "/version", "/ready")
+_NODE_NAME_RE = re.compile(r"^[A-Za-z0-9 ._:@-]{1,64}$")
+
+
+def strip_node_prefix(scope: dict) -> tuple[dict, str | None]:
+    """``(scope sin el prefijo, nodo)`` si la ruta empieza por ``/_node/<nodo>/``."""
+    path = scope.get("path") or ""
+    if not path.startswith(NODE_PREFIX):
+        return scope, None
+    from urllib.parse import unquote
+
+    name, sep, tail = path[len(NODE_PREFIX) :].partition("/")
+    name = unquote(name)
+    target = "/" + tail
+    if (
+        not sep
+        or not _NODE_NAME_RE.match(name)
+        or not (target.startswith(_NODE_PREFIX_TARGETS) or target in _NODE_PREFIX_EXACT)
+    ):
+        return scope, None
+    scope = dict(scope)
+    scope["path"] = target
+    scope["raw_path"] = target.encode()
+    return scope, name
+
+
 class FederationHopMiddleware:
     """Pure ASGI middleware: mark requests that came from a federation peer.
 
@@ -1798,10 +1831,13 @@ class FederationHopMiddleware:
             return
         info: dict[str, Any] = {}
         hop = None
+        scope, prefixed_node = strip_node_prefix(scope)
+        if prefixed_node is not None:
+            info["force_node"] = prefixed_node
         for key, value in scope.get("headers") or ():
             if key == self._HEADER:
                 hop = value.decode("latin-1") or "peer"
-            elif key == self._FORCE:
+            elif key == self._FORCE and prefixed_node is None:
                 info["force_node"] = value.decode("latin-1")[:64]
         if hop is not None:
             info["inbound_hop"] = hop

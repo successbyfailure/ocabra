@@ -31,6 +31,7 @@ export const benchmarksApiModule = {
       revision?: string;
       suiteArgs?: string[];
       autoPause?: boolean;
+      node?: string | null;
     }) =>
       request<BenchmarkRun>("POST", "/ocabra/benchmarks/runs", {
         app: payload.app,
@@ -39,6 +40,7 @@ export const benchmarksApiModule = {
         revision: payload.revision || null,
         suite_args: payload.suiteArgs ?? [],
         auto_pause: payload.autoPause ?? true,
+        node: payload.node || null,
       }),
     pause: (runId: string) =>
       request<BenchmarkRun>(
@@ -77,6 +79,7 @@ export const benchmarksApiModule = {
           name: payload.name, app: payload.app, suite: payload.suite,
           revision: payload.revision || null, models: payload.models,
           suite_args: payload.suiteArgs ?? [], auto_pause: payload.autoPause ?? true,
+          node: payload.node || null,
           enabled: payload.enabled ?? false, weekdays: payload.weekdays,
           time_of_day: payload.timeOfDay, timezone: payload.timezone,
         }),
@@ -86,6 +89,7 @@ export const benchmarksApiModule = {
             name: payload.name, app: payload.app, suite: payload.suite,
             revision: payload.revision || null, models: payload.models,
             suite_args: payload.suiteArgs ?? [], auto_pause: payload.autoPause ?? true,
+            node: payload.node || null,
             enabled: payload.enabled ?? false, weekdays: payload.weekdays,
             time_of_day: payload.timeOfDay, timezone: payload.timezone,
           },

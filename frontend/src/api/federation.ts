@@ -62,6 +62,11 @@ export function toFederationPeer(raw: unknown): FederationPeer {
             profiles: Array.isArray(model.profiles)
               ? model.profiles.map(String)
               : [],
+            capabilities: isRecord(model.capabilities)
+              ? Object.fromEntries(
+                  Object.entries(model.capabilities).map(([k, v]) => [k, Boolean(v)]),
+                )
+              : undefined,
           };
         })
       : [],

@@ -40,5 +40,8 @@ describe("benchmark historical comparison", () => {
     }))
 
     expect(runFingerprint(value, "qwen")).toBe("v0.127.0 · backend-qwen · GPU1")
+    // Medido en otro nodo: la huella lo dice, para no compararlo como si fuera aquí.
+    value.node = "Mapache"
+    expect(runFingerprint(value, "qwen")).toBe("v0.127.0 · backend-qwen · GPU1 · en Mapache")
   })
 })

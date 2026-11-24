@@ -79,7 +79,9 @@ curl -H "Authorization: Bearer sk-…" http://localhost:8484/v1/models
   `OCABRA_MODEL_HEADERS` en `backend/ocabra/api/openai/_deps.py`, que es
   lo que publica Swagger.
 - **Cabeceras de petición.** `X-Ocabra-Node: <nodo>|local` fuerza dónde se
-  sirve con federación; `X-Ocabra-Stream-Events: true`,
+  sirve con federación (para clientes que solo dejan cambiar la URL base, el
+  prefijo `/_node/<nodo>/v1/...` hace lo mismo; vale delante de `/v1/`,
+  `/api/`, `/health`, `/version` y `/ready`); `X-Ocabra-Stream-Events: true`,
   `X-Ocabra-Allowed-Tools` y `X-Ocabra-Require-Approval` afectan a los
   agentes (`agent/<slug>`).
 - **Streaming.** Los SSE intercalan comentarios `: {"event":

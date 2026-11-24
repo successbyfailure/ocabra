@@ -112,6 +112,35 @@ el valor y su delta por modelo y prueba, junto con la versión de oCabra, backen
 y GPU registrados. La referencia se devuelve aunque sea más antigua que el
 límite normal del historial.
 
+### Medir en un nodo de la federación
+
+El formulario y los planes tienen un selector **Nodo** cuando hay peers. Con
+un nodo elegido, el runner sigue ejecutándose en este hub (datasets, Git,
+credenciales y la base de Corrala no salen de aquí) y su URL base pasa a ser
+`<BENCHMARK_BASE_URL>/_node/<nodo>`: cada petición se fuerza a ese nodo como
+con `X-Ocabra-Node`. Los modelos que se ofrecen son los que el nodo anuncia en
+la federación (los nodos anteriores a 0.97 solo anuncian los que tienen
+cargados).
+
+Lo que cambia respecto a una medida local:
+
+- **Contaminación.** El tráfico del hub no cuenta, porque no comparte
+  hardware. Cuenta el que llega a ese nodo: el que este hub le mandó por otros
+  usuarios y el que atendió por su cuenta, leído de su `/ocabra/stats/recent`
+  al terminar cada intento. Sin acceso completo al nodo esa lectura no es
+  posible y el entorno lo marca como `nodeTrafficVerified: false` (sin
+  comprobar, no limpio). No hay pausa durante la ejecución por tráfico del
+  nodo; el intento afectado se descarta y se repite al terminar.
+- **Verificación del nodo.** Si alguna petición se sirvió en otro sitio (el
+  nodo no tenía el modelo y respondió el hub, por ejemplo), el intento falla
+  con el motivo en lugar de dar un resultado de otro hardware.
+- **Entorno.** Guarda el nombre del nodo, su versión de oCabra y sus GPU (con
+  los índices del nodo, no los del hub).
+- **Tiempos.** El túnel añade latencia a TTFT y a la duración total, no a los
+  tokens/s ni a los fps que mide el motor.
+- **Resultados.** El ranking trata el mismo perfil en otro nodo como otra fila
+  (`backend @ nodo`) y la huella del histórico añade `en <nodo>`.
+
 Corrala requiere `uv` (incluido en la imagen API) y una PostgreSQL desechable.
 Por defecto oCabra crea `<base principal>_bench`; se puede indicar otra con
 `BENCHMARK_CORRALA_DATABASE_URL`, cuyo nombre debe contener

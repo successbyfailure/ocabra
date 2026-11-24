@@ -43,6 +43,18 @@ class BenchmarkRunCreate(BaseModel):
     revision: str | None = None
     suite_args: list[str] = Field(default_factory=list, max_length=32)
     auto_pause: bool = True
+    # Nodo de la federación donde medir (nombre del peer); None = este nodo.
+    node: str | None = Field(default=None, max_length=64)
+
+    @field_validator("node")
+    @classmethod
+    def validate_node(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value or value.lower() in ("local", "hub"):
+            return None
+        return value
 
     @field_validator("models")
     @classmethod
@@ -202,6 +214,7 @@ def _run_payload(run: BenchmarkRun, *, include_attempts: bool = True) -> dict[st
         "scheduleId": str(run.schedule_id) if run.schedule_id else None,
         "isBaseline": run.is_baseline,
         "autoPause": run.auto_pause,
+        "node": getattr(run, "node", None),
         "pauseReason": run.pause_reason,
         "currentModelIndex": run.current_model_index,
         "currentModel": run.current_model,
@@ -229,6 +242,7 @@ def _schedule_payload(schedule: BenchmarkSchedule) -> dict[str, object]:
         "models": schedule.models,
         "suiteArgs": schedule.suite_args,
         "autoPause": schedule.auto_pause,
+        "node": getattr(schedule, "node", None),
         "enabled": schedule.enabled,
         "weekdays": schedule.weekdays,
         "timeOfDay": schedule.time_of_day,
@@ -247,6 +261,28 @@ def _validate_catalog(app_name: str, suite_name: str) -> None:
         raise HTTPException(status_code=400, detail="Aplicación de benchmark desconocida")
     if suite_name not in app.suites:
         raise HTTPException(status_code=400, detail="Suite de benchmark desconocida")
+
+
+def _canonical_node(request: Request, node: str | None) -> str | None:
+    """Nombre del peer tal como lo conoce la federación, o 400 si no existe.
+
+    El benchmark fuerza las peticiones a ese nodo; un nombre que no casa con
+    ningún peer haría que se sirvieran aquí y el resultado mediría otro
+    hardware.
+    """
+    if node is None:
+        return None
+    manager = getattr(request.app.state, "federation_manager", None)
+    peers = manager.get_all_peers() if manager is not None else []
+    wanted = node.lower()
+    for peer in peers:
+        if wanted in {peer.name.lower(), str(peer.peer_id)}:
+            if not peer.enabled:
+                raise HTTPException(
+                    status_code=400, detail=f"El nodo '{peer.name}' está desactivado"
+                )
+            return peer.name
+    raise HTTPException(status_code=400, detail=f"No hay ningún nodo federado llamado '{node}'")
 
 
 def _user_uuid(user: UserContext) -> uuid.UUID | None:
@@ -301,6 +337,7 @@ async def create_benchmark_run(
         models=body.models,
         suite_args=body.suite_args,
         auto_pause=body.auto_pause,
+        node=_canonical_node(request, body.node),
         phase="queued",
         workspace_path=workspace,
         created_by=_user_uuid(user),
@@ -348,6 +385,7 @@ async def create_benchmark_schedule(
         models=body.models,
         suite_args=body.suite_args,
         auto_pause=body.auto_pause,
+        node=_canonical_node(request, body.node),
         enabled=body.enabled,
         weekdays=body.weekdays,
         time_of_day=body.time_of_day,
@@ -376,6 +414,7 @@ async def update_benchmark_schedule(
 ) -> dict[str, object]:
     """Replace a plan definition and recalculate its next occurrence."""
     _validate_catalog(body.app, body.suite)
+    node = _canonical_node(request, body.node)
     async with AsyncSessionLocal() as session:
         schedule = await session.get(BenchmarkSchedule, schedule_id)
         if schedule is None:
@@ -394,6 +433,7 @@ async def update_benchmark_schedule(
             "timezone",
         ):
             setattr(schedule, field, getattr(body, field))
+        schedule.node = node
         schedule.next_run_at = (
             next_schedule_occurrence(
                 body.weekdays, body.time_of_day, body.timezone, datetime.now(UTC)
