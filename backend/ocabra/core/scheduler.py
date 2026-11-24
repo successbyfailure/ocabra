@@ -6,6 +6,7 @@ import sqlalchemy as sa
 import structlog
 
 from ocabra.config import settings
+from ocabra.core.backend_options import resolve_vllm_gpu_memory_utilization
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.model_config import EvictionSchedule
 
@@ -14,16 +15,6 @@ logger = structlog.get_logger(__name__)
 
 class InsufficientVRAMError(Exception):
     pass
-
-
-def _resolve_vllm_gpu_memory_utilization(value: float | None = None) -> float:
-    if value is None:
-        value = settings.vllm_gpu_memory_utilization
-    try:
-        resolved = float(value)
-    except (TypeError, ValueError):
-        resolved = float(settings.vllm_gpu_memory_utilization)
-    return max(0.0, min(1.0, resolved))
 
 
 class GPUScheduler:
@@ -72,9 +63,7 @@ class GPUScheduler:
             gpu_indices = [index for index in gpu_indices if index in allowed]
         free_per_gpu = {i: await self._gpu_manager.get_free_vram(i) for i in gpu_indices}
         state_by_gpu = {state.index: state for state in states}
-        vllm_utilization = _resolve_vllm_gpu_memory_utilization(
-            vllm_gpu_memory_utilization
-        )
+        vllm_utilization = resolve_vllm_gpu_memory_utilization(vllm_gpu_memory_utilization)
 
         def _has_vllm_headroom(gpu_idx: int) -> bool:
             if not enforce_vllm_headroom:

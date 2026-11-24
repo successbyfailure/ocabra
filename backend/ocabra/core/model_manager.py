@@ -23,6 +23,11 @@ from ocabra.backends.llama_cpp_backend import LiveContextUnsupported
 from ocabra.config import settings
 from ocabra.core import artifacts as model_artifacts
 from ocabra.core import observed_vram
+from ocabra.core.backend_options import (
+    resolve_vllm_gpu_memory_utilization,
+    resolve_vllm_option,
+    snake_to_camel,
+)
 from ocabra.core.background_tasks import spawn
 from ocabra.core.config_keys import normalize_case
 from ocabra.core.model_manager_helpers import (
@@ -76,12 +81,6 @@ _WHISPER_RESERVATION_TTL_S = 120.0
 def _whisper_reservation_key(model_id: str) -> str:
     """GPU lock key of a whisper request's growth reservation."""
     return f"reserve:whisper:{model_id}"
-
-
-def _to_camel_key(value: str) -> str:
-    return "".join(
-        part.capitalize() if index else part for index, part in enumerate(value.split("_"))
-    )
 
 
 def _deep_merge_dicts(base: dict, patch: dict) -> dict:
@@ -3273,7 +3272,7 @@ class ModelManager:
             if not isinstance(section, dict):
                 continue
             for key in ("context_length", "max_model_len", "ctx_size"):
-                for candidate in (key, _to_camel_key(key)):
+                for candidate in (key, snake_to_camel(key)):
                     value = section.get(candidate)
                     if isinstance(value, int) and value > 0:
                         return value
@@ -3378,32 +3377,17 @@ class ModelManager:
 
     @staticmethod
     def _get_vllm_option(state: "ModelState", key: str, default: object) -> object:
-        extra_config = state.extra_config if isinstance(state.extra_config, dict) else {}
-        camel_key = _to_camel_key(key)
-        vllm_config = extra_config.get("vllm")
-        if isinstance(vllm_config, dict):
-            if key in vllm_config:
-                return vllm_config[key]
-            if camel_key in vllm_config:
-                return vllm_config[camel_key]
-        if key in extra_config:
-            return extra_config[key]
-        if camel_key in extra_config:
-            return extra_config[camel_key]
-        return default
+        return resolve_vllm_option(state, key, default)
 
     @staticmethod
     def _resolve_vllm_gpu_memory_utilization(state: "ModelState") -> float:
-        raw = ModelManager._get_vllm_option(
-            state,
-            "gpu_memory_utilization",
-            settings.vllm_gpu_memory_utilization,
+        return resolve_vllm_gpu_memory_utilization(
+            ModelManager._get_vllm_option(
+                state,
+                "gpu_memory_utilization",
+                settings.vllm_gpu_memory_utilization,
+            )
         )
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            value = float(settings.vllm_gpu_memory_utilization)
-        return max(0.0, min(1.0, value))
 
     @staticmethod
     def _has_explicit_vllm_kv_cache(state: "ModelState") -> bool:
