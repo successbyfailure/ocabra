@@ -54,3 +54,31 @@ export interface BackendPublishedInfo {
   published: BackendPublished | null
   updateAvailable: boolean
 }
+
+// trt-llm compile jobs (REF-15, antes en types/index.ts).
+
+// TRT-LLM compile jobs
+export type CompileStatus =
+  "pending" | "running" | "done" | "failed" | "cancelled";
+
+export type CompilePhase = "convert" | "build" | null;
+
+export interface CompileJob {
+  jobId: string;
+  sourceModel: string;
+  engineName: string;
+  gpuIndices: number[];
+  dtype: string;
+  config: {
+    maxBatchSize: number;
+    maxInputLen: number;
+    maxSeqLen: number;
+  };
+  status: CompileStatus;
+  phase: CompilePhase;
+  progressPct: number;
+  errorDetail: string | null;
+  engineDir: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
