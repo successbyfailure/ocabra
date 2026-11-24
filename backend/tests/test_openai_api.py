@@ -2369,8 +2369,12 @@ class TestBackendAgnosticRouting:
         )
         client = TestClient(app)
 
+        # REF-01 fase C: el camino no-streaming de /v1/completions pasa por el
+        # motor (``run_request``), que lee ``fairness_kv_budget`` de
+        # ``core.inference.admission`` (no del alias re-exportado en
+        # ``completions``). Se parchea ahí, donde el motor lo resuelve.
         with patch(
-            "ocabra.api.openai.completions.fairness_kv_budget",
+            "ocabra.core.inference.admission.fairness_kv_budget",
             return_value=(96_000, 12_000),
         ):
             resp = client.post(

@@ -18,14 +18,18 @@ from fastapi.responses import StreamingResponse
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
+from ocabra.core.inference.pipeline import (
+    PipelineContext,
+    RequestDescriptor,
+    RequestOutcome,
+    run_request,
+)
 from ocabra.core.output_limits import apply_declared_output_limit
 from ocabra.core.router_resolver import NoRoutableTargetError
-from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError, WorkerGoneError
+from ocabra.core.worker_pool import WorkerGoneError
 
 from ._deps import (
     STREAMING_LOAD_RESPONSE_DOC,
-    ClientGoneError,
-    await_unless_client_gone,
     build_model_status_headers,
     check_capability,
     ensure_worker_loaded,
@@ -55,6 +59,32 @@ from ._schemas import CompletionRequest, validate_body
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
+
+# REF-01 fase C: el camino NO-streaming de /v1/completions delega en el motor de
+# flujo único (``run_request``), igual que chat (fase B). Los caminos de STREAMING
+# se quedan INLINE a propósito (carga perezosa con keepalives, cola saturada, peek
+# del primer chunk, reenrutado implícito): dependen de ``api/sse.py`` y no caben en
+# el motor de ``core`` sin romper capas (REF-09), igual que en chat.
+#
+# ``federates=True`` documenta que completions se federa, pero la federación se
+# hace INLINE antes de ramificar (compartida por streaming y no-streaming), así
+# que a ``run_request`` se le pasa ``federate=None``: no se vuelve a federar.
+#
+# ``router_capability=("completion",)`` reproduce el filtro de router que la vía
+# no-streaming ya aplicaba vía ``resolve_profile`` (el mismo filtro que BUG-13
+# arregló en el camino de streaming, que se conserva inline).
+_COMPLETIONS_DESCRIPTOR = RequestDescriptor(
+    request_kind="completion",
+    capability="completion",
+    capability_label="text completions",
+    dispatch_path="/v1/completions",
+    federates=True,
+    streaming=False,
+    applies_reasoning=True,
+    honors_disconnect=True,
+    applies_fair_share=True,
+    router_capability=("completion",),
+)
 
 
 @router.post(
@@ -218,6 +248,63 @@ async def completions(
                 headers=headers,
             )
 
+    if not stream:
+        # --- Camino NO-streaming vía el motor de flujo único (REF-01 fase C) ---
+        # La federación ya se intentó arriba (inline, compartida con streaming):
+        # se pasa ``federate=None`` para no repetirla. El motor reproduce paso a
+        # paso lo que hacía este handler no-streaming: resolve+ACL+router (filtro
+        # "completion"), check de capacidad (etiqueta "text completions"), tope de
+        # salida (``_pre_dispatch``), reja de reparto justo + telemetría + KV, el
+        # despacho con cancelación por desconexión y los heads-up de cola en
+        # cabeceras. completions no reenruta tras worker caído (no hay
+        # ``on_dispatch_error``): el motor mapea el error como antes.
+        async def _pre_dispatch(ctx: PipelineContext) -> None:
+            # El tope de salida declarado del perfil no se enviaba al backend: una
+            # peticion sin max_tokens generaba sin limite (incidente 2026-11-07,
+            # 132.263 tokens hasta el timeout). Ver apply_declared_output_limit.
+            apply_declared_output_limit(
+                ctx.profile,
+                ctx.merged_body,
+                context_length=getattr(request.state, "runtime_effective_context", 0) or 0,
+                fallback_limit=settings.default_max_output_tokens,
+            )
+
+        outcome = await run_request(
+            request,
+            descriptor=_COMPLETIONS_DESCRIPTOR,
+            body=body,
+            user=user,
+            model_manager=model_manager,
+            profile_registry=profile_registry,
+            worker_pool=worker_pool,
+            federate=None,
+            pre_dispatch=_pre_dispatch,
+        )
+        if not isinstance(outcome, RequestOutcome):
+            # La federación sirvió la petición (no debería: federate=None), o el
+            # motor devolvió una respuesta ya lista.
+            return outcome
+
+        from fastapi.responses import JSONResponse
+
+        resp_headers = outcome.response_headers
+        # Mismos heads-up de cola que el handler no-streaming de antes: las
+        # cabeceras solo se vuelcan al final aquí, así que informan de "has
+        # esperado" en vez de "vas a esperar".
+        queue_state = outcome.queue_state
+        if queue_state is not None and queue_state["slot_saturated"]:
+            resp_headers["X-Ocabra-Slot-Queue-Saturated"] = "1"
+            resp_headers["X-Ocabra-Slot-In-Flight"] = str(queue_state["in_flight"])
+            resp_headers["X-Ocabra-Slot-Count"] = str(queue_state["slots"])
+        if queue_state is not None and queue_state["kv_saturated"]:
+            resp_headers["X-Ocabra-KV-Queue-Saturated"] = "1"
+            resp_headers["X-Ocabra-KV-Capacity-Tokens"] = str(queue_state["kv_capacity_tokens"])
+            resp_headers["X-Ocabra-KV-Reserved-Tokens"] = str(queue_state["kv_reserved_tokens"])
+        return JSONResponse(content=outcome.result, headers=resp_headers)
+
+    # --- Camino de FALLBACK de streaming (lookup_profile falló arriba) ---
+    # Solo se alcanza con stream=True por la vía legacy / model-id: resuelve y
+    # despacha en streaming inline, sin cambios respecto a antes.
     profile, state = await resolve_profile(
         model_id,
         model_manager,
@@ -306,63 +393,6 @@ async def completions(
             media_type="text/event-stream",
             headers=stream_headers,
         )
-
-    queue_state = (
-        worker_pool.peek_queue_state(worker_key, kv_tokens=kv_tokens) if not is_batch else None
-    )
-    try:
-        # Si el cliente se va, cancelar: en la via no de streaming FastAPI deja
-        # correr el handler hasta el final y el slot de admision mas la GPU se
-        # quedan ocupados por una respuesta que ya no lee nadie (medido el
-        # 2026-11-07: cliente rendido a los ~900 s, oCabra generando hasta los
-        # 1500 s de su propio timeout).
-        result = await await_unless_client_gone(
-            request,
-            worker_pool.forward_request(
-                worker_key,
-                "/v1/completions",
-                to_backend_body(state, merged_body),
-                user_key=user_key,
-                slots=slots,
-                is_batch=is_batch,
-                **telemetry_admission,
-                **kv_admission,
-            ),
-        )
-    except ClientGoneError:
-        # El cliente ya no esta: se cancelo la generacion y se solto el slot.
-        # 499 es el codigo canonico de "client closed request" que ya usa el
-        # colector para las cancelaciones de streaming.
-        raise HTTPException(
-            status_code=499,
-            detail={
-                "error": {
-                    "message": "Client disconnected before the response was ready",
-                    "type": "server_error",
-                    "code": "client_disconnected",
-                }
-            },
-        ) from None
-    except httpx.HTTPStatusError as exc:
-        raise_upstream_http_error(exc)
-    except (InferenceTimeoutError, KVCapacityError, WorkerDegradedError, WorkerGoneError) as exc:
-        raise_inference_dispatch_error(exc)
-    from fastapi.responses import JSONResponse
-
-    from ocabra.api.openai._deps import ocabra_response_headers
-
-    resp_headers = await ocabra_response_headers(
-        request, model_manager, worker_key, profile.base_model_id
-    )
-    if queue_state is not None and queue_state["slot_saturated"]:
-        resp_headers["X-Ocabra-Slot-Queue-Saturated"] = "1"
-        resp_headers["X-Ocabra-Slot-In-Flight"] = str(queue_state["in_flight"])
-        resp_headers["X-Ocabra-Slot-Count"] = str(queue_state["slots"])
-    if queue_state is not None and queue_state["kv_saturated"]:
-        resp_headers["X-Ocabra-KV-Queue-Saturated"] = "1"
-        resp_headers["X-Ocabra-KV-Capacity-Tokens"] = str(queue_state["kv_capacity_tokens"])
-        resp_headers["X-Ocabra-KV-Reserved-Tokens"] = str(queue_state["kv_reserved_tokens"])
-    return JSONResponse(content=result, headers=resp_headers)
 
 
 def _sse_error(message: str, code: str) -> bytes:
