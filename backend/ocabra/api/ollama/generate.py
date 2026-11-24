@@ -14,9 +14,7 @@ from starlette.responses import StreamingResponse
 
 from ocabra.api._deps_auth import UserContext
 from ocabra.api.openai._deps import (
-    ClientGoneError,
     EngineSuffixedModelName,
-    await_unless_client_gone,
     check_capability,
     ensure_loaded,
     fairness_kv_budget,
@@ -35,6 +33,7 @@ from ocabra.api.openai._schemas import OllamaGenerateRequest, validate_body
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.federation import note_federation_fallback
+from ocabra.core.inference.pipeline import RequestDescriptor, run_request
 from ocabra.core.output_limits import apply_declared_output_limit
 from ocabra.core.privacy import preview as privacy_preview
 
@@ -44,12 +43,10 @@ from ._shared import (
     apply_option_map,
     apply_think,
     build_native_passthrough_body,
-    dispatch_error_types,
     get_ollama_user,
     iter_sse_payloads,
     now_iso_z,
     open_stream,
-    raise_dispatch_error,
     request_stream_usage,
     stream_error_line,
     usage_from_stream_payload,
@@ -57,6 +54,25 @@ from ._shared import (
 from .chat import _extract_finish_reason, _native_backend_model_name
 
 router = APIRouter()
+
+# REF-01 fase C: el núcleo de despacho NO-streaming de /api/generate delega en el
+# motor de flujo único (``run_request``), igual que /v1/completions. Federación,
+# resolución (con fallback legacy), passthrough nativo del daemon Ollama y la
+# traducción SSE→NDJSON del streaming se quedan inline. El handler resuelve
+# primero (necesita el ``state`` para ramificar) y pasa el par vía
+# ``preresolved`` (de ahí ``federate=None``). La etiqueta de capacidad es la de
+# hoy ("text generation").
+_GENERATE_DESCRIPTOR = RequestDescriptor(
+    request_kind="generate",
+    capability="completion",
+    capability_label="text generation",
+    dispatch_path="/v1/completions",
+    federates=True,
+    streaming=False,
+    applies_reasoning=True,
+    honors_disconnect=True,
+    applies_fair_share=True,
+)
 
 
 @router.post("/generate", summary="Generate completion")
@@ -226,22 +242,14 @@ async def generate(
             )
         return await worker_pool.forward_request(worker_key, "/api/generate", upstream_body)
 
-    # Through ``to_backend_body`` like ``/v1/completions`` (BUG-11).
-    vllm_body = to_backend_body(
-        state, _build_vllm_generate_body(merged_body, state.backend_model_id, stream)
-    )
-    user_key = fairness_user_key(user)
-    slots = fairness_slots(state)
+    # Non-native: cuerpo traducido como ``/v1/completions`` (BUG-11). El
+    # preflight de KV (400 si una petición no cabe en el pool) se queda inline:
+    # misma respuesta de hoy, antes de tocar la reja de admisión.
     kv_capacity, kv_tokens = fairness_kv_budget(
         state,
         required_tokens=getattr(request.state, "runtime_required_tokens", None),
         effective_context=getattr(request.state, "runtime_effective_context", None),
         reservation_tokens=getattr(request.state, "runtime_kv_reservation_tokens", None),
-    )
-    kv_admission = (
-        {"kv_capacity_tokens": kv_capacity, "kv_tokens": kv_tokens}
-        if kv_capacity is not None
-        else {}
     )
     if kv_capacity is not None and kv_tokens > kv_capacity:
         raise HTTPException(
@@ -250,13 +258,23 @@ async def generate(
         )
 
     if stream:
+        # Streaming SSE→NDJSON: la traducción vive en la capa api (REF-09), así
+        # que el camino se queda inline. Mismo despacho que hoy.
+        vllm_body = to_backend_body(
+            state, _build_vllm_generate_body(merged_body, state.backend_model_id, True)
+        )
+        kv_admission = (
+            {"kv_capacity_tokens": kv_capacity, "kv_tokens": kv_tokens}
+            if kv_capacity is not None
+            else {}
+        )
         source = await open_stream(
             worker_pool.forward_stream(
                 worker_key,
                 "/v1/completions",
                 vllm_body,
-                user_key=user_key,
-                slots=slots,
+                user_key=fairness_user_key(user),
+                slots=fairness_slots(state),
                 **telemetry_admission,
                 **kv_admission,
             )
@@ -267,41 +285,32 @@ async def generate(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    started_ns = time.monotonic_ns()
-    try:
-        # Si el cliente se va, cancelar: en la via no de streaming FastAPI deja
-        # correr el handler hasta el final y el slot de admision mas la GPU se
-        # quedan ocupados por una respuesta que ya no lee nadie (medido el
-        # 2026-11-07: cliente rendido a los ~900 s, oCabra generando hasta los
-        # 1500 s de su propio timeout).
-        result = await await_unless_client_gone(
-            request,
-            worker_pool.forward_request(
-                worker_key,
-                "/v1/completions",
-                vllm_body,
-                user_key=user_key,
-                slots=slots,
-                **telemetry_admission,
-                **kv_admission,
-            ),
-        )
-    except ClientGoneError:
-        # Cancelada por desconexion del cliente: el slot y la GPU ya estan
-        # libres. 499 es el codigo canonico de "client closed request".
-        raise HTTPException(status_code=499, detail="client disconnected") from None
-    except dispatch_error_types() as exc:
-        raise_dispatch_error(exc)
+    # NO-streaming por el motor de flujo único (REF-01 fase C): reparto justo,
+    # telemetría, cancelación por desconexión y mapeo de errores los arma el
+    # motor —igual que /v1/completions no-streaming—. Se le pasa el cuerpo OpenAI
+    # ya construido (el motor aplica ``to_backend_body``) y el par ya resuelto, y
+    # se traduce la respuesta de vuelta a la forma Ollama.
+    outcome = await run_request(
+        request,
+        descriptor=_GENERATE_DESCRIPTOR,
+        body=_build_vllm_generate_body(merged_body, state.backend_model_id, False),
+        user=user,
+        model_manager=model_manager,
+        profile_registry=profile_registry,
+        worker_pool=worker_pool,
+        federate=None,
+        preresolved=(profile, state),
+    )
+    result = outcome.result
     text = ""
     choices = result.get("choices") or []
     if choices:
         text = str(choices[0].get("text") or "")
-    now_iso = now_iso_z()
-    total_duration = time.monotonic_ns() - started_ns
+    total_duration = int((time.monotonic() - outcome.forward_started) * 1_000_000_000)
     usage = result.get("usage") or {}
     return {
         "model": ollama_model,
-        "created_at": now_iso,
+        "created_at": now_iso_z(),
         "response": text,
         "done": True,
         "done_reason": _extract_finish_reason(result),
@@ -330,9 +339,7 @@ def _build_vllm_generate_body(payload: dict, model_id: str, stream: bool) -> dic
     return body
 
 
-async def _stream_generate(
-    source: AsyncIterator[bytes], ollama_model: str
-) -> AsyncIterator[bytes]:
+async def _stream_generate(source: AsyncIterator[bytes], ollama_model: str) -> AsyncIterator[bytes]:
     """OpenAI SSE as Ollama NDJSON; a late failure ends with ``{"error": ...}``."""
     try:
         async for line in _translate_generate_stream(source, ollama_model):

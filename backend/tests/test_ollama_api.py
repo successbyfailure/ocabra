@@ -1085,3 +1085,121 @@ def test_legacy_embeddings_answers_ollamas_single_vector_field() -> None:
 
     assert body["embedding"] == [0.5, 0.5]
     assert body["embeddings"] == [[0.5, 0.5]]
+
+
+# ---------------------------------------------------------------------------
+# REF-01 fase C: con un PERFIL resuelto (no la vía legacy), el núcleo
+# no-streaming pasa por ``run_request`` (``preresolved``) y la traducción de
+# vuelta a la forma Ollama se conserva byte a byte.
+# ---------------------------------------------------------------------------
+
+
+def _profile_state():
+    from ocabra.backends.base import BackendCapabilities
+    from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus
+
+    return ModelState(
+        model_id="llamacpp_mks/gemma4:26b",
+        display_name="Gemma 4 26B",
+        backend_type="llamacpp_mks",
+        backend_model_id="gemma4:26b",
+        status=ModelStatus.LOADED,
+        load_policy=LoadPolicy.ON_DEMAND,
+        capabilities=BackendCapabilities(chat=True, completion=True, streaming=True, tools=True),
+    )
+
+
+def test_chat_profile_path_dispatches_via_engine_and_keeps_tool_calls() -> None:
+    state = _profile_state()
+    profile = _make_test_profile("gemma4:26b", "llamacpp_mks/gemma4:26b")
+    worker_result = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": '{"city":"Madrid"}',
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+    }
+    app = _make_app(model_state=state, worker_result=worker_result)
+    with patch(
+        "ocabra.api.ollama.chat.resolve_profile", new=AsyncMock(return_value=(profile, state))
+    ):
+        resp = TestClient(app).post(
+            "/api/chat",
+            json={
+                "model": "gemma4:26b",
+                "messages": [{"role": "user", "content": "weather?"}],
+                "stream": False,
+                "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["done_reason"] == "tool_calls"
+    assert body["message"]["tool_calls"] == [
+        {"function": {"name": "get_weather", "arguments": {"city": "Madrid"}}}
+    ]
+    called = app.state.worker_pool.forward_request.await_args
+    assert called.args[1] == "/v1/chat/completions"
+    assert called.args[2]["model"] == "gemma4:26b"
+
+
+def test_chat_profile_path_maps_worker_errors_to_ollama_error_shape() -> None:
+    state = _profile_state()
+    profile = _make_test_profile("gemma4:26b", "llamacpp_mks/gemma4:26b")
+    app = _make_app(model_state=state)
+    app.state.worker_pool.forward_request = AsyncMock(
+        side_effect=_upstream_error(400, '{"error": {"message": "Missing tool call type"}}')
+    )
+    with patch(
+        "ocabra.api.ollama.chat.resolve_profile", new=AsyncMock(return_value=(profile, state))
+    ):
+        resp = TestClient(app, raise_server_exceptions=False).post(
+            "/api/chat", json=_chat_body(False)
+        )
+
+    # El motor mapea el error de worker al mismo estado que /v1; la app mínima
+    # del test no monta el handler de main.py que lo envuelve en ``{"error":
+    # ...}`` (familia /api), así que aquí se comprueba el estado y el mensaje
+    # conservados (el envoltorio Ollama lo cubren los tests de ``_errors``).
+    assert resp.status_code == 400
+    assert "Missing tool call type" in resp.text
+
+
+def test_generate_profile_path_dispatches_via_engine() -> None:
+    state = _profile_state()
+    profile = _make_test_profile("gemma4:26b", "llamacpp_mks/gemma4:26b")
+    app = _make_app(
+        model_state=state,
+        worker_result={
+            "choices": [{"text": "hola", "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+        },
+    )
+    with patch(
+        "ocabra.api.ollama.generate.resolve_profile", new=AsyncMock(return_value=(profile, state))
+    ):
+        resp = TestClient(app).post(
+            "/api/generate", json={"model": "gemma4:26b", "prompt": "hola", "stream": False}
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["response"] == "hola"
+    assert resp.json()["done_reason"] == "stop"
+    called = app.state.worker_pool.forward_request.await_args
+    assert called.args[1] == "/v1/completions"
