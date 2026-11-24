@@ -636,7 +636,7 @@ async def test_request_larger_than_live_context_grows_worker_back() -> None:
     mm = MagicMock()
     mm.grow_context_back = AsyncMock()
     request_state = SimpleNamespace()
-    with patch("ocabra.api.openai._deps.plan_profile_runtime", AsyncMock(return_value=_plan())):
+    with patch("ocabra.core.inference.resolution.plan_profile_runtime", AsyncMock(return_value=_plan())):
         await resolve_profile_runtime_plan(MagicMock(), mm, {}, request_state=request_state)
 
     mm.grow_context_back.assert_awaited_once_with("llamacpp_mks/qwen3.8:27b::abc")
@@ -649,7 +649,7 @@ async def test_request_that_fits_live_context_uses_it_without_regrowing() -> Non
     mm.grow_context_back = AsyncMock()
     request_state = SimpleNamespace()
     with patch(
-        "ocabra.api.openai._deps.plan_profile_runtime",
+        "ocabra.core.inference.resolution.plan_profile_runtime",
         AsyncMock(return_value=_plan(required_tokens=4000)),
     ):
         await resolve_profile_runtime_plan(MagicMock(), mm, {}, request_state=request_state)
@@ -664,7 +664,7 @@ async def test_failed_regrow_is_a_retryable_503() -> None:
     mm.grow_context_back = AsyncMock(side_effect=RuntimeError("no VRAM"))
     mm.release_vision_by_reload = AsyncMock(return_value=False)
     with (
-        patch("ocabra.api.openai._deps.plan_profile_runtime", AsyncMock(return_value=_plan())),
+        patch("ocabra.core.inference.resolution.plan_profile_runtime", AsyncMock(return_value=_plan())),
         pytest.raises(HTTPException) as caught,
     ):
         await resolve_profile_runtime_plan(MagicMock(), mm, {}, request_state=SimpleNamespace())
@@ -678,7 +678,7 @@ async def test_si_el_sitio_lo_tiene_el_proyector_se_recarga_en_vez_de_503() -> N
     mm = MagicMock()
     mm.grow_context_back = AsyncMock(side_effect=RuntimeError("no VRAM"))
     mm.release_vision_by_reload = AsyncMock(return_value=True)
-    with patch("ocabra.api.openai._deps.plan_profile_runtime", AsyncMock(return_value=_plan())):
+    with patch("ocabra.core.inference.resolution.plan_profile_runtime", AsyncMock(return_value=_plan())):
         plan = await resolve_profile_runtime_plan(
             MagicMock(), mm, {}, request_state=SimpleNamespace()
         )

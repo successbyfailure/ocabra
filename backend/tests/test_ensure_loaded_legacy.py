@@ -25,7 +25,10 @@ def _state(status: ModelStatus) -> ModelState:
 
 @pytest.mark.asyncio
 async def test_a_load_that_fails_while_waiting_answers_at_once():
-    from ocabra.api.openai import _deps
+    # ensure_loaded lives in core.inference.resolution and delegates the wait
+    # loop to core.inference.loading (REF-06); patch each in its own module.
+    from ocabra.core.inference import loading as _loading
+    from ocabra.core.inference import resolution as _resolution
 
     loading, failed = _state(ModelStatus.LOADING), _state(ModelStatus.ERROR)
     failed.error_message = "CUDA out of memory"
@@ -34,16 +37,18 @@ async def test_a_load_that_fails_while_waiting_answers_at_once():
     sleeps = AsyncMock()
 
     with (
-        patch.object(_deps, "resolve_model", AsyncMock(return_value=("ollama/qwen3:8b", loading))),
-        patch.object(_deps, "_wait_for_eviction_claim", AsyncMock(side_effect=lambda m, i, s: s)),
         patch.object(
-            _deps, "_wait_for_unloading_transition", AsyncMock(side_effect=lambda m, i, s: s)
+            _resolution, "resolve_model", AsyncMock(return_value=("ollama/qwen3:8b", loading))
         ),
-        patch.object(_deps, "_ensure_load_timeout_s", return_value=600),
-        patch.object(_deps.asyncio, "sleep", sleeps),
+        patch.object(_loading, "_wait_for_eviction_claim", AsyncMock(side_effect=lambda m, i, s: s)),
+        patch.object(
+            _loading, "_wait_for_unloading_transition", AsyncMock(side_effect=lambda m, i, s: s)
+        ),
+        patch.object(_loading, "_ensure_load_timeout_s", return_value=600),
+        patch.object(_loading.asyncio, "sleep", sleeps),
     ):
         with pytest.raises(HTTPException) as exc:
-            await _deps.ensure_loaded(mm, "qwen3:8b")
+            await _resolution.ensure_loaded(mm, "qwen3:8b")
 
     assert sleeps.await_count <= 2  # not 600 one-second polls
     assert "CUDA out of memory" in str(exc.value.detail)
@@ -52,11 +57,11 @@ async def test_a_load_that_fails_while_waiting_answers_at_once():
 
 @pytest.mark.asyncio
 async def test_an_unknown_legacy_name_is_a_404():
-    from ocabra.api.openai import _deps
+    from ocabra.core.inference import resolution as _resolution
 
-    with patch.object(_deps, "resolve_model", AsyncMock(return_value=("x", None))):
+    with patch.object(_resolution, "resolve_model", AsyncMock(return_value=("x", None))):
         with pytest.raises(HTTPException) as exc:
-            await _deps.ensure_loaded(MagicMock(), "x")
+            await _resolution.ensure_loaded(MagicMock(), "x")
     assert exc.value.status_code == 404
 
 
@@ -77,21 +82,23 @@ def test_upstream_retry_after_is_kept():
 
 @pytest.mark.asyncio
 async def test_insufficient_vram_says_when_to_retry():
-    from ocabra.api.openai import _deps
+    from ocabra.core.inference import loading as _loading
     from ocabra.core.scheduler import InsufficientVRAMError
 
     mm = MagicMock()
     mm.get_state = AsyncMock(return_value=_state(ModelStatus.UNLOADED))
     mm.load = AsyncMock(side_effect=InsufficientVRAMError("no room"))
     with (
-        patch.object(_deps, "_wait_for_eviction_claim", AsyncMock(side_effect=lambda m, i, s: s)),
+        patch.object(_loading, "_wait_for_eviction_claim", AsyncMock(side_effect=lambda m, i, s: s)),
         patch.object(
-            _deps, "_wait_for_unloading_transition", AsyncMock(side_effect=lambda m, i, s: s)
+            _loading, "_wait_for_unloading_transition", AsyncMock(side_effect=lambda m, i, s: s)
         ),
-        patch.object(_deps, "_wait_for_service_gpu_and_retry_load", AsyncMock(return_value=None)),
+        patch.object(
+            _loading, "_wait_for_service_gpu_and_retry_load", AsyncMock(return_value=None)
+        ),
     ):
         with pytest.raises(HTTPException) as exc:
-            await _deps._do_ensure_loaded(mm, "ollama/qwen3:8b")
+            await _loading._do_ensure_loaded(mm, "ollama/qwen3:8b")
     assert exc.value.status_code == 409
     assert exc.value.headers.get("Retry-After")
 

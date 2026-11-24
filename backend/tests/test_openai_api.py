@@ -46,7 +46,9 @@ async def test_output_limit_error_names_max_tokens_instead_of_context_pressure(
 ) -> None:
     from fastapi import HTTPException
 
-    from ocabra.api.openai import _deps
+    # resolve_profile_runtime_plan lives in core.inference.resolution (REF-06),
+    # which binds plan_profile_runtime in its own namespace.
+    from ocabra.core.inference import resolution as _deps
     from ocabra.core.runtime_coordinator import OutputTokenLimitError
 
     monkeypatch.setattr(

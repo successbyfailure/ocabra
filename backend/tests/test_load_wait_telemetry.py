@@ -16,16 +16,18 @@ from ocabra.core.request_telemetry import RequestRuntimeTelemetry, current_runti
 
 
 async def _ensure(waited_s: float, telemetry: RequestRuntimeTelemetry | None):
-    from ocabra.api.openai import _deps
+    # The loading path lives in core.inference.loading (REF-06); the ``_deps``
+    # barrel only re-exports it, so patch the defining module.
+    from ocabra.core.inference import loading
 
     state = MagicMock()
     token = current_runtime_telemetry.set(telemetry)
     try:
         with (
-            patch.object(_deps, "_do_ensure_loaded_inner", AsyncMock(return_value=state)),
-            patch.object(_deps.time, "monotonic", side_effect=[100.0, 100.0 + waited_s]),
+            patch.object(loading, "_do_ensure_loaded_inner", AsyncMock(return_value=state)),
+            patch.object(loading.time, "monotonic", side_effect=[100.0, 100.0 + waited_s]),
         ):
-            assert await _deps._do_ensure_loaded(MagicMock(), "m") is state
+            assert await loading._do_ensure_loaded(MagicMock(), "m") is state
     finally:
         current_runtime_telemetry.reset(token)
 
