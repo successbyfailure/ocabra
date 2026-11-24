@@ -243,13 +243,15 @@ def test_local_model_lookup_sees_new_and_deleted_files(models_dir, monkeypatch):
 
 
 async def test_disk_size_lookup_runs_off_the_loop(models_dir, monkeypatch):
-    from ocabra.api.internal import models as models_api
+    # REF-07: disk-size helpers moved to api.internal.models_files (they call
+    # the path resolver imported there, so patch where the caller resolves it).
+    from ocabra.api.internal import models_files
 
     _write(models_dir / "bitnet" / "foo-q4.gguf", 1234)
-    on_loop = _record_threads(monkeypatch, models_api, "_resolve_local_model_path")
+    on_loop = _record_threads(monkeypatch, models_files, "_resolve_local_model_path")
     state = SimpleNamespace(model_id="llama_cpp/foo-q4", extra_config={})
 
-    assert await models_api._resolve_disk_size_bytes(state, {}) == 1234
+    assert await models_files._resolve_disk_size_bytes(state, {}) == 1234
     assert on_loop == [False]
 
 
