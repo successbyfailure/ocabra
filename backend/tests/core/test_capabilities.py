@@ -33,8 +33,13 @@ def test_declared_capabilities_whisper() -> None:
 
 
 def test_resolve_context_length_fallback() -> None:
-    assert caps.resolve_context_length_fallback(_state("vllm", extra={"context_length": 8192})) == 8192
-    assert caps.resolve_context_length_fallback(_state("vllm", extra={"vllm": {"maxModelLen": 4096}})) == 4096
+    assert (
+        caps.resolve_context_length_fallback(_state("vllm", extra={"context_length": 8192})) == 8192
+    )
+    assert (
+        caps.resolve_context_length_fallback(_state("vllm", extra={"vllm": {"maxModelLen": 4096}}))
+        == 4096
+    )
     assert caps.resolve_context_length_fallback(_state("vllm", extra={})) == 0
 
 

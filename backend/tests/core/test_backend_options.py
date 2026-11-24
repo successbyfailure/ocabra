@@ -14,7 +14,9 @@ from ocabra.core import model_manager_helpers as helpers
 
 
 def _state(extra: dict) -> SimpleNamespace:
-    return SimpleNamespace(extra_config=extra, backend_type="vllm", model_id="m", backend_model_id="m")
+    return SimpleNamespace(
+        extra_config=extra, backend_type="vllm", model_id="m", backend_model_id="m"
+    )
 
 
 def test_snake_to_camel() -> None:
@@ -24,8 +26,13 @@ def test_snake_to_camel() -> None:
 
 
 def test_resolve_llama_cpp_option_accepts_both_spellings() -> None:
-    assert bo.resolve_llama_cpp_option(_state({"llama_cpp": {"gpu_layers": 99}}), "gpu_layers", 0) == 99
-    assert bo.resolve_llama_cpp_option(_state({"llama_cpp": {"gpuLayers": 99}}), "gpu_layers", 0) == 99
+    assert (
+        bo.resolve_llama_cpp_option(_state({"llama_cpp": {"gpu_layers": 99}}), "gpu_layers", 0)
+        == 99
+    )
+    assert (
+        bo.resolve_llama_cpp_option(_state({"llama_cpp": {"gpuLayers": 99}}), "gpu_layers", 0) == 99
+    )
     assert bo.resolve_llama_cpp_option(_state({"gpuLayers": 42}), "gpu_layers", 0) == 42
     assert bo.resolve_llama_cpp_option(_state({}), "gpu_layers", 7) == 7
 
@@ -33,7 +40,9 @@ def test_resolve_llama_cpp_option_accepts_both_spellings() -> None:
 def test_resolve_vllm_option_accepts_camelcase() -> None:
     # BUG-28: the estimator must see maxModelLen saved by the UI.
     assert bo.resolve_vllm_option(_state({"vllm": {"maxModelLen": 8192}}), "max_model_len") == 8192
-    assert bo.resolve_vllm_option(_state({"vllm": {"max_model_len": 8192}}), "max_model_len") == 8192
+    assert (
+        bo.resolve_vllm_option(_state({"vllm": {"max_model_len": 8192}}), "max_model_len") == 8192
+    )
     assert bo.resolve_vllm_option(_state({"maxModelLen": 4096}), "max_model_len") == 4096
     assert bo.resolve_vllm_option(_state({}), "max_model_len", 0) == 0
 
@@ -49,8 +58,13 @@ def test_resolve_vllm_gpu_memory_utilization_clamps() -> None:
 
 
 def test_split_policy() -> None:
-    assert bo.resolve_llama_cpp_split_policy(_state({"llama_cpp": {"split_policy": "always"}})) == "always"
-    assert bo.resolve_llama_cpp_split_policy(_state({"llama_cpp": {"split_mode": "none"}})) == "single"
+    assert (
+        bo.resolve_llama_cpp_split_policy(_state({"llama_cpp": {"split_policy": "always"}}))
+        == "always"
+    )
+    assert (
+        bo.resolve_llama_cpp_split_policy(_state({"llama_cpp": {"split_mode": "none"}})) == "single"
+    )
     assert bo.resolve_llama_cpp_split_policy(_state({})) == "when_needed"
 
 
