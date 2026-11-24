@@ -10,6 +10,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, require_role
+from ocabra.api.internal._openai_compat import get_compat_registry
 from ocabra.core.openai_tts_compat import OpenAITTSCompatRegistry
 from ocabra.database import AsyncSessionLocal
 from ocabra.schemas.openai_tts_compat import OpenAITTSVoiceMapOut, OpenAITTSVoiceMapUpsert
@@ -19,14 +20,7 @@ router = APIRouter(tags=["openai-tts-compat"])
 
 
 def _get_registry(request: Request) -> OpenAITTSCompatRegistry:
-    registry = getattr(request.app.state, "openai_tts_compat", None)
-    if registry is None:
-        raise HTTPException(
-            status_code=503,
-            detail="OpenAI TTS compat registry not available",
-            headers={"Retry-After": "5"},
-        )
-    return registry
+    return get_compat_registry(request, attr="openai_tts_compat", label="TTS")
 
 
 @router.get(

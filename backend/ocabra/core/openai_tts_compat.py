@@ -13,26 +13,28 @@ normal profile resolution.
 
 from __future__ import annotations
 
-import structlog
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
-from ocabra.db.model_config import ModelProfile, OpenAITTSVoiceMap
+from ocabra.core._openai_compat import OpenAICompatRegistry
+from ocabra.db.model_config import OpenAITTSVoiceMap
 
-logger = structlog.get_logger(__name__)
 
-
-class OpenAITTSCompatRegistry:
+class OpenAITTSCompatRegistry(OpenAICompatRegistry[tuple[str, str], OpenAITTSVoiceMap]):
     """In-memory cache of ``openai_tts_voice_map`` rows, backed by PostgreSQL."""
 
-    def __init__(self) -> None:
-        self._entries: dict[tuple[str, str], OpenAITTSVoiceMap] = {}
+    _model = OpenAITTSVoiceMap
+    _log_prefix = "openai_tts_compat"
 
-    async def load_all(self, session: AsyncSession) -> None:
-        result = await session.execute(select(OpenAITTSVoiceMap))
-        rows = result.scalars().all()
-        self._entries = {(row.openai_model, row.voice_name): row for row in rows}
-        logger.info("openai_tts_compat_loaded", count=len(self._entries))
+    def _row_key(self, row: OpenAITTSVoiceMap) -> tuple[str, str]:
+        return (row.openai_model, row.voice_name)
+
+    def _pk_filter(self, key: tuple[str, str]) -> list[ColumnElement[bool]]:
+        openai_model, voice_name = key
+        return [
+            OpenAITTSVoiceMap.openai_model == openai_model,
+            OpenAITTSVoiceMap.voice_name == voice_name,
+        ]
 
     def resolve(self, openai_model: str, voice_name: str | None) -> str | None:
         """Return the target profile_id for this (model, voice) pair, or
@@ -44,9 +46,6 @@ class OpenAITTSCompatRegistry:
         entry = self._entries.get((openai_model, voice_name))
         return entry.target_profile_id if entry is not None else None
 
-    def list_all(self) -> list[OpenAITTSVoiceMap]:
-        return sorted(self._entries.values(), key=lambda e: (e.openai_model, e.voice_name))
-
     async def upsert(
         self,
         session: AsyncSession,
@@ -57,53 +56,23 @@ class OpenAITTSCompatRegistry:
     ) -> OpenAITTSVoiceMap:
         if not openai_model or not voice_name:
             raise ValueError("openai_model and voice_name are both required.")
-        result = await session.execute(
-            select(ModelProfile.profile_id, ModelProfile.enabled).where(
-                ModelProfile.profile_id == target_profile_id
-            )
-        )
-        row = result.first()
-        if row is None:
-            raise ValueError(f"target_profile_id '{target_profile_id}' not found.")
-        if not row.enabled:
-            raise ValueError(f"target_profile_id '{target_profile_id}' is disabled.")
-
-        existing = self._entries.get((openai_model, voice_name))
-        if existing is not None:
-            existing.target_profile_id = target_profile_id
-            entry = existing
-        else:
-            entry = OpenAITTSVoiceMap(
+        return await self._upsert_key(
+            session,
+            (openai_model, voice_name),
+            target_profile_id,
+            lambda: OpenAITTSVoiceMap(
                 openai_model=openai_model,
                 voice_name=voice_name,
                 target_profile_id=target_profile_id,
-            )
-            session.add(entry)
-        await session.commit()
-        await session.refresh(entry)
-        self._entries[(openai_model, voice_name)] = entry
-        logger.info(
-            "openai_tts_compat_upserted",
+            ),
             openai_model=openai_model,
             voice_name=voice_name,
-            target_profile_id=target_profile_id,
         )
-        return entry
 
     async def delete(self, session: AsyncSession, *, openai_model: str, voice_name: str) -> bool:
-        entry = self._entries.get((openai_model, voice_name))
-        if entry is None:
-            return False
-        result = await session.execute(
-            select(OpenAITTSVoiceMap).where(
-                OpenAITTSVoiceMap.openai_model == openai_model,
-                OpenAITTSVoiceMap.voice_name == voice_name,
-            )
+        return await self._delete_key(
+            session,
+            (openai_model, voice_name),
+            openai_model=openai_model,
+            voice_name=voice_name,
         )
-        db_entry = result.scalar_one_or_none()
-        if db_entry is not None:
-            await session.delete(db_entry)
-            await session.commit()
-        del self._entries[(openai_model, voice_name)]
-        logger.info("openai_tts_compat_deleted", openai_model=openai_model, voice_name=voice_name)
-        return True

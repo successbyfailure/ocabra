@@ -8,6 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, require_role
+from ocabra.api.internal._openai_compat import get_compat_registry
 from ocabra.core.openai_image_compat import OpenAIImageCompatRegistry
 from ocabra.database import AsyncSessionLocal
 from ocabra.schemas.openai_tts_compat import OpenAIImageModelMapOut, OpenAIImageModelMapUpsert
@@ -16,14 +17,7 @@ router = APIRouter(tags=["openai-image-compat"])
 
 
 def _get_registry(request: Request) -> OpenAIImageCompatRegistry:
-    registry = getattr(request.app.state, "openai_image_compat", None)
-    if registry is None:
-        raise HTTPException(
-            status_code=503,
-            detail="OpenAI image compat registry not available",
-            headers={"Retry-After": "5"},
-        )
-    return registry
+    return get_compat_registry(request, attr="openai_image_compat", label="image")
 
 
 @router.get(
