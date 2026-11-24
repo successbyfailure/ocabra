@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { CacheCell, TimingBreakdown } from "@/components/dashboard/RequestBreakdown"
 import { Loader2 } from "lucide-react"
 import * as Tabs from "@radix-ui/react-tabs"
-import { toast } from "sonner"
 import { api } from "@/api/client"
+import { usePolling } from "@/hooks/usePolling"
 import { StyledSelect } from "@/components/common/StyledSelect"
 import { useIsModelManager } from "@/hooks/useAuth"
 import { DateRangePicker, defaultDateRange, type DateRangeValue } from "@/components/stats/DateRangePicker"
@@ -462,85 +462,88 @@ export function Stats() {
   const hasFederation =
     federationStats.remoteCount + (federationStats.inboundCount ?? 0) + (federationStats.fallbackCount ?? 0) > 0
 
+  const activeRef = useRef(true)
   useEffect(() => {
-    let active = true
+    activeRef.current = true
+    return () => {
+      activeRef.current = false
+    }
+  }, [])
 
-    const load = async () => {
-      try {
-        if (isManagerOrAdmin) {
-          const [modelList, req, tok, ene, gpu, perf, over, bu, bg, bak, rec, my, mg, fed, sp] = await Promise.all([
+  // Each panel settles on its own: a single failing endpoint (of the ~15) no
+  // longer blanks the whole page or drops every other panel — it just keeps
+  // its previous value. Only report a hard failure if *everything* failed.
+  const load = useCallback(async () => {
+    const apply = <T,>(setter: (v: T) => void, result: PromiseSettledResult<T>) => {
+      if (activeRef.current && result.status === "fulfilled") setter(result.value)
+    }
+    try {
+      if (isManagerOrAdmin) {
+        const [modelList, req, tok, ene, gpu, perf, over, bu, bg, bak, rec, my, mg, fed, sp] =
+          await Promise.allSettled([
             api.models.list(),
             api.stats.requests(params),
             api.stats.tokens(params),
             api.stats.energy(params),
-            api.stats.gpu(params).catch(() => null),
+            api.stats.gpu(params),
             api.stats.performance(params),
             api.stats.overview(params),
             api.stats.byUser(params),
             api.stats.byGroup(params),
-            api.stats.byApiKey(params).catch(() => EMPTY_BY_API_KEY),
+            api.stats.byApiKey(params),
             api.stats.recent(20),
             api.stats.my(params),
             api.stats.myGroup(params),
-            api.stats.federation(params).catch(() => EMPTY_FEDERATION),
-            api.stats.serverPower().catch(() => null),
+            api.stats.federation(params),
+            api.stats.serverPower(),
           ])
-
-          if (!active) return
-
-          setModels(modelList.map((model) => ({ id: model.modelId, label: model.displayName })))
-          setRequests(req)
-          setTokens(tok)
-          setEnergy(ene)
-          setGpuUsage(gpu)
-          setPerformance(perf)
-          setOverview(over)
-          setByUser(bu)
-          setByGroup(bg)
-          setByApiKey(bak)
-          setRecent(rec)
-          setMyStats(my)
-          setMyGroup(mg)
-          setFederationStats(fed)
-          setServerPower(sp)
-        } else {
-          const [modelList, ene, gpu, my, mg, sp] = await Promise.all([
-            api.models.list(),
-            api.stats.energy(params),
-            api.stats.gpu(params).catch(() => null),
-            api.stats.my(params),
-            api.stats.myGroup(params),
-            api.stats.serverPower().catch(() => null),
-          ])
-
-          if (!active) return
-
-          setModels(modelList.map((model) => ({ id: model.modelId, label: model.displayName })))
-          setEnergy(ene)
-          setGpuUsage(gpu)
-          setMyStats(my)
-          setMyGroup(mg)
-          setServerPower(sp)
-        }
-      } catch (err) {
-        if (active) {
-          toast.error(err instanceof Error ? err.message : "No se pudieron cargar stats")
-        }
-      } finally {
-        if (active) setLoading(false)
+        if (!activeRef.current) return
+        apply(
+          (v: Awaited<ReturnType<typeof api.models.list>>) =>
+            setModels(v.map((model) => ({ id: model.modelId, label: model.displayName }))),
+          modelList,
+        )
+        apply(setRequests, req)
+        apply(setTokens, tok)
+        apply(setEnergy, ene)
+        apply(setGpuUsage, gpu)
+        apply(setPerformance, perf)
+        apply(setOverview, over)
+        apply(setByUser, bu)
+        apply(setByGroup, bg)
+        apply(setByApiKey, bak)
+        apply(setRecent, rec)
+        apply(setMyStats, my)
+        apply(setMyGroup, mg)
+        apply(setFederationStats, fed)
+        apply(setServerPower, sp)
+      } else {
+        const [modelList, ene, gpu, my, mg, sp] = await Promise.allSettled([
+          api.models.list(),
+          api.stats.energy(params),
+          api.stats.gpu(params),
+          api.stats.my(params),
+          api.stats.myGroup(params),
+          api.stats.serverPower(),
+        ])
+        if (!activeRef.current) return
+        apply(
+          (v: Awaited<ReturnType<typeof api.models.list>>) =>
+            setModels(v.map((model) => ({ id: model.modelId, label: model.displayName }))),
+          modelList,
+        )
+        apply(setEnergy, ene)
+        apply(setGpuUsage, gpu)
+        apply(setMyStats, my)
+        apply(setMyGroup, mg)
+        apply(setServerPower, sp)
       }
+    } finally {
+      if (activeRef.current) setLoading(false)
     }
+  }, [isManagerOrAdmin, params])
 
-    void load()
-    const timer = window.setInterval(() => {
-      void load()
-    }, 30_000)
-
-    return () => {
-      active = false
-      window.clearInterval(timer)
-    }
-  }, [isManagerOrAdmin, modelId, params])
+  usePolling(load, 30_000, { deps: [isManagerOrAdmin, params] })
 
   const tabTriggerClass = (value: string) =>
     `px-4 py-2 text-sm font-medium rounded-t-md border-b-2 transition-colors ${
