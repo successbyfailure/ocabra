@@ -668,13 +668,6 @@ class GPUManager:
         """Return the most recently cached GPU state without awaiting the poll loop."""
         return self._states.get(index)
 
-    async def get_server_power(self) -> dict | None:
-        """Read server power data published by hw-monitor from Redis."""
-        try:
-            return await get_key("server:power")
-        except Exception:
-            return None
-
     async def get_all_states(self) -> list[GPUState]:
         return list(self._states.values())
 

@@ -31,7 +31,6 @@ from ocabra.core.model_manager_helpers import (
     estimate_vllm_vram_from_config,
     is_derived_worker_key,
     resolve_bitnet_gpu_layers,
-    resolve_bitnet_option,
     resolve_llama_cpp_allowed_gpus,
     resolve_llama_cpp_gpu_layers,
     resolve_llama_cpp_split_policy,
@@ -1928,9 +1927,6 @@ class ModelManager:
     def clear_service_gpu_wait(self, model_id: str) -> None:
         self._service_gpu_waiters.pop(model_id, None)
 
-    def set_gpu_scheduler(self, scheduler) -> None:
-        self._gpu_scheduler = scheduler
-
     def set_service_manager(self, service_manager) -> None:
         self._service_manager = service_manager
 
@@ -3368,9 +3364,6 @@ class ModelManager:
 
         self._expected_load_cache[model_id] = (now_mono, seconds)
         return seconds
-
-    def _resolve_bitnet_option(self, state: "ModelState", key: str, default: int) -> int:
-        return resolve_bitnet_option(state, key, default)
 
     def _resolve_bitnet_gpu_layers(self, state: "ModelState") -> int:
         return resolve_bitnet_gpu_layers(state, settings.bitnet_gpu_layers)

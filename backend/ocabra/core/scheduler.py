@@ -188,31 +188,6 @@ class GPUScheduler:
             f"{'; '.join(details)}; total free {total_free} MB"
         )
 
-    async def get_eviction_candidates(
-        self,
-        vram_needed_mb: int,
-        target_gpu: int,
-    ) -> list[str]:
-        del vram_needed_mb, target_gpu
-        import sqlalchemy as sa
-
-        from ocabra.db.model_config import ModelConfig
-
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                sa.select(ModelConfig).where(
-                    ModelConfig.load_policy.in_(["on_demand", "warm", "pin"])
-                )
-            )
-            configs = result.scalars().all()
-
-        policy_order = {"on_demand": 0, "warm": 1, "pin": 2}
-        sorted_configs = sorted(
-            configs,
-            key=lambda c: policy_order.get(c.load_policy, 99),
-        )
-        return [c.model_id for c in sorted_configs]
-
     async def check_schedule_evictions(self) -> None:
         if self._model_manager is None:
             logger.debug("schedule_eviction_check_skipped", reason="missing_model_manager")
