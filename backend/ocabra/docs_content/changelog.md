@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.133.0 — 2026-11-24
+
+### Cambiado
+
+- **Entrada malformada detectada antes.** Una petición a
+  `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/pooling`,
+  `/v1/images/generations`, `/v1/audio/generate` o a `/api/chat`,
+  `/api/generate`, `/api/embed` a la que le falta un campo obligatorio
+  (`model`, `messages`, `input`, `prompt`…) o que manda un campo conocido con
+  el tipo equivocado responde ahora **422** con un mensaje claro que nombra el
+  campo, en vez del 500 opaco que daba al fallar más adelante. Los campos
+  desconocidos y los valores que ya enviabas se siguen aceptando igual.
+
 ## 0.132.0 — 2026-11-24
 
 ### Nuevo
