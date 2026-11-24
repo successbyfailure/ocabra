@@ -7,6 +7,7 @@ import {
   getVllmConfig,
   getWhisperConfig,
 } from "@/lib/modelContext"
+import { mbToGb } from "@/lib/format"
 import type {
   ActiveRequestProgress,
   GPUState,
@@ -30,7 +31,7 @@ export function requestColorOrder(requests: ActiveRequestProgress[] = []): Map<s
   return new Map(sorted.map((r, i) => [r.requestId, i]))
 }
 
-const gb = (mb: number) => (mb / 1024).toFixed(1)
+const gb = (mb: number) => mbToGb(mb)
 
 function Chip({ children, className = "", title }: { children: React.ReactNode; className?: string; title?: string }) {
   return (

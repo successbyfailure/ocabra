@@ -16,6 +16,7 @@ import { BackendStatusBadge } from "@/components/backends/BackendStatusBadge"
 import { BackendGlyph } from "@/components/dashboard/BackendIcon"
 import { InstallProgressBar } from "@/components/backends/InstallProgressBar"
 import { api } from "@/api/client"
+import { formatDate, formatMb } from "@/lib/format"
 import type { BackendInstallMethod, BackendModuleState, BackendPublishedInfo } from "@/types"
 
 interface BackendCardProps {
@@ -31,11 +32,8 @@ interface BackendCardProps {
   onOffer?: (backendType: string, info: BackendPublishedInfo | null) => void
 }
 
-function formatSize(mb: number | null | undefined): string {
-  if (mb == null || mb <= 0) return "-"
-  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`
-  return `${Math.round(mb)} MB`
-}
+const formatSize = (mb: number | null | undefined): string =>
+  mb == null || mb <= 0 ? "-" : formatMb(mb)
 
 /** Installed vs published package versions, differences highlighted. */
 function PackageVersions({
@@ -91,15 +89,6 @@ function PackageVersions({
       )}
     </div>
   )
-}
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "-"
-  try {
-    return new Date(iso).toLocaleDateString()
-  } catch {
-    return iso
-  }
 }
 
 /** Icono grande del backend en un recuadro: el logo de marca si lo tiene

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { formatDate } from "@/lib/format"
 import type { AdminApiKey, AdminUser } from "@/types"
 
 function keyStatus(key: AdminApiKey): "active" | "revoked" | "expired" {
@@ -20,11 +21,6 @@ function StatusBadge({ status }: { status: "active" | "revoked" | "expired" }) {
       {map.label}
     </span>
   )
-}
-
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "—"
-  return new Date(dateStr).toLocaleDateString("es-ES", { year: "numeric", month: "short", day: "numeric" })
 }
 
 interface ReassignDialogProps {

@@ -10,6 +10,7 @@ import { OllamaControls } from "@/components/backends/OllamaServerCard"
 import { BackendDefaults, hasBackendDefaults } from "@/components/backends/BackendDefaults"
 import { useBackendsStore } from "@/stores/backendsStore"
 import { cn } from "@/lib/cn"
+import { formatMb } from "@/lib/format"
 import type { BackendInstallMethod, BackendModuleState, BackendPublishedInfo, ServerConfig } from "@/types"
 
 /** Para qué sirve cada backend, a partir de sus etiquetas. */
@@ -25,9 +26,7 @@ const usesOf = (b: BackendModuleState) => {
   return USES.filter((u) => u.tags.some((t) => tags.includes(t))).map((u) => u.key)
 }
 
-function fmtSize(mb: number): string {
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`
-}
+const fmtSize = (mb: number): string => formatMb(mb)
 
 export function Backends() {
   const backends = useBackendsStore((s) => s.backends)

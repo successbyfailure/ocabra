@@ -4,6 +4,7 @@ import * as Select from "@radix-ui/react-select"
 import { ChevronDown, ChevronUp, Plus, X, KeyRound, RotateCcw, Pencil, Trash2, ShieldOff, ShieldCheck } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { formatDate } from "@/lib/format"
 import type { AdminUser, ApiKey, UserRole } from "@/types"
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -59,14 +60,6 @@ function roleBadge(role: UserRole) {
   )
 }
 
-function formatDate(iso: string) {
-  if (!iso) return "—"
-  try {
-    return new Intl.DateTimeFormat("es-ES", { dateStyle: "medium" }).format(new Date(iso))
-  } catch {
-    return iso
-  }
-}
 
 // ─── sub-components ──────────────────────────────────────────────────────────
 

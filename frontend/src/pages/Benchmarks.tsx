@@ -6,6 +6,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { formatDateTime, formatDurationBetween } from "@/lib/format"
 import type {
   BenchmarkAppCatalog, BenchmarkAttempt, BenchmarkRun, BenchmarkRunStatus, BenchmarkSchedule,
   BenchmarkScheduleInput,
@@ -64,18 +65,9 @@ function statusClass(status: BenchmarkRunStatus): string {
   return "border-sky-500/40 bg-sky-500/10 text-sky-400"
 }
 
-function formatDate(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : "—"
-}
-
-function formatDuration(start: string | null, end: string | null): string {
-  if (!start) return "—"
-  const seconds = Math.max(0, Math.round((new Date(end ?? Date.now()).getTime() - new Date(start).getTime()) / 1_000))
-  if (seconds < 60) return `${seconds} s`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes} min ${seconds % 60} s`
-  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`
-}
+const formatDate = (value: string | null): string => formatDateTime(value)
+const formatDuration = (start: string | null, end: string | null): string =>
+  formatDurationBetween(start, end)
 
 function suiteProfileArgs(app: string, profile: string): string[] {
   return app === "corrala" ? ["--profile", profile] : []

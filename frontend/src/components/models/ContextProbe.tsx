@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { api } from "@/api/client";
+import { formatContext as fmtTokens } from "@/lib/format";
 import type { ContextProbeJob, RuntimePreset } from "@/types";
 
 const FINISHED = new Set(["done", "error"]);
@@ -17,10 +18,6 @@ const STATUS_LABEL: Record<ContextProbeJob["status"], string> = {
   done: "Terminado",
   error: "Error",
 };
-
-function fmtTokens(tokens: number): string {
-  return tokens >= 1024 ? `${Math.round(tokens / 1024)}k` : String(tokens);
-}
 
 function fmtMb(map: Record<string, number>): string {
   return Object.entries(map)

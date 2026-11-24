@@ -3,13 +3,11 @@ import * as Dialog from "@radix-ui/react-dialog"
 import { Download, Hammer, Search, X } from "lucide-react"
 import { api } from "@/api/client"
 import { BackendTile } from "@/components/backends/BackendCard"
+import { formatMb } from "@/lib/format"
 import type { BackendInstallMethod, BackendModuleState, BackendPublishedInfo } from "@/types"
 
-function formatSize(mb: number | null | undefined): string {
-  if (mb == null || mb <= 0) return "?"
-  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`
-  return `${Math.round(mb)} MB`
-}
+const formatSize = (mb: number | null | undefined): string =>
+  mb == null || mb <= 0 ? "?" : formatMb(mb)
 
 /** Catálogo de backends que se pueden instalar: los que aún no están. Cada
  *  uno dice qué hace, cuánto ocupa y si hay precompilado publicado (lo

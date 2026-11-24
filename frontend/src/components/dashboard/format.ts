@@ -1,23 +1,10 @@
 import type { RequestStage } from "@/types"
+// Formateadores canónicos en lib/format.ts; se reexportan con los nombres
+// históricos (fmt*) que usa el dashboard para no tocar sus imports.
+import { formatContext, formatDuration, formatTokens } from "@/lib/format"
 
-export function fmtTokens(n: number | null | undefined): string {
-  if (n == null) return "—"
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 100_000 ? 0 : 1)}k`
-  return String(Math.round(n))
-}
-
-/** Duración compacta: 850 ms · 12 s · 3m05s · 1h12m. */
-export function fmtDuration(ms: number | null | undefined): string {
-  if (ms == null) return "—"
-  if (ms < 1000) return `${Math.round(ms)} ms`
-  const s = Math.round(ms / 1000)
-  if (s < 60) return `${s} s`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`
-  const h = Math.floor(m / 60)
-  return `${h}h${String(m % 60).padStart(2, "0")}m`
-}
+export const fmtTokens = formatTokens
+export const fmtDuration = formatDuration
 
 export function fmtTps(tps: number | null | undefined): string {
   if (tps == null || tps <= 0) return "—"
@@ -99,11 +86,7 @@ export const STALL_SECONDS = 15
 
 /** Tamaños de contexto: se configuran en potencias de dos (98304 = "96k"),
  *  así que se muestran en k de 1024 cuando el valor es múltiplo exacto. */
-export function fmtContext(n: number | null | undefined): string {
-  if (n == null || n <= 0) return "—"
-  if (n >= 1024 && n % 1024 === 0) return `${n / 1024}k`
-  return fmtTokens(n)
-}
+export const fmtContext = formatContext
 
 
 /** Reloj de audio: 75 → "1:15", 3725 → "1:02:05". */

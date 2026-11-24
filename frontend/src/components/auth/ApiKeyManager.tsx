@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { formatDate } from "@/lib/format"
 import type { ApiKey } from "@/types"
 
 function keyStatus(key: ApiKey): "active" | "revoked" | "expired" {
@@ -29,15 +30,6 @@ function StatusBadge({ status }: { status: "active" | "revoked" | "expired" }) {
       Revocada
     </span>
   )
-}
-
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "—"
-  return new Date(dateStr).toLocaleDateString("es-ES", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  })
 }
 
 const EXPIRY_OPTIONS: { label: string; days: number | null }[] = [

@@ -28,6 +28,7 @@ import { GpuBadge } from "@/components/dashboard/GpuBadge"
 import { cardState, requestColorOrder, StatePill, type CardState } from "@/components/dashboard/ModelLiveCard"
 import { VISUAL, fmtAgo, fmtContext, fmtDuration, fmtTps } from "@/components/dashboard/format"
 import { getVllmConfig } from "@/lib/modelContext"
+import { mbToGb } from "@/lib/format"
 import { useAuthStore } from "@/stores/authStore"
 import type {
   BackendType,
@@ -82,7 +83,7 @@ export function formatDiskSize(bytes: number | null | undefined): string | null 
   return `${(bytes / 1024 ** 2).toFixed(0)} MB`
 }
 
-const gb = (mb: number) => `${(mb / 1024).toFixed(1)} GB`
+const gb = (mb: number) => `${mbToGb(mb)} GB`
 
 const ACTIVE_STATUSES: ModelStatus[] = ["loaded", "loading", "unloading"]
 

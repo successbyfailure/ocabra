@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import { Boxes, History, Loader2, Search, Server, Settings2, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { formatContext } from "@/lib/format"
 import type { CloudPreloadPick, CloudRecipe, CloudReplicableModel } from "@/types"
 import type { BackendModuleState } from "@/types/backends"
 import { RecipeConfig, RecipeSearch } from "./RecipeTools"
@@ -169,7 +170,7 @@ export function ModelPicker({
       memory: recipeMemory(r),
       detail: [
         gb(r.size_bytes),
-        r.context ? `${Math.round(r.context / 1024)}k ctx` : null,
+        r.context ? `${formatContext(r.context)} ctx` : null,
         r.parallel ? `${r.parallel} slots` : null,
         r.last_node_name ? `en ${r.last_node_name.replace(/^ocabra-/, "")}` : null,
         ago(r.last_used_at ?? r.captured_at),

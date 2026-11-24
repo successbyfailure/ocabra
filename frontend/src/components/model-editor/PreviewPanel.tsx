@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { ChevronDown, ChevronRight, Loader2, RefreshCw, TerminalSquare } from "lucide-react"
 import { fmtContext } from "@/components/dashboard/format"
+import { formatMb } from "@/lib/format"
 import type { GPUState } from "@/types"
 import { formatValue } from "./draft"
 import type { LadderRung } from "./usePresetLadder"
@@ -21,10 +22,8 @@ export const PART_META: Record<string, { label: string; color: string }> = {
   preset: { label: "con el preset", color: "#6366f1" },
 }
 
-export function fmtMb(mb: number | null | undefined): string {
-  if (mb == null) return "—"
-  return mb >= 1024 ? `${(mb / 1024).toFixed(mb >= 10240 ? 0 : 1)} GB` : `${Math.round(mb)} MB`
-}
+/** Reexportado desde lib/format; muchas secciones del editor lo importan de aquí. */
+export const fmtMb = formatMb
 
 export function PreviewPanel({
   editor,

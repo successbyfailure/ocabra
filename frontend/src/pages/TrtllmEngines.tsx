@@ -5,22 +5,13 @@ import { Link } from "react-router"
 import { useIsAdmin } from "@/hooks/useAuth"
 import { api } from "@/api/client"
 import { useModelStore } from "@/stores/modelStore"
+import { formatDateTime, formatDurationBetween } from "@/lib/format"
 import type { CompileJob } from "@/types"
 
-function formatDuration(startedAt: string | null, finishedAt: string | null): string {
-  if (!startedAt || !finishedAt) return "-"
-  const ms = new Date(finishedAt).getTime() - new Date(startedAt).getTime()
-  const s = Math.round(ms / 1000)
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  const rem = s % 60
-  return `${m}m ${rem}s`
-}
+const formatDuration = (startedAt: string | null, finishedAt: string | null): string =>
+  startedAt && finishedAt ? formatDurationBetween(startedAt, finishedAt) : "-"
 
-function formatDate(iso: string | null): string {
-  if (!iso) return "-"
-  return new Date(iso).toLocaleString()
-}
+const formatDate = (iso: string | null): string => formatDateTime(iso, "-")
 
 function dtypeLabel(dtype: string): string {
   const map: Record<string, string> = { fp16: "FP16", bf16: "BF16", int8: "INT8", fp8: "FP8" }

@@ -4,6 +4,7 @@ import * as Tabs from "@radix-ui/react-tabs"
 import { Plus, X, Trash2, Users as UsersIcon, Layers, Search } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { formatDate } from "@/lib/format"
 import type { AdminUser, Group, GroupMember, ModelState } from "@/types"
 
 /**
@@ -45,14 +46,6 @@ export async function listGrantableModels(): Promise<GrantableModel[]> {
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-function formatDate(iso: string) {
-  if (!iso) return "—"
-  try {
-    return new Intl.DateTimeFormat("es-ES", { dateStyle: "medium" }).format(new Date(iso))
-  } catch {
-    return iso
-  }
-}
 
 // ─── Confirm dialog ──────────────────────────────────────────────────────────
 

@@ -2,6 +2,7 @@ import { useState } from "react"
 import { Loader2, Plus, Search } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { formatContext } from "@/lib/format"
 import type { CloudRecipe, HFModelCard, HFModelVariant, OllamaModelCard, OllamaModelVariant } from "@/types"
 
 const GB = 1024 ** 3
@@ -11,7 +12,7 @@ const btnCls =
   "inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs hover:bg-muted disabled:opacity-50"
 
 const CONTEXTS = [0, 8192, 16384, 32768, 65536, 131072, 262144]
-const ctxLabel = (n: number) => (n === 0 ? "por defecto" : `${Math.round(n / 1024)}k`)
+const ctxLabel = (n: number) => (n === 0 ? "por defecto" : formatContext(n))
 
 type Variant = {
   key: string

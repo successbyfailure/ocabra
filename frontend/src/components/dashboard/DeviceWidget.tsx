@@ -16,9 +16,10 @@ import { gpuLabel } from "./gpuNames"
 import { StatePill, cardState } from "./ModelLiveCard"
 import { BackendIcon } from "./BackendIcon"
 import { fmtTps } from "./format"
+import { mbToGb } from "@/lib/format"
 
 const MODEL_HUES = ["#2a78d6", "#1baf7a", "#b07cf0", "#e0a93b", "#4ec9d6", "#d4679a"] as const
-const gb = (mb: number) => (mb / 1024).toFixed(1)
+const gb = (mb: number) => mbToGb(mb)
 const EMPTY_HISTORY: GpuHistoryPoint[] = []
 
 interface BarSegment {

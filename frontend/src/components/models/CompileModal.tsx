@@ -12,6 +12,7 @@ import { toast } from "sonner"
 import { api, type VramEstimate } from "@/api/client"
 import { useSSE } from "@/hooks/useSSE"
 import { useGpuStore } from "@/stores/gpuStore"
+import { formatMb } from "@/lib/format"
 import type { CompileJob, GPUState, ModelState } from "@/types"
 
 // ── Default engine name ──────────────────────────────────────────
@@ -173,9 +174,7 @@ function ElapsedTimer({ startedAt }: { startedAt: string | null }) {
 
 // ── VRAM estimate panel ──────────────────────────────────────────
 
-function mb(v: number) {
-  return v >= 1024 ? `${(v / 1024).toFixed(1)} GB` : `${v} MB`
-}
+const mb = (v: number): string => formatMb(v)
 
 function quantizationLabel(quant: string | null | undefined) {
   const value = String(quant ?? "").toLowerCase()

@@ -11,6 +11,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts"
+import { formatMb } from "@/lib/format"
 import type { GpuUsageStats } from "@/types"
 
 type Metric = "utilizationPct" | "vramMb" | "powerW" | "tempC"
@@ -40,10 +41,7 @@ function formatHours(h: number): string {
   return `${h.toFixed(2)} h`
 }
 
-function formatVram(mb: number): string {
-  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`
-  return `${mb} MB`
-}
+const formatVram = (mb: number): string => formatMb(mb)
 
 function groupSeriesByTimestamp(
   data: GpuUsageStats | null,
