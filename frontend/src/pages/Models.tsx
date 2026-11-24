@@ -13,6 +13,7 @@ import {
   getModelContextSummary,
   MODEL_CATEGORY_LABELS,
   MODEL_CATEGORY_ORDER,
+  profileToModelCategory,
   type ModelCategory,
 } from "@/lib/modelContext"
 import { useGpuStore } from "@/stores/gpuStore"
@@ -32,29 +33,19 @@ import type {
 
 type ViewMode = "model" | "deployment"
 
-/** Server profile category → page tab, for models whose default deployment
- *  is not in the model store yet. */
-const PROFILE_CATEGORY_TO_TAB: Record<string, ModelCategory> = {
-  llm: "chat",
-  embedding: "embeddings",
-  rerank: "embeddings",
-  tts: "tts",
-  stt: "stt",
-  image: "image",
-  music: "music",
-  video_upscaling: "video",
-}
-
 export function categorizeLogicalModel(
   model: LogicalModel,
   states: Record<string, ModelState | undefined>,
 ): ModelCategory {
+  // Single source: the backend category of the logical model. Fall back to
+  // the loaded deployment's capabilities only when the backend didn't say.
+  const backend = profileToModelCategory(model.category)
+  if (backend) return backend
   const preferred =
     model.deployments.find((dep) => dep.isDefault && states[dep.modelId]) ??
     model.deployments.find((dep) => states[dep.modelId])
   const state = preferred ? states[preferred.modelId] : undefined
-  if (state) return categorizeModel(state)
-  return (model.category && PROFILE_CATEGORY_TO_TAB[model.category]) || "other"
+  return state ? categorizeModel(state) : "other"
 }
 
 export function Models() {

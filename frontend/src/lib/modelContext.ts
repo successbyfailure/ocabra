@@ -5,6 +5,7 @@ import type {
   BitNetConfig,
   LlamaCppConfig,
   ModelState,
+  ProfileCategory,
   SGLangConfig,
   TensorRTLLMConfig,
   VLLMConfig,
@@ -164,23 +165,75 @@ export const MODEL_CATEGORY_LABELS: Record<ModelCategory, string> = {
   other: "Otros",
 }
 
-// Capability-first, backendType as a fallback for backends the capability
-// flags don't fully cover yet (e.g. video upscalers — BackendCapabilities
-// has video_upscaling server-side but it isn't wired through to the
-// frontend ModelCapabilities type).
+/** La categoría del backend (``ProfileCategory``) llevada al espacio, más
+ *  grueso, de la lista de modelos. Única tabla de correspondencia; la usan
+ *  también las páginas de Modelos y Perfiles. */
+export const PROFILE_CATEGORY_TO_MODEL_CATEGORY: Record<ProfileCategory, ModelCategory> = {
+  llm: "chat",
+  embedding: "embeddings",
+  rerank: "embeddings",
+  tts: "tts",
+  stt: "stt",
+  image: "image",
+  music: "music",
+  video_upscaling: "video",
+}
+
+export function profileToModelCategory(category: string | null | undefined): ModelCategory | null {
+  if (category && category in PROFILE_CATEGORY_TO_MODEL_CATEGORY) {
+    return PROFILE_CATEGORY_TO_MODEL_CATEGORY[category as ProfileCategory]
+  }
+  return null
+}
+
+/**
+ * ÚNICO clasificador por capacidades (el respaldo cuando el backend no da
+ * `category`). Devuelve una ``ProfileCategory`` o ``null`` si no reconoce
+ * ninguna capacidad. Antes había dos clasificadores con prioridades distintas
+ * (este y el del editor de perfiles); ahora ambos salen de aquí.
+ */
+export function inferProfileCategory(
+  caps: Record<string, unknown> | undefined,
+): ProfileCategory | null {
+  const c = caps ?? {}
+  const has = (...keys: string[]) => keys.some((k) => Boolean(c[k]))
+  if (has("audio_transcription", "audioTranscription")) return "stt"
+  if (has("tts")) return "tts"
+  if (has("music_generation", "musicGeneration")) return "music"
+  if (has("image_generation", "imageGeneration", "image_editing", "imageEditing")) return "image"
+  if (has("video_upscaling", "videoUpscaling")) return "video_upscaling"
+  if (has("rerank")) return "rerank"
+  if (has("embeddings", "pooling", "classification", "score")) return "embedding"
+  if (has("chat", "completion")) return "llm"
+  return null
+}
+
+/** Categoría de perfil de un modelo según el backend: el perfil de ejecución
+ *  por defecto (o el primero). ``null`` si el modelo no trae perfiles. */
+function backendProfileCategory(model: ModelState): ProfileCategory | null {
+  const execution = (model.profiles ?? []).filter((p) => p.profileKind === "execution")
+  const chosen = execution.find((p) => p.isDefault) ?? execution[0]
+  return chosen?.category ?? null
+}
+
+/**
+ * Categoría de un modelo para la lista. Fuente única: la ``category`` del
+ * backend (perfil de ejecución). Si el modelo no trae perfiles, se cae al
+ * único respaldo por capacidades. Los backends de vídeo que aún no exponen la
+ * capacidad `video_upscaling` se reconocen por su tipo.
+ */
 export function categorizeModel(model: ModelState): ModelCategory {
-  const c = model.capabilities
-  if (c.audioTranscription) return "stt"
-  if (c.tts) return "tts"
-  if (c.musicGeneration) return "music"
-  if (c.imageGeneration || c.imageEditing) return "image"
+  const backend = profileToModelCategory(backendProfileCategory(model))
+  if (backend) return backend
   if (
     model.backendType === "upscaler" ||
     model.backendType === "flashvsr" ||
     model.backendType === "comfyui_video"
   )
     return "video"
-  if (c.embeddings || c.pooling || c.rerank || c.classification || c.score) return "embeddings"
-  if (c.chat || c.completion) return "chat"
-  return "other"
+  return (
+    profileToModelCategory(
+      inferProfileCategory(model.capabilities as unknown as Record<string, unknown>),
+    ) ?? "other"
+  )
 }

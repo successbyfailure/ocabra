@@ -1,3 +1,4 @@
+import { inferProfileCategory } from "@/lib/modelContext"
 import type { ProfileCategory } from "@/types"
 
 export type Defaults = Record<string, unknown>
@@ -127,16 +128,10 @@ export const CATEGORY_TONE: Record<ProfileCategory, string> = {
   video_upscaling: "border-orange-500/40 bg-orange-500/15 text-orange-200",
 }
 
+/** Respaldo por capacidades del editor de perfiles. Delega en el único
+ *  clasificador (``inferProfileCategory``) y usa "llm" como valor por defecto. */
 export function inferCategory(caps: Record<string, unknown> | undefined): ProfileCategory {
-  const c = caps ?? {}
-  if (c.rerank) return "rerank"
-  if (c.embeddings) return "embedding"
-  if (c.tts) return "tts"
-  if (c.audio_transcription || c.audioTranscription) return "stt"
-  if (c.image_generation || c.imageGeneration || c.image_editing) return "image"
-  if (c.music_generation || c.musicGeneration) return "music"
-  if (c.video_upscaling) return "video_upscaling"
-  return "llm"
+  return inferProfileCategory(caps) ?? "llm"
 }
 
 export const AUDIO_EXTENSIONS = [".wav", ".mp3", ".flac", ".ogg"]
