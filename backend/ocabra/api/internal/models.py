@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -48,6 +49,8 @@ from ocabra.registry.ollama_registry import OllamaRegistry
 from ocabra.schemas.auto_setup import AutoSetupRequest
 from ocabra.schemas.live_context import LiveContextRequest
 from ocabra.stats import live_activity
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["models"])
 # POST /models/{id}/smoke-test lives in models_smoke.py (REF-07); mount it here
@@ -1346,7 +1349,8 @@ async def preview_model_config(
     # must not hide the preview of an otherwise valid draft.
     try:
         gpus = _split_estimate(estimate, draft, gpu_indices, totals)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — sin reparto por GPU, el resto del preview sigue
+        logger.debug("preview_split_estimate_failed", model_id=state.model_id, exc_info=True)
         gpus = []
 
     # llama.cpp models: llama.cpp's own projection (llama-fit-params) replaces
@@ -1799,7 +1803,8 @@ async def delete_model(
 async def _get_ollama_sizes_bytes() -> dict[str, int]:
     try:
         details = await _ollama_registry.list_installed_details()
-    except Exception:
+    except Exception:  # noqa: BLE001 — Ollama inalcanzable: sin tamaños, no un 500
+        logger.warning("ollama_installed_sizes_failed", exc_info=True)
         return {}
     size_map: dict[str, int] = {}
     for item in details:
@@ -1814,7 +1819,8 @@ async def _sync_ollama_inventory(model_manager) -> None:
     try:
         installed = await _ollama_registry.list_installed()
         loaded_details = await _ollama_registry.list_loaded_details()
-    except Exception:
+    except Exception:  # noqa: BLE001 — Ollama inalcanzable: se omite el sync
+        logger.warning("ollama_inventory_sync_failed", exc_info=True)
         return
 
     loaded: list[str] = []
@@ -2097,7 +2103,10 @@ async def _resolve_capabilities_payload(
         backend = await worker_pool.get_backend(state.backend_type)
         capabilities = await backend.get_capabilities(state.backend_model_id)
         payload = capabilities.to_dict()
-    except Exception:
+    except Exception:  # noqa: BLE001 — sin backend vivo, caen los defaults configurados
+        logger.debug(
+            "capabilities_backend_probe_failed", model_id=state.model_id, exc_info=True
+        )
         payload = dict(current_payload)
 
     return await asyncio.to_thread(_apply_capability_fallbacks, state, payload)
