@@ -16,6 +16,7 @@ import httpx
 
 from ocabra.config import settings
 from ocabra.core import vram_planner as vp
+from ocabra.core.model_files import find_local_hf_dir, sum_hf_weight_files_mb
 from ocabra.core.model_ref import is_llama_cpp_family
 from ocabra.core.vram_planner import (
     ModelArch,
@@ -82,33 +83,15 @@ class ArchResolution:
 
 
 def _find_hf_model_dir(repo: str) -> Path | None:
-    """Locate a local HF model dir (config.json) for a repo id like ``Qwen/Qwen3-8B``."""
-    if not repo:
-        return None
-    base = Path(settings.models_dir) / "huggingface"
-    flat = repo.replace("/", "--")
-    candidates = [base / flat, base / repo]
-    for c in candidates:
-        if (c / "config.json").is_file():
-            return c
-    # HF cache layout: models--Qwen--Qwen3-8B/snapshots/<hash>/config.json
-    for snaps in list(base.glob(f"models--{flat}/snapshots/*")) + list(
-        base.glob(f"*{flat}*/snapshots/*")
-    ):
-        if (snaps / "config.json").is_file():
-            return snaps
-    return None
+    """Locate a local HF model dir (config.json) for a repo id like ``Qwen/Qwen3-8B``.
 
-
-def _sum_weight_files_mb(model_dir: Path) -> float:
-    total = 0
-    for pattern in ("*.safetensors", "*.bin"):
-        for f in model_dir.glob(pattern):
-            try:
-                total += f.stat().st_size
-            except OSError:
-                pass
-    return total / _MB
+    Single source in ``model_files`` (DUP-01), shared with the pre-load VRAM
+    estimator and the vLLM backend, so the planner and the estimator can never
+    disagree about where a model lives. The unified locator also checks the
+    direct ``<models_dir>/<repo>`` layout and the canonical HF cache
+    (``hf_cache_dir``), both of which this one missed before.
+    """
+    return find_local_hf_dir(repo, settings.models_dir, getattr(settings, "hf_cache_dir", None))
 
 
 async def _resolve_ollama(name: str) -> ArchResolution:
@@ -159,7 +142,7 @@ def _resolve_hf(state) -> ArchResolution:
         cfg = json.loads((model_dir / "config.json").read_text())
     except (OSError, ValueError):
         return ArchResolution(None, 0.0, "config.json ilegible")
-    weights_mb = _sum_weight_files_mb(model_dir)
+    weights_mb = sum_hf_weight_files_mb(model_dir)
     # Encoders (rerankers, embeddings, classifiers) process the whole sequence in
     # one pass — no per-step KV cache that scales with context — so the planner
     # doesn't apply to them even though they have transformer layers.

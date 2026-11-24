@@ -20,6 +20,7 @@ from ocabra.core.backend_options import (
     resolve_vllm_option,
     snake_to_camel,  # noqa: F401 - re-exported for backward compatibility
 )
+from ocabra.core.model_files import find_local_hf_dir, sum_hf_weight_files_mb
 from ocabra.core.model_ids import (  # noqa: F401 - re-exported for backward compatibility
     build_diarized_extra_config,
     compute_worker_key,
@@ -354,85 +355,6 @@ _VLLM_KV_DTYPE_BYTES: dict[str, float] = {
 }
 
 
-def _find_local_hf_dir(
-    repo: str,
-    models_dir: str | Path,
-    hf_cache_dir: str | Path | None = None,
-) -> Path | None:
-    """Best-effort lookup of a local HuggingFace snapshot dir for ``repo``.
-
-    Must stay in sync with ``VLLMBackend._resolve_local_model_dir`` — otherwise
-    a model the backend can load fine looks "unknown" to the estimator, which
-    returns 0, and the scheduler falls back to the weights-only heuristic we
-    are trying to replace. Checks (same priority as the vLLM backend):
-
-      1. ``<models_dir>/<repo>`` — direct legacy layout
-      2. ``<models_dir>/huggingface/<flat>`` — flat HF layout
-      3. Snapshots under ``<models_dir>/huggingface/models--<flat>/snapshots/*``
-      4. ``<hf_cache_dir>/hub/models--<flat>/snapshots/<commit>`` — canonical
-         HuggingFace cache layout populated by ``snapshot_download``.
-
-    For the HF cache we prefer the commit ``refs/main`` points at (matching the
-    snapshot the backend will actually load); otherwise the newest snapshot dir.
-    """
-    if not repo:
-        return None
-    # Strip the ``::<hash>`` suffix that profile worker_keys carry — the base
-    # model on disk is the same regardless of load_overrides, and any lookup
-    # that keeps the suffix misses the snapshot and forces the caller back to
-    # the weights-only heuristic we're trying to replace.
-    if "::" in repo:
-        repo = repo.split("::", 1)[0]
-    flat = repo.replace("/", "--")
-
-    base = Path(models_dir)
-    direct = base / repo
-    if (direct / "config.json").is_file():
-        return direct
-    hf_base = base / "huggingface"
-    for c in (hf_base / flat, hf_base / repo):
-        if (c / "config.json").is_file():
-            return c
-    for snaps in list(hf_base.glob(f"models--{flat}/snapshots/*")) + list(
-        hf_base.glob(f"*{flat}*/snapshots/*")
-    ):
-        if (snaps / "config.json").is_file():
-            return snaps
-
-    if hf_cache_dir:
-        cache_root = Path(hf_cache_dir) / "hub" / f"models--{flat}"
-        snapshots = cache_root / "snapshots"
-        if snapshots.is_dir():
-            commit = ""
-            ref_main = cache_root / "refs" / "main"
-            if ref_main.is_file():
-                try:
-                    commit = ref_main.read_text(encoding="utf-8").strip()
-                except OSError:
-                    commit = ""
-            if commit:
-                snap = snapshots / commit
-                if (snap / "config.json").is_file():
-                    return snap
-            candidates = [p for p in snapshots.iterdir() if p.is_dir()]
-            if candidates:
-                newest = max(candidates, key=lambda p: p.stat().st_mtime)
-                if (newest / "config.json").is_file():
-                    return newest
-    return None
-
-
-def _sum_hf_weight_files_mb(model_dir: Path) -> float:
-    total = 0
-    for pattern in ("*.safetensors", "*.bin"):
-        for f in model_dir.glob(pattern):
-            try:
-                total += f.stat().st_size
-            except OSError:
-                pass
-    return total / (1024 * 1024)
-
-
 def _flatten_hf_config_for_arch(cfg: dict) -> dict:
     """Merge ``text_config`` into the top level so arch fields resolve.
 
@@ -538,7 +460,7 @@ def estimate_vllm_vram_from_config(
     repo = getattr(state, "backend_model_id", None) or getattr(state, "model_id", None)
     if not repo:
         return 0
-    model_dir = _find_local_hf_dir(repo, models_dir, hf_cache_dir)
+    model_dir = find_local_hf_dir(repo, models_dir, hf_cache_dir)
     if model_dir is None:
         return 0
     try:
@@ -549,7 +471,7 @@ def estimate_vllm_vram_from_config(
     arch = arch_from_hf_config(flat_cfg)
     if arch is None:
         return 0
-    weights_mb = _sum_hf_weight_files_mb(model_dir)
+    weights_mb = sum_hf_weight_files_mb(model_dir)
     if weights_mb <= 0:
         return 0
 
