@@ -19,6 +19,11 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response, Streami
 from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 from ocabra.core.admission import EndpointInflight
+from ocabra.core.inference.pipeline import (
+    PipelineContext,
+    RequestDescriptor,
+    run_request,
+)
 from ocabra.core.model_manager_helpers import overrides_enable_diarization
 
 from ._deps import (
@@ -30,6 +35,7 @@ from ._deps import (
     get_openai_user,
     get_profile_registry,
     merge_profile_defaults,
+    ocabra_response_headers,
     raise_upstream_http_error,
     read_json_object,
     resolve_profile,
@@ -688,6 +694,25 @@ def _raise_tts_transport_error(exc: httpx.TransportError, worker_key: str) -> No
     ) from exc
 
 
+# REF-01 fase C: /v1/audio/speech declara su flujo y entra por ``run_request``.
+# El motor hace federate→route→cap→merge; el despacho (worker TTS nativo
+# ``/synthesize[/stream]``, partición WAV/stream y construcción de la respuesta
+# de audio binario) se queda INLINE por la costura ``dispatch`` —lo que
+# forward_request/SSE no transporta—. ``routes_request_body=False`` conserva la
+# resolución histórica (nunca pasó el cuerpo al planificador de runtime).
+# Matriz: Router S, ACL P, Cap S, Fair N, Desconexión P, Federación S inline.
+_SPEECH_DESCRIPTOR = RequestDescriptor(
+    request_kind="tts",
+    capability="tts",
+    capability_label="text-to-speech",
+    dispatch_path="/v1/audio/speech",  # informativo: el despacho es inyectado
+    federates=True,
+    honors_disconnect=False,
+    applies_fair_share=False,
+    routes_request_body=False,
+)
+
+
 @router.post("/audio/speech", summary="Generate speech", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def speech(
     request: Request,
@@ -745,181 +770,192 @@ async def speech(
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
+    # El motor extrae ``model`` del cuerpo para federar y resolver: que sea el id
+    # ya resuelto por compatibilidad OpenAI, no el alias que mandó el cliente.
+    body["model"] = model_id
 
-    # --- Federation hook ---
-    federation_manager = get_federation_manager(request)
-    if federation_manager is not None:
+    async def _federate(fed_model_id: str, fed_body: dict) -> StreamingResponse | None:
+        # Federation hook: TTS is streaming audio — proxy as stream. Returns the
+        # peer's stream, or None to serve locally (federation off, model not
+        # remote, or peer refused/unreachable).
+        federation_manager = get_federation_manager(request)
+        if federation_manager is None:
+            return None
         from ocabra.config import settings as _settings
 
-        if _settings.federation_enabled:
-            from ocabra.core.federation import resolve_federated
+        if not _settings.federation_enabled:
+            return None
+        from ocabra.core.federation import resolve_federated
 
-            from ._federation import body_for_peer
+        from ._federation import body_for_peer
 
-            resolved: dict[str, Any] = {}
-            target, peer = await resolve_federated(
-                model_id,
-                model_manager,
-                federation_manager,
-                profile_registry,
-                resolved=resolved,
-                user=resolution_user,
-            )
-            if target == "remote" and peer is not None:
-                request.state.federation_remote_node_id = peer.peer_id
-                # The peer gets the model this node resolved, not the client's
-                # OpenAI alias: ``tts-1`` + ``alloy`` is a pin of *this* node's
-                # openai_tts_voice_map, and the peer may have none (or another).
-                proxy_body, _ = await body_for_peer(
-                    peer, model_id, {**body, "model": model_id}, resolved, profile_registry
-                )
-                # TTS is streaming audio — proxy as stream.
-                response_format = str(body.get("response_format") or "mp3").lower()
-                media_type = _AUDIO_CONTENT_TYPES.get(response_format, "audio/mpeg")
-                from ._federation import try_proxy_stream
+        resolved: dict[str, Any] = {}
+        target, peer = await resolve_federated(
+            model_id,
+            model_manager,
+            federation_manager,
+            profile_registry,
+            resolved=resolved,
+            user=resolution_user,
+        )
+        if target != "remote" or peer is None:
+            return None
+        request.state.federation_remote_node_id = peer.peer_id
+        # The peer gets the model this node resolved, not the client's
+        # OpenAI alias: ``tts-1`` + ``alloy`` is a pin of *this* node's
+        # openai_tts_voice_map, and the peer may have none (or another).
+        proxy_body, _ = await body_for_peer(
+            peer, model_id, {**fed_body, "model": model_id}, resolved, profile_registry
+        )
+        response_format = str(fed_body.get("response_format") or "mp3").lower()
+        media_type = _AUDIO_CONTENT_TYPES.get(response_format, "audio/mpeg")
+        from ._federation import try_proxy_stream
 
-                streamed = await try_proxy_stream(
-                    request,
-                    peer=peer,
-                    model_id=model_id,
-                    body=proxy_body,
-                    federation_manager=federation_manager,
-                    logger=logger,
-                    media_type=media_type,
-                    headers={
-                        "Content-Disposition": f'attachment; filename="speech.{response_format}"',
-                    },
-                )
-                if streamed is not None:
-                    return streamed
-                # The peer refused or is unreachable: serve it locally.
-    # --- End federation hook ---
-
-    profile, state = await resolve_profile(
-        model_id,
-        model_manager,
-        profile_registry,
-        user=resolution_user,
-        router_resolver=getattr(request.app.state, "router_resolver", None),
-        request_state=request.state,
-    )
-    check_capability(state, "tts", "text-to-speech")
-
-    merged_body = merge_profile_defaults(profile, body)
-    # El worker que resolve_profile ha cargado: su clave incluye el preset de
-    # runtime, que compute_worker_key(base, load_overrides) no ve.
-    worker_key = state.model_id
-
-    input_text: str = merged_body.get("input", "")
-    voice: str = merged_body.get("voice", "alloy")
-    response_format: str = merged_body.get("response_format", "mp3")
-    speed: float = _parse_float_param(merged_body.get("speed"), "speed", 1.0)
-    language: str = merged_body.get("language", "Auto")
-    reference_audio: str | None = merged_body.get("reference_audio") or merged_body.get("voice_ref")
-    reference_text: str | None = merged_body.get("reference_text")
-    speaker: str | None = merged_body.get("speaker")
-    instruct: str | None = merged_body.get("instruct")
-
-    worker_pool = request.app.state.worker_pool
-    worker = worker_pool.get_worker(worker_key)
-    if not worker:
-        raise _openai_error(
-            f"TTS worker unavailable for model '{worker_key}'.",
-            "server_error",
-            code="worker_unavailable",
-            status_code=503,
-            headers={"Retry-After": "10"},
+        return await try_proxy_stream(
+            request,
+            peer=peer,
+            model_id=model_id,
+            body=proxy_body,
+            federation_manager=federation_manager,
+            logger=logger,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="speech.{response_format}"',
+            },
         )
 
-    # Use /synthesize/stream for formats that support concatenation (mp3, pcm, opus,
-    # flac).  Fall back to /synthesize for WAV which requires a correct RIFF header.
-    stream_safe = response_format in {"mp3", "pcm", "opus", "flac", "aac"}
-    endpoint = "/synthesize/stream" if stream_safe else "/synthesize"
-    url = f"http://127.0.0.1:{worker.port}{endpoint}"
-    content_type = _AUDIO_CONTENT_TYPES.get(response_format, "audio/mpeg")
+    async def _dispatch(ctx: PipelineContext) -> StreamingResponse:
+        # Despacho INLINE: el worker TTS habla ``/synthesize[/stream]`` y devuelve
+        # audio binario; forward_request (JSON→JSON) no sirve. Byte-idéntico al
+        # histórico (partición WAV/stream, cabeceras antes del cuerpo, mapeo de
+        # errores de transporte, Content-Disposition).
+        profile = ctx.profile
+        merged_body = ctx.merged_body
+        worker_key = ctx.worker_key
+        worker_pool = ctx.worker_pool
 
-    payload: dict = {
-        "input": input_text,
-        "voice": voice,
-        "response_format": response_format,
-        "speed": speed,
-        "language": language,
-    }
-    if reference_audio:
-        payload["reference_audio"] = reference_audio
-    if reference_text:
-        payload["reference_text"] = reference_text
-    if speaker:
-        payload["speaker"] = speaker
-    if instruct:
-        payload["instruct"] = instruct
+        input_text: str = merged_body.get("input", "")
+        voice: str = merged_body.get("voice", "alloy")
+        response_format: str = merged_body.get("response_format", "mp3")
+        speed: float = _parse_float_param(merged_body.get("speed"), "speed", 1.0)
+        language: str = merged_body.get("language", "Auto")
+        reference_audio: str | None = merged_body.get("reference_audio") or merged_body.get(
+            "voice_ref"
+        )
+        reference_text: str | None = merged_body.get("reference_text")
+        speaker: str | None = merged_body.get("speaker")
+        instruct: str | None = merged_body.get("instruct")
 
-    from ocabra.api.openai._deps import ocabra_response_headers
-
-    tts_headers = await ocabra_response_headers(
-        request, model_manager, worker_key, profile.base_model_id
-    )
-    tts_headers["Content-Disposition"] = f'attachment; filename="speech.{response_format}"'
-
-    if not stream_safe:
-        # Non-streaming (WAV): fetch full response so errors propagate correctly
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            try:
-                resp = await client.post(url, json=payload)
-            except httpx.TransportError as exc:
-                _raise_tts_transport_error(exc, worker_key)
-            if resp.status_code >= 400:
-                detail = resp.text[:300] if resp.text else f"Worker error {resp.status_code}"
-                raise _openai_error(
-                    detail,
-                    "invalid_request_error" if resp.status_code < 500 else "server_error",
-                    status_code=resp.status_code,
-                )
-            return StreamingResponse(
-                iter([resp.content]),
-                media_type=content_type,
-                headers=tts_headers,
+        worker = worker_pool.get_worker(worker_key)
+        if not worker:
+            raise _openai_error(
+                f"TTS worker unavailable for model '{worker_key}'.",
+                "server_error",
+                code="worker_unavailable",
+                status_code=503,
+                headers={"Retry-After": "10"},
             )
 
-    # Establish the upstream response before returning our StreamingResponse.
-    # Starlette sends our 200 headers as soon as the response object starts;
-    # opening the worker stream inside the body iterator meant an immediate
-    # worker 4xx/5xx arrived too late to change that status and became a
-    # truncated, apparently successful audio file.
-    client = httpx.AsyncClient(timeout=300.0)
-    try:
-        upstream_request = client.build_request("POST", url, json=payload)
-        resp = await client.send(upstream_request, stream=True)
-    except httpx.TransportError as exc:
-        await client.aclose()
-        _raise_tts_transport_error(exc, worker_key)
-    except BaseException:
-        await client.aclose()
-        raise
+        # Use /synthesize/stream for formats that support concatenation (mp3, pcm,
+        # opus, flac).  Fall back to /synthesize for WAV which requires a correct
+        # RIFF header.
+        stream_safe = response_format in {"mp3", "pcm", "opus", "flac", "aac"}
+        endpoint = "/synthesize/stream" if stream_safe else "/synthesize"
+        url = f"http://127.0.0.1:{worker.port}{endpoint}"
+        content_type = _AUDIO_CONTENT_TYPES.get(response_format, "audio/mpeg")
 
-    if resp.status_code >= 400:
-        upstream_body = await resp.aread()
-        await resp.aclose()
-        await client.aclose()
-        raise _openai_error(
-            upstream_body.decode(errors="replace")[:300],
-            "invalid_request_error" if resp.status_code < 500 else "server_error",
-            status_code=resp.status_code,
+        payload: dict = {
+            "input": input_text,
+            "voice": voice,
+            "response_format": response_format,
+            "speed": speed,
+            "language": language,
+        }
+        if reference_audio:
+            payload["reference_audio"] = reference_audio
+        if reference_text:
+            payload["reference_text"] = reference_text
+        if speaker:
+            payload["speaker"] = speaker
+        if instruct:
+            payload["instruct"] = instruct
+
+        tts_headers = await ocabra_response_headers(
+            request, model_manager, worker_key, profile.base_model_id
         )
+        tts_headers["Content-Disposition"] = f'attachment; filename="speech.{response_format}"'
 
-    async def _stream_audio():
+        if not stream_safe:
+            # Non-streaming (WAV): fetch full response so errors propagate correctly
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                try:
+                    resp = await client.post(url, json=payload)
+                except httpx.TransportError as exc:
+                    _raise_tts_transport_error(exc, worker_key)
+                if resp.status_code >= 400:
+                    detail = resp.text[:300] if resp.text else f"Worker error {resp.status_code}"
+                    raise _openai_error(
+                        detail,
+                        "invalid_request_error" if resp.status_code < 500 else "server_error",
+                        status_code=resp.status_code,
+                    )
+                return StreamingResponse(
+                    iter([resp.content]),
+                    media_type=content_type,
+                    headers=tts_headers,
+                )
+
+        # Establish the upstream response before returning our StreamingResponse.
+        # Starlette sends our 200 headers as soon as the response object starts;
+        # opening the worker stream inside the body iterator meant an immediate
+        # worker 4xx/5xx arrived too late to change that status and became a
+        # truncated, apparently successful audio file.
+        client = httpx.AsyncClient(timeout=300.0)
         try:
-            async for chunk in resp.aiter_bytes():
-                if chunk:
-                    yield chunk
-        finally:
+            upstream_request = client.build_request("POST", url, json=payload)
+            resp = await client.send(upstream_request, stream=True)
+        except httpx.TransportError as exc:
+            await client.aclose()
+            _raise_tts_transport_error(exc, worker_key)
+        except BaseException:
+            await client.aclose()
+            raise
+
+        if resp.status_code >= 400:
+            upstream_body = await resp.aread()
             await resp.aclose()
             await client.aclose()
+            raise _openai_error(
+                upstream_body.decode(errors="replace")[:300],
+                "invalid_request_error" if resp.status_code < 500 else "server_error",
+                status_code=resp.status_code,
+            )
 
-    return StreamingResponse(
-        _stream_audio(),
-        media_type=content_type,
-        headers=tts_headers,
+        async def _stream_audio():
+            try:
+                async for chunk in resp.aiter_bytes():
+                    if chunk:
+                        yield chunk
+            finally:
+                await resp.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            _stream_audio(),
+            media_type=content_type,
+            headers=tts_headers,
+        )
+
+    return await run_request(
+        request,
+        descriptor=_SPEECH_DESCRIPTOR,
+        body=body,
+        user=resolution_user,
+        model_manager=model_manager,
+        profile_registry=profile_registry,
+        worker_pool=request.app.state.worker_pool,
+        federate=_federate,
+        dispatch=_dispatch,
     )
 
 

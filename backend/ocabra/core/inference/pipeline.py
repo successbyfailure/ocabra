@@ -74,6 +74,14 @@ class RequestDescriptor:
         router_capability: Capacidad por la que un router debe filtrar destinos
             en la resolución. ``None`` = no filtrar (comportamiento histórico de
             embeddings/pooling).
+        routes_request_body: Si el cuerpo de la petición viaja a
+            :func:`resolve_profile` (y de ahí al planificador de runtime/router).
+            ``True`` por defecto —chat/embeddings estiman tokens del cuerpo para
+            elegir preset y reserva de KV—. Los endpoints de audio lo ponen a
+            ``False`` para conservar su resolución histórica, que NUNCA pasó
+            cuerpo: un cuerpo de TTS/transcripción (texto a sintetizar, forma
+            multipart) no debe re-seleccionar preset ni mover el worker_key (ver
+            REF-01 fase C).
     """
 
     request_kind: str
@@ -85,6 +93,7 @@ class RequestDescriptor:
     honors_disconnect: bool = False
     applies_fair_share: bool = False
     router_capability: str | tuple[str, ...] | None = None
+    routes_request_body: bool = True
     capability_label: str | None = None
     """Etiqueta humana del paso ``capability`` en el mensaje de error (``The
     model '…' does not support <label>``). ``None`` = usa ``capability`` como
@@ -107,6 +116,17 @@ PreDispatchHook = Callable[["PipelineContext"], Awaitable[None]]
 # (``raise_inference_dispatch_error``). Ningún endpoint de embeddings/pooling lo
 # usa: su comportamiento no cambia.
 OnDispatchError = Callable[[Exception, "PipelineContext"], Awaitable["Response | None"]]
+
+# Costura de despacho inyectado (fase C): cuando se pasa, el motor ejecuta
+# federate→route→cap→merge y cede el paso de despacho —con su manejo de errores y
+# su construcción de respuesta— al endpoint, que recibe el contexto y devuelve una
+# ``Response`` ya lista. La usan los endpoints de audio, cuyos workers hablan
+# protocolos nativos (``/synthesize``, ``/transcribe``) con cuerpos multipart o
+# respuestas binarias que ``forward_request`` (JSON→JSON) y el relay SSE de
+# ``_dispatch_stream`` no saben transportar. Ningún endpoint JSON la usa: su
+# camino —``to_backend_body``, admisión, ``forward_request``, ``map_error``—
+# queda intacto.
+DispatchStep = Callable[["PipelineContext"], Awaitable["Response"]]
 
 # Centinela para distinguir "no se pasó override de router_capability" de
 # "se pasó None a propósito" (None = no filtrar).
@@ -238,6 +258,7 @@ async def run_request(
     federate: FederateStep | None = None,
     pre_dispatch: PreDispatchHook | None = None,
     on_dispatch_error: OnDispatchError | None = None,
+    dispatch: DispatchStep | None = None,
     router_capability: Any = _UNSET,
 ) -> Response | RequestOutcome:
     """Ejecuta el flujo único de petición, paso a paso, en orden.
@@ -267,6 +288,12 @@ async def run_request(
     ``router_capability``: override por petición de la capacidad por la que el
     router filtra destinos (chat la calcula del cuerpo + partes multimodales);
     sin pasar = la del descriptor.
+
+    ``dispatch``: costura de despacho inyectado (fase C). Si se pasa, tras
+    federate→route→cap→merge el motor cede el despacho al endpoint (audio, con
+    workers nativos multipart/binarios que no caben en ``forward_request``) y
+    devuelve su ``Response`` directamente, sin tocar ``to_backend_body`` ni la
+    admisión. ``None`` = camino de despacho estándar.
     """
     model_id = str(body.get("model") or "")
     effective_router_capability = (
@@ -286,7 +313,7 @@ async def run_request(
         model_manager,
         profile_registry,
         user=user,
-        request_body=body,
+        request_body=(body if descriptor.routes_request_body else None),
         router_resolver=router_resolver,
         request_state=request.state,
         required_capability=effective_router_capability,
@@ -321,6 +348,14 @@ async def run_request(
         # vista (el 400 de ``dimensions`` de embeddings; en chat, las
         # capacidades extra —tools/vision/audio/video— y el tope de salida).
         await pre_dispatch(ctx)
+
+    # Paso dispatch inyectado (fase C): el endpoint se encarga del despacho, el
+    # mapeo de errores y la construcción de la respuesta. El motor ya hizo
+    # federate→route→cap→merge. Se usa en audio, cuyo despacho a workers nativos
+    # (multipart/binario) no cabe en ``forward_request``/relay SSE. Devuelve la
+    # ``Response`` del endpoint tal cual; no se toca to_backend_body ni admisión.
+    if dispatch is not None:
+        return await dispatch(ctx)
 
     backend_body = to_backend_body(state, merged_body)
     admission_kwargs = resolve_admission_kwargs(descriptor, request, state, user)
