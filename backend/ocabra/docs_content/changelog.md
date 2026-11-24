@@ -16,6 +16,17 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.135.0 — 2026-11-24
+
+### Cambiado
+
+- **Embeddings y pooling cancelan al desconectarse el cliente.** Antes, si
+  cerrabas la conexión de una petición a `/v1/embeddings` o `/v1/pooling` antes
+  de recibir la respuesta, el servidor seguía calculándola hasta su propio
+  timeout, ocupando GPU y slot de admisión. Ahora la desconexión cancela el
+  trabajo en curso (como ya hacía chat) y la petición termina con 499. La
+  concurrencia de estos endpoints no cambia.
+
 ## 0.134.0 — 2026-11-24
 
 ### Nuevo
