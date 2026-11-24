@@ -3,6 +3,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -407,6 +408,21 @@ class WorkerDegradedError(RuntimeError):
             "times and looks like its backend process died; rejecting new "
             "requests until it recovers"
         )
+
+
+@dataclass
+class _ForwardPrep:
+    """Preámbulo común de ``_forward_request_unfair`` y ``_forward_stream_unfair``:
+    localiza el worker, deja que el backend prepare el cuerpo y las cabeceras,
+    aplica la adaptación de Ollama y calcula la URL destino."""
+
+    worker: WorkerInfo
+    request_headers: dict[str, str]
+    path: str
+    body: dict
+    url: str
+    ollama_adapter: str | None
+    requested_model: str
 
 
 # Substrings of a 5xx body that indicate the backend's own process died
@@ -844,7 +860,13 @@ class WorkerPool:
                 return await self._forward_request_unfair(model_id, path, body)
         return await self._forward_request_unfair(model_id, path, body)
 
-    async def _forward_request_unfair(self, model_id: str, path: str, body: dict) -> Any:
+    async def _prepare_forward(self, model_id: str, path: str, body: dict) -> _ForwardPrep:
+        """Resuelve el worker y prepara cuerpo, cabeceras y URL de destino.
+
+        Preámbulo compartido por la vía bloqueante y la de streaming. Puede
+        mutar ``path``/``body`` (adaptación de Ollama, preparación del backend),
+        por eso devuelve los valores finales en vez de modificarlos in situ.
+        """
         worker = self._workers.get(model_id)
         if not worker:
             raise WorkerGoneError(model_id)
@@ -869,6 +891,24 @@ class WorkerPool:
             ollama_adapter = None
             requested_model = worker.model_id
             url = f"http://127.0.0.1:{worker.port}{path}"
+        return _ForwardPrep(
+            worker=worker,
+            request_headers=request_headers,
+            path=path,
+            body=body,
+            url=url,
+            ollama_adapter=ollama_adapter,
+            requested_model=requested_model,
+        )
+
+    async def _forward_request_unfair(self, model_id: str, path: str, body: dict) -> Any:
+        prep = await self._prepare_forward(model_id, path, body)
+        request_headers = prep.request_headers
+        path = prep.path
+        body = prep.body
+        url = prep.url
+        ollama_adapter = prep.ollama_adapter
+        requested_model = prep.requested_model
         timeout_s = max(30, int(settings.inference_request_timeout_seconds))
         try:
             async with httpx.AsyncClient(
@@ -962,30 +1002,14 @@ class WorkerPool:
     async def _forward_stream_unfair(
         self, model_id: str, path: str, body: dict
     ) -> AsyncIterator[bytes]:
-        worker = self._workers.get(model_id)
-        if not worker:
-            raise WorkerGoneError(model_id)
-        self._check_circuit_breaker(model_id)
-        backend = self._backends.get(worker.backend_type)
-        request_headers: dict[str, str] = {}
-        if backend is not None:
-            if self._before_prepare is not None:
-                # Room for an on-demand vision projector on a full card: the
-                # model manager shrinks the context first (see
-                # ModelManager.make_room_for_vision).
-                await self._before_prepare(model_id, body)
-            await backend.prepare_request(worker.model_id, path, body)
-            request_headers = backend.request_headers(worker.model_id)
-        if worker.backend_type == "ollama":
-            body = await self._clamp_ollama_ctx(model_id, path, body)
-            requested_model = str(body.get("model") or worker.model_id)
-            path, body, ollama_adapter = _ollama_native_body(path, body)
-            base = (worker.endpoint_url or settings.ollama_base_url).rstrip("/")
-            url = f"{base}{path}"
-        else:
-            ollama_adapter = None
-            requested_model = worker.model_id
-            url = f"http://127.0.0.1:{worker.port}{path}"
+        prep = await self._prepare_forward(model_id, path, body)
+        worker = prep.worker
+        request_headers = prep.request_headers
+        path = prep.path
+        body = prep.body
+        url = prep.url
+        ollama_adapter = prep.ollama_adapter
+        requested_model = prep.requested_model
 
         # Progreso real de prefill para el dashboard (2026-11-09). llama.cpp
         # lo emite en el propio stream si se pide ``return_progress``: asi se
