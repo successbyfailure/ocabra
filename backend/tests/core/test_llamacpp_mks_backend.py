@@ -110,8 +110,8 @@ def test_config_section_is_shared() -> None:
 
 def test_registered_in_the_worker_pool() -> None:
     """A backend_type nobody registered resolves to nothing at load time."""
-    main_py = Path(__file__).resolve().parents[2] / "ocabra" / "main.py"
-    source = main_py.read_text(encoding="utf-8")
+    bootstrap_py = Path(__file__).resolve().parents[2] / "ocabra" / "bootstrap.py"
+    source = bootstrap_py.read_text(encoding="utf-8")
     # With the GPU manager: without it the projector card and "evenly" splits
     # silently did nothing (to 0.70.6).
     assert (

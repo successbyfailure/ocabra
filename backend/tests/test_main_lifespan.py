@@ -135,10 +135,10 @@ def harness(monkeypatch):
     )
     monkeypatch.setattr("ocabra.core.auth_manager.seed_first_admin", AsyncMock())
     monkeypatch.setattr("ocabra.core.secrets_box.rotate_stored_secrets", AsyncMock())
-    monkeypatch.setattr(main_mod, "_scan_and_register_trtllm_engines", AsyncMock())
+    monkeypatch.setattr("ocabra.bootstrap._scan_and_register_trtllm_engines", AsyncMock())
 
-    # The lifespan references the periodic loops through the
-    # ocabra.maintenance_loops module, so patch them there.
+    # The lifespan lives in ocabra.bootstrap and references the periodic loops
+    # through the ocabra.maintenance_loops module, so patch them there.
     for loop_name in (
         "_idle_eviction_loop",
         "_schedule_maintenance_loop",
@@ -247,7 +247,7 @@ async def test_failed_startup_tears_down_what_already_started(harness):
 
 @pytest.mark.asyncio
 async def test_a_stuck_stop_is_bounded_and_does_not_block_the_rest(harness, monkeypatch):
-    monkeypatch.setattr(main_mod, "_SHUTDOWN_STEP_TIMEOUT_S", 0.2)
+    monkeypatch.setattr("ocabra.bootstrap._SHUTDOWN_STEP_TIMEOUT_S", 0.2)
 
     async def _hang():
         await asyncio.Event().wait()
