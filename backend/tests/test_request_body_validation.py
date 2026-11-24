@@ -195,20 +195,24 @@ def test_chat_forwards_extra_fields_unchanged():
 
     profile = SimpleNamespace(profile_id="c", base_model_id="bc")
     state = SimpleNamespace(model_id="bc", backend_type="llamacpp_mks", backend_model_id="c")
-    mod = "ocabra.api.openai.chat"
+    # El camino no-streaming pasa por el motor de flujo único (REF-01 fase B):
+    # resolve/capacidad/merge/to_backend/cabeceras los hace ``pipeline`` y el
+    # reparto justo ``admission``; ``apply_declared_output_limit`` sigue en chat
+    # (su ``_pre_dispatch``).
+    pipe = "ocabra.core.inference.pipeline"
+    adm = "ocabra.core.inference.admission"
     with (
         patch("ocabra.api.openai._media_urls.check_media_urls", AsyncMock()),
-        patch(f"{mod}.resolve_profile", AsyncMock(return_value=(profile, state))),
-        patch(f"{mod}.check_capability"),
-        patch(f"{mod}.merge_profile_defaults", lambda _p, body: body),
-        patch(f"{mod}.apply_declared_output_limit"),
-        patch(f"{mod}.to_backend_body", lambda _s, body: body),
-        patch(f"{mod}.fairness_slots", lambda _s: 1),
-        patch(f"{mod}.fairness_user_key", lambda _u: None),
-        patch(f"{mod}.fairness_kv_budget", lambda *a, **k: (None, 0)),
-        patch(f"{mod}.is_batch_origin_request", lambda _r: False),
-        # chat.py imports this one lazily from ``_deps`` inside the handler.
-        patch("ocabra.api.openai._deps.ocabra_response_headers", AsyncMock(return_value={})),
+        patch(f"{pipe}.resolve_profile", AsyncMock(return_value=(profile, state))),
+        patch(f"{pipe}.check_capability"),
+        patch(f"{pipe}.merge_profile_defaults", lambda _p, body: body),
+        patch("ocabra.api.openai.chat.apply_declared_output_limit"),
+        patch(f"{pipe}.to_backend_body", lambda _s, body: body),
+        patch(f"{adm}.fairness_slots", lambda _s: 1),
+        patch(f"{adm}.fairness_user_key", lambda _u: None),
+        patch(f"{adm}.fairness_kv_budget", lambda *a, **k: (None, 0)),
+        patch(f"{adm}.is_batch_origin_request", lambda _r: False),
+        patch(f"{pipe}.ocabra_response_headers", AsyncMock(return_value={})),
     ):
         resp = TestClient(app, raise_server_exceptions=True).post(
             "/v1/chat/completions",

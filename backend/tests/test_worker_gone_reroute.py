@@ -149,7 +149,10 @@ def _app_with_router(monkeypatch, *, via_router: bool, outcomes):
             request_state.via_router_profile_id = "recomendado-x"
         return await real_resolve(model_id, *a, request_state=request_state, **k)
 
+    # El camino no-streaming pasa por el motor (REF-01 fase B), que usa su propia
+    # referencia ``pipeline.resolve_profile``; se parchea también ahí.
     monkeypatch.setattr(chat_mod, "resolve_profile", fake_resolve)
+    monkeypatch.setattr("ocabra.core.inference.pipeline.resolve_profile", fake_resolve)
     app.state.worker_pool.forward_request = AsyncMock(side_effect=outcomes)
     return TestClient(app), resolved
 

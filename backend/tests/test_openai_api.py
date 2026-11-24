@@ -2456,6 +2456,49 @@ class TestFairnessGateWiring:
         assert app.state.worker_pool.forward_request.await_args.kwargs["user_key"] == "anonymous"
         assert app.state.worker_pool.forward_request.await_args.kwargs["slots"] == 3
 
+    def test_chat_non_streaming_response_is_byte_identical(self):
+        """REF-01 fase B: el camino no-streaming pasa por el motor pero la
+        respuesta JSON es exactamente la del worker (migración invisible)."""
+        worker_result = {
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "choices": [{"message": {"role": "assistant", "content": "Hola!"}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+        app = _make_app(worker_result=worker_result)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": "test-model", "messages": [{"role": "user", "content": "Hi"}]},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == worker_result
+        # El despacho fue al endpoint de chat, con el cuerpo traducido al backend.
+        call = app.state.worker_pool.forward_request.await_args
+        assert call.args[1] == "/v1/chat/completions"
+
+    def test_chat_non_streaming_detects_batch_origin(self):
+        """REF-01 fase B: una petición del procesador de batches sigue entrando
+        con la clase batch (is_batch=True llega a forward_request)."""
+        from ocabra.api._deps_auth import INTERNAL_TOKEN
+
+        app = _make_app(worker_result={"object": "chat.completion", "choices": []})
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": "test-model", "messages": [{"role": "user", "content": "Hi"}]},
+            headers={
+                "X-Ocabra-Internal-Token": INTERNAL_TOKEN,
+                "X-Internal-Request-Origin": "batch",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert app.state.worker_pool.forward_request.await_args.kwargs["is_batch"] is True
+
     def test_completions_forwards_fairness_user_key_and_slots(self):
         from ocabra.backends.base import BackendCapabilities
         from ocabra.core.model_manager import LoadPolicy, ModelState, ModelStatus

@@ -35,21 +35,23 @@ from ocabra.api._deps_auth import UserContext
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.federation import note_federation_fallback
+from ocabra.core.inference.pipeline import (
+    PipelineContext,
+    RequestDescriptor,
+    RequestOutcome,
+    run_request,
+)
 from ocabra.core.output_limits import apply_declared_output_limit
 from ocabra.core.privacy import preview as privacy_preview
 from ocabra.core.router_resolver import NoRoutableTargetError
 from ocabra.core.worker_pool import (
-    InferenceTimeoutError,
     VisionNoRoomError,
-    WorkerDegradedError,
     WorkerGoneError,
 )
 from ocabra.database import AsyncSessionLocal
 
 from ._deps import (
     STREAMING_LOAD_RESPONSE_DOC,
-    ClientGoneError,
-    await_unless_client_gone,
     build_model_status_headers,
     chat_required_capabilities,
     check_capability,
@@ -80,6 +82,27 @@ from ._schemas import ChatCompletionRequest, validate_body
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
+
+# REF-01 fase B: el camino NO-streaming de /v1/chat/completions delega en el
+# motor de flujo único (``run_request``). Los caminos de streaming (carga
+# perezosa con keepalives, reenrutado de router, eventos de carga SSE) se quedan
+# INLINE a propósito: dependen de ``api/sse.py`` y del ``RouterResolver`` y no
+# caben en el motor de ``core`` sin romper capas ni arriesgar el 99% del tráfico.
+#
+# ``federates=True`` documenta que chat se federa, pero la federación se hace
+# INLINE antes de ramificar (compartida por streaming y no-streaming), así que a
+# ``run_request`` se le pasa ``federate=None``: no se vuelve a federar.
+_CHAT_DESCRIPTOR = RequestDescriptor(
+    request_kind="chat",
+    capability="chat",
+    capability_label="chat completions",
+    dispatch_path="/v1/chat/completions",
+    federates=True,
+    streaming=False,
+    applies_reasoning=True,
+    honors_disconnect=True,
+    applies_fair_share=True,
+)
 
 
 @router.post(
@@ -357,6 +380,103 @@ async def chat_completions(
                 headers=headers,
             )
 
+    if not stream:
+        # --- Camino NO-streaming vía el motor de flujo único (REF-01 fase B) ---
+        # La federación ya se intentó arriba (inline, compartida con streaming):
+        # se pasa ``federate=None`` para no repetirla. El motor reproduce paso a
+        # paso lo que hacía este handler: resolve+ACL+router, check de capacidad
+        # (con la misma etiqueta "chat completions"), capacidades extra y tope de
+        # salida (``_pre_dispatch``), reja de reparto justo + telemetría + KV, el
+        # despacho con cancelación por desconexión, el reenrutado de router tras
+        # worker caído / sin sitio para visión (``_on_dispatch_error``) y los
+        # heads-up de cola en cabeceras.
+        async def _pre_dispatch(ctx: PipelineContext) -> None:
+            # Capacidades extra según el cuerpo, tras el check base de "chat".
+            if ctx.body.get("tools"):
+                check_capability(ctx.state, "tools", "tool calling")
+            if "image_url" in _content_kinds:
+                check_capability(ctx.state, "vision", "image input")
+            if "input_audio" in _content_kinds:
+                check_capability(ctx.state, "audio_input", "audio input")
+            if "video_url" in _content_kinds:
+                check_capability(ctx.state, "video_input", "video input")
+            # El tope de salida declarado del perfil no se enviaba al backend:
+            # una peticion sin max_tokens generaba sin limite (incidente
+            # 2026-11-07, 132.263 tokens). Ver apply_declared_output_limit.
+            apply_declared_output_limit(
+                ctx.profile,
+                ctx.merged_body,
+                context_length=getattr(request.state, "runtime_effective_context", 0) or 0,
+                fallback_limit=settings.default_max_output_tokens,
+            )
+
+        async def _on_dispatch_error(exc: Exception, ctx: PipelineContext):
+            if isinstance(exc, WorkerGoneError):
+                # The router chose this target when the request arrived and it
+                # was unloaded while the request waited for its slot. Nothing
+                # has been sent yet: resolve the router again, once.
+                if getattr(request.state, "via_router_profile_id", None) and not getattr(
+                    request.state, "router_rerouted", False
+                ):
+                    request.state.router_rerouted = True
+                    logger.info("router_reroute_after_worker_gone", worker_key=ctx.worker_key)
+                    return await chat_completions(request, user)
+                return None
+            if isinstance(exc, VisionNoRoomError):
+                # The router's warm target has vision but no room for its
+                # projector (2026-11-15, qwen3.8:27b-abliterated): try once
+                # more without it.
+                target_id = getattr(request.state, "resolved_model_id", None)
+                if (
+                    getattr(request.state, "via_router_profile_id", None)
+                    and target_id
+                    and not getattr(request.state, "router_rerouted", False)
+                ):
+                    request.state.router_rerouted = True
+                    request.state.router_excluded_targets = {target_id}
+                    logger.info("router_reroute_after_vision_no_room", target=target_id)
+                    return await chat_completions(request, user)
+                return None
+            return None
+
+        outcome = await run_request(
+            request,
+            descriptor=_CHAT_DESCRIPTOR,
+            body=body,
+            user=user,
+            model_manager=model_manager,
+            profile_registry=profile_registry,
+            worker_pool=worker_pool,
+            federate=None,
+            pre_dispatch=_pre_dispatch,
+            on_dispatch_error=_on_dispatch_error,
+            router_capability=chat_required_capabilities(body, _content_kinds) or None,
+        )
+        if not isinstance(outcome, RequestOutcome):
+            # El hook de error reenrutó y devolvió una respuesta ya lista.
+            return outcome
+
+        from fastapi.responses import JSONResponse
+
+        resp_headers = outcome.response_headers
+        # Equivalente no-streaming del comentario SSE ``ocabra.slot_queued`` — las
+        # cabeceras solo se vuelcan al final aquí, así que esto informa de "has
+        # esperado" en vez de "vas a esperar", pero es la única señal de cola que
+        # un cliente no-streaming recibe.
+        queue_state = outcome.queue_state
+        if queue_state is not None and queue_state["slot_saturated"]:
+            resp_headers["X-Ocabra-Slot-Queue-Saturated"] = "1"
+            resp_headers["X-Ocabra-Slot-In-Flight"] = str(queue_state["in_flight"])
+            resp_headers["X-Ocabra-Slot-Count"] = str(queue_state["slots"])
+        if queue_state is not None and queue_state["kv_saturated"]:
+            resp_headers["X-Ocabra-KV-Queue-Saturated"] = "1"
+            resp_headers["X-Ocabra-KV-Capacity-Tokens"] = str(queue_state["kv_capacity_tokens"])
+            resp_headers["X-Ocabra-KV-Reserved-Tokens"] = str(queue_state["kv_reserved_tokens"])
+        return JSONResponse(content=outcome.result, headers=resp_headers)
+
+    # --- Camino de FALLBACK de streaming (lookup_profile falló arriba) ---
+    # Solo se alcanza con stream=True por la vía legacy / model-id: resuelve y
+    # despacha en streaming inline, sin cambios respecto a antes.
     profile, state = await resolve_profile(
         model_id,
         model_manager,
@@ -461,93 +581,6 @@ async def chat_completions(
             media_type="text/event-stream",
             headers=stream_headers,
         )
-
-    queue_state = (
-        worker_pool.peek_queue_state(worker_key, kv_tokens=kv_tokens) if not is_batch else None
-    )
-    try:
-        # Si el cliente se va, cancelar: en la via no de streaming FastAPI deja
-        # correr el handler hasta el final y el slot de admision mas la GPU se
-        # quedan ocupados por una respuesta que ya no lee nadie (medido el
-        # 2026-11-07: cliente rendido a los ~900 s, oCabra generando hasta los
-        # 1500 s de su propio timeout).
-        result = await await_unless_client_gone(
-            request,
-            worker_pool.forward_request(
-                worker_key,
-                "/v1/chat/completions",
-                to_backend_body(state, merged_body),
-                user_key=user_key,
-                slots=slots,
-                is_batch=is_batch,
-                **telemetry_admission,
-                **kv_admission,
-            ),
-        )
-    except ClientGoneError:
-        # El cliente ya no esta: se cancelo la generacion y se solto el slot.
-        # 499 es el codigo canonico de "client closed request" que ya usa el
-        # colector para las cancelaciones de streaming.
-        raise HTTPException(
-            status_code=499,
-            detail={
-                "error": {
-                    "message": "Client disconnected before the response was ready",
-                    "type": "server_error",
-                    "code": "client_disconnected",
-                }
-            },
-        ) from None
-    except httpx.HTTPStatusError as exc:
-        raise_upstream_http_error(exc)
-    except WorkerGoneError as exc:
-        # The router chose this target when the request arrived and it was
-        # unloaded while the request waited for its slot. Nothing has been
-        # sent yet: resolve the router again, once (it prefers what is loaded
-        # now). A request for a plain profile gets a retryable 503.
-        if getattr(request.state, "via_router_profile_id", None) and not getattr(
-            request.state, "router_rerouted", False
-        ):
-            request.state.router_rerouted = True
-            logger.info("router_reroute_after_worker_gone", worker_key=worker_key)
-            return await chat_completions(request, user)
-        raise_inference_dispatch_error(exc)
-    except VisionNoRoomError:
-        # The router's warm target has vision but no room for its projector
-        # (2026-11-15, qwen3.8:27b-abliterated): try once more without it.
-        target_id = getattr(request.state, "resolved_model_id", None)
-        if (
-            getattr(request.state, "via_router_profile_id", None)
-            and target_id
-            and not getattr(request.state, "router_rerouted", False)
-        ):
-            request.state.router_rerouted = True
-            request.state.router_excluded_targets = {target_id}
-            logger.info("router_reroute_after_vision_no_room", target=target_id)
-            return await chat_completions(request, user)
-        raise
-    except (InferenceTimeoutError, KVCapacityError, WorkerDegradedError) as exc:
-        raise_inference_dispatch_error(exc)
-    from fastapi.responses import JSONResponse
-
-    from ocabra.api.openai._deps import ocabra_response_headers
-
-    resp_headers = await ocabra_response_headers(
-        request, model_manager, worker_key, profile.base_model_id
-    )
-    # Non-streaming equivalent of the ``ocabra.slot_queued`` SSE comment —
-    # headers only flush at the end here, so this reports "you waited"
-    # rather than "you're about to wait", but it's the only signal a
-    # non-streaming client gets about fair-share queueing at all otherwise.
-    if queue_state is not None and queue_state["slot_saturated"]:
-        resp_headers["X-Ocabra-Slot-Queue-Saturated"] = "1"
-        resp_headers["X-Ocabra-Slot-In-Flight"] = str(queue_state["in_flight"])
-        resp_headers["X-Ocabra-Slot-Count"] = str(queue_state["slots"])
-    if queue_state is not None and queue_state["kv_saturated"]:
-        resp_headers["X-Ocabra-KV-Queue-Saturated"] = "1"
-        resp_headers["X-Ocabra-KV-Capacity-Tokens"] = str(queue_state["kv_capacity_tokens"])
-        resp_headers["X-Ocabra-KV-Reserved-Tokens"] = str(queue_state["kv_reserved_tokens"])
-    return JSONResponse(content=result, headers=resp_headers)
 
 
 def _sse_error(message: str, code: str) -> bytes:
