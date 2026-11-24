@@ -130,7 +130,7 @@ async def _run(fake, service, **kw):
         patch(
             "ocabra.core.runtime_coordinator.plan_profile_runtime", AsyncMock(return_value=_plan())
         ),
-        patch("ocabra.api.openai._deps.ensure_worker_loaded", ensure),
+        patch("ocabra.core.inference.loading.ensure_worker_loaded", ensure),
         patch("ocabra.core.context_probe_service.settings.llama_cpp_live_context_enabled", True),
     ):
         job = service.start(

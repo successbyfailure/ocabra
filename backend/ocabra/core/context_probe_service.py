@@ -141,7 +141,7 @@ class ContextProbeService:
                     return
 
                 job.status = "loading"
-                from ocabra.api.openai._deps import ensure_worker_loaded
+                from ocabra.core.inference.loading import ensure_worker_loaded
 
                 state = await ensure_worker_loaded(
                     self._mm,
@@ -446,8 +446,8 @@ class ContextProbeService:
         moe: bool,
     ) -> dict:
         """Load one candidate split at the target context, measure, unload."""
-        from ocabra.api.openai._deps import ensure_worker_loaded
         from ocabra.core import auto_setup
+        from ocabra.core.inference.loading import ensure_worker_loaded
 
         ov = copy.deepcopy(overrides)
         section = ov.setdefault("llama_cpp", {})

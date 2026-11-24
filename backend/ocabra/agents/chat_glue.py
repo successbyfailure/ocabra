@@ -31,13 +31,10 @@ from ocabra.agents.executor import (
     WorkerInvoker,
 )
 from ocabra.agents.resolver import AgentSpec, resolve_agent
-from ocabra.api.openai._deps import (
-    _do_ensure_loaded,
-    _openai_error,
-    compute_worker_key,
-    raise_upstream_http_error,
-    resolve_profile,
-)
+from ocabra.core.inference.errors import _openai_error, raise_upstream_http_error
+from ocabra.core.inference.loading import _do_ensure_loaded
+from ocabra.core.inference.resolution import resolve_profile
+from ocabra.core.model_manager_helpers import compute_worker_key
 
 if TYPE_CHECKING:
     from uuid import UUID

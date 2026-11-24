@@ -146,7 +146,7 @@ class VideoJobManager:
     async def _run(self, pending: PendingVideo) -> None:
         from fastapi import HTTPException
 
-        from ocabra.api.openai._deps import resolve_profile
+        from ocabra.core.inference.resolution import resolve_profile
         from ocabra.stats.collector import record_direct_request
 
         app = self._app

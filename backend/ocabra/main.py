@@ -703,8 +703,8 @@ async def _startup(app: FastAPI, teardown: _Teardown) -> None:
     # The PIN autoload (and its reload watcher) must load the worker requests
     # use: the default preset's ``model::hash``, like a manual "Load" does.
     async def _pin_worker_resolver(model_id: str) -> str:
-        from ocabra.api.openai._deps import prepare_worker_state
         from ocabra.api.openai.realtime import resolve_realtime_llm_runtime_plan
+        from ocabra.core.inference.loading import prepare_worker_state
 
         worker_key, overrides, preferred_gpu, load_policy = await resolve_realtime_llm_runtime_plan(
             model_id, profile_registry=profile_registry, model_manager=model_manager

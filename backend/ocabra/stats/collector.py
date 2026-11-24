@@ -1606,7 +1606,7 @@ async def _record_stat(
         client_addr = _client_addr(request)
         user_agent = request.headers.get("user-agent") or None
         try:
-            from ocabra.api.openai._deps import is_batch_origin_request
+            from ocabra.core.inference.admission import is_batch_origin_request
 
             is_batch = is_batch_origin_request(request)
         except Exception:  # noqa: BLE001 — stats recording must never 500 a real request

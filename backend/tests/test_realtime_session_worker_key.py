@@ -98,7 +98,7 @@ async def test_background_load_uses_ensure_worker_loaded_with_the_preset_worker_
     worker_pool.get_worker = MagicMock(return_value=None)
 
     fake_ensure = AsyncMock(return_value=SimpleNamespace())
-    with patch("ocabra.api.openai._deps.ensure_worker_loaded", new=fake_ensure):
+    with patch("ocabra.core.inference.loading.ensure_worker_loaded", new=fake_ensure):
         await session._load_remaining_models(include_stt=False)  # noqa: SLF001
 
     fake_ensure.assert_awaited_once()

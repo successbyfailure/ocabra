@@ -431,7 +431,7 @@ async def test_un_trabajo_registra_cola_carga_y_generacion_por_separado():
 
     with (
         patch(
-            "ocabra.api.openai._deps.resolve_profile",
+            "ocabra.core.inference.resolution.resolve_profile",
             AsyncMock(return_value=(SimpleNamespace(), state)),
         ),
         patch("ocabra.stats.collector.record_direct_request", _record),

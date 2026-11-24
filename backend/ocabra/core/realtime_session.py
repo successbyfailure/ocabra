@@ -902,7 +902,7 @@ class RealtimeSession:
                 message=f"Loading {role}: {(state.display_name if state else None) or model_id}",
             )
             if key != model_id:
-                from ocabra.api.openai._deps import ensure_worker_loaded
+                from ocabra.core.inference.loading import ensure_worker_loaded
 
                 await ensure_worker_loaded(
                     self._model_manager,
@@ -2457,7 +2457,7 @@ class RealtimeSession:
             if not worker:
                 try:
                     if self.llm_worker_key != self.llm_model_id:
-                        from ocabra.api.openai._deps import ensure_worker_loaded
+                        from ocabra.core.inference.loading import ensure_worker_loaded
 
                         await ensure_worker_loaded(
                             self._model_manager,
@@ -2491,7 +2491,7 @@ class RealtimeSession:
                 logger.warning("realtime_llm_state_missing", model_id=self.llm_worker_key)
                 return
 
-            from ocabra.api.openai._deps import to_backend_body
+            from ocabra.core.inference.reasoning import to_backend_body
 
             raw_body: dict[str, Any] = {"messages": messages, "stream": True}
             gen = {**self._generation_defaults(), **(response_overrides or {})}
