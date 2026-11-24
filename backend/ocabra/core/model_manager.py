@@ -365,6 +365,24 @@ async def _measure_process_ram_mb(pid: int) -> int:
     return await asyncio.to_thread(_read)
 
 
+@dataclass
+class _LoadPlacement:
+    """Placement resolved inside the load gate, before admission (REF-05).
+
+    Named seam carved out of :meth:`ModelManager._load_model` with no change in
+    behaviour: carries the forced-GPU constraints, the base-placement
+    allowances and the observed-VRAM fingerprint between
+    ``_resolve_load_placement`` and the rest of the load. ``vram_needed`` may
+    have been raised to a measured footprint (``observed_vram``)."""
+
+    vram_needed: int
+    required_gpu_indices: list[int] | None
+    required_gpu_vram_mb: dict[int, int] | None
+    base_allowed_gpus: list[int] | None
+    base_allow_split: bool
+    observed_fingerprint: str | None
+
+
 class ModelManager:
     def __init__(self, worker_pool, gpu_manager=None, gpu_scheduler=None) -> None:
         self._worker_pool = worker_pool
@@ -2520,6 +2538,507 @@ class ModelManager:
                 error=str(exc),
             )
 
+    async def _estimate_load_footprint(
+        self, state: "ModelState", backend: Any
+    ) -> tuple[int, bool]:
+        """Pre-load VRAM estimate (MB) plus whether it is a hand-validated
+        measurement. Behaviour-preserving seam of :meth:`_load_model` (REF-05)."""
+        model_id = state.model_id
+        vram_needed = await backend.get_vram_estimate_mb(
+            state.backend_model_id, extra_config=state.extra_config
+        )
+        manually_validated_vram = False
+        if state.backend_type == "bitnet":
+            vram_needed = self._estimate_bitnet_vram_from_config(state)
+        elif is_llama_cpp_family(state.backend_type):
+            # The llama.cpp backend can only estimate VRAM after load
+            # (its option cache is filled in load()); estimate from the
+            # GGUF size + config so the scheduler sees the real need and
+            # can evict/pick a GPU with room instead of blindly starting.
+            est = estimate_llama_cpp_vram_from_config(
+                state,
+                default_gpu_layers=settings.llama_cpp_gpu_layers,
+                default_ctx_size=settings.llama_cpp_ctx_size,
+            )
+            if est > 0:
+                vram_needed = est
+            # llama.cpp's own projection beats the formula when the
+            # tool is installed (2026-11-16: gemma4:26b with experts in
+            # RAM was refused on Mapache's 1660 for 22 MB by a formula
+            # estimate 619 MB above the real load). A validated
+            # measurement below still wins.
+            projected = await self._project_llama_cpp_vram(state, backend)
+            if projected:
+                vram_needed = projected
+            runtime_meta = (
+                state.extra_config.get("_runtime")
+                if isinstance(state.extra_config, dict)
+                else None
+            )
+            calibrated_vram = (
+                runtime_meta.get("capacity_vram_mb")
+                if isinstance(runtime_meta, dict) and runtime_meta.get("capacity_validated")
+                else None
+            )
+            try:
+                calibrated_vram_mb = int(calibrated_vram or 0)
+            except (TypeError, ValueError):
+                calibrated_vram_mb = 0
+            if calibrated_vram_mb > 0:
+                logger.info(
+                    "llama_cpp_validated_vram_applied",
+                    model_id=model_id,
+                    estimated_vram_mb=vram_needed,
+                    calibrated_vram_mb=calibrated_vram_mb,
+                )
+                vram_needed = calibrated_vram_mb
+                manually_validated_vram = True
+        elif state.backend_type == "vllm":
+            # vLLM's own get_vram_estimate_mb is weights-only. Long-context
+            # loads then pass the eviction filter (weights fit) but crash
+            # inside vLLM when the paged KV pool can't hold one sequence
+            # at max_model_len — no eviction was ever going to fix that
+            # because oCabra never asked for the KV reserve. Estimate the
+            # honest weights + KV(max_model_len × 1) + overhead so the
+            # eviction path frees the right amount.
+            est = estimate_vllm_vram_from_config(
+                state,
+                models_dir=settings.models_dir,
+                default_gpu_memory_utilization=float(settings.vllm_gpu_memory_utilization),
+                hf_cache_dir=getattr(settings, "hf_cache_dir", None),
+            )
+            if est > 0:
+                vram_needed = est
+        return vram_needed, manually_validated_vram
+
+    async def _resolve_load_placement(
+        self,
+        state: "ModelState",
+        *,
+        vram_needed: int,
+        gpu_managed: bool,
+        manually_validated_vram: bool,
+    ) -> _LoadPlacement:
+        """Resolve forced placement, base allowances and the observed-VRAM
+        raise inside the gate, before admission. Behaviour-preserving seam of
+        :meth:`_load_model` (REF-05)."""
+        model_id = state.model_id
+        # Admission must share the same critical section as the
+        # backend start. Otherwise another model (notably Ollama,
+        # whose runner may span every GPU) can consume VRAM after
+        # vLLM's headroom check but before its process starts.
+        # Runtime placement ``_runtime.gpu_indices`` bypasses
+        # scheduler placement for both one and many GPUs.
+        # A forced single-GPU preset must not be widened to a
+        # spill allocation merely because its conservative
+        # estimate exceeds that card while the backend's
+        # measured configuration is known to fit there.
+        _runtime_meta = (
+            state.extra_config.get("_runtime") if isinstance(state.extra_config, dict) else None
+        )
+        required_gpu_indices: list[int] | None = None
+        required_gpu_vram_mb: dict[int, int] | None = None
+        if isinstance(_runtime_meta, dict):
+            raw_indices = _runtime_meta.get("gpu_indices") or []
+            if isinstance(raw_indices, list) and raw_indices:
+                try:
+                    required_gpu_indices = [int(i) for i in raw_indices]
+                except (TypeError, ValueError):
+                    required_gpu_indices = None
+            raw_per_gpu = _runtime_meta.get("capacity_vram_by_gpu_mb")
+            if isinstance(raw_per_gpu, dict) and required_gpu_indices:
+                try:
+                    candidate = {
+                        int(index): max(0, int(value)) for index, value in raw_per_gpu.items()
+                    }
+                    if all(index in candidate for index in required_gpu_indices):
+                        required_gpu_vram_mb = {
+                            index: candidate[index] for index in required_gpu_indices
+                        }
+                except (TypeError, ValueError):
+                    required_gpu_vram_mb = None
+        # A llama.cpp model without a preset placement picks
+        # its GPUs by ``split_policy`` among the GPUs it does
+        # not exclude (see _llama_cpp_base_placement).
+        base_allowed_gpus: list[int] | None = None
+        base_allow_split = True
+        if (
+            is_llama_cpp_family(state.backend_type)
+            and gpu_managed
+            and not required_gpu_indices
+        ):
+            (
+                always_gpus,
+                base_allowed_gpus,
+                base_allow_split,
+            ) = await self._llama_cpp_base_placement(state)
+            if always_gpus:
+                required_gpu_indices = always_gpus
+        if (
+            is_llama_cpp_family(state.backend_type)
+            and required_gpu_indices
+            and len(required_gpu_indices) > 1
+            and required_gpu_vram_mb is None
+        ):
+            llama_config = state.extra_config.get("llama_cpp")
+            tensor_split = (
+                llama_config.get("tensor_split") if isinstance(llama_config, dict) else None
+            )
+            if isinstance(tensor_split, list) and len(tensor_split) == len(required_gpu_indices):
+                try:
+                    ratios = [max(0.0, float(value)) for value in tensor_split]
+                    ratio_total = sum(ratios)
+                    if ratio_total > 0:
+                        required_gpu_vram_mb = {
+                            gpu_index: math.ceil(vram_needed * ratio / ratio_total)
+                            for gpu_index, ratio in zip(
+                                required_gpu_indices,
+                                ratios,
+                                strict=True,
+                            )
+                        }
+                except (TypeError, ValueError):
+                    required_gpu_vram_mb = None
+        # Raise the estimate to what this exact configuration
+        # was measured to hold last time (see observed_vram).
+        # Fingerprinted here, before use-case resolution
+        # rewrites extra_config, and recorded with the same
+        # fingerprint once the worker is up.
+        observed_fingerprint: str | None = None
+        # A preset validated by hand keeps its measured figure:
+        # those sit at the edge of the card on purpose (qwen3.8
+        # "normal": 24,000 of 24,159), and margin on top would
+        # make them unloadable. Learning still records them.
+        if is_llama_cpp_family(state.backend_type) and gpu_managed:
+            observed_fingerprint = observed_vram.footprint_fingerprint(state.extra_config)
+            observed = await observed_vram.lookup(model_id, fingerprint=observed_fingerprint)
+            if (
+                observed
+                and not manually_validated_vram
+                and settings.llama_cpp_observed_vram_apply
+                and self._gpu_manager is not None
+            ):
+                # Same free-VRAM reading the admission will use:
+                # physical for validated presets, buffered else.
+                physical = bool(
+                    isinstance(_runtime_meta, dict) and _runtime_meta.get("capacity_validated")
+                )
+                ceilings = {
+                    gpu: self._gpu_manager.admission_ceiling_mb(gpu, physical=physical)
+                    for gpu in set(observed) | set(required_gpu_vram_mb or {})
+                }
+                raised_total, raised_per_gpu = observed_vram.raise_to_observed(
+                    vram_needed, required_gpu_vram_mb, observed, ceilings
+                )
+                if raised_total != vram_needed or (raised_per_gpu != required_gpu_vram_mb):
+                    logger.info(
+                        "llama_cpp_observed_vram_applied",
+                        model_id=model_id,
+                        estimated_vram_mb=vram_needed,
+                        observed_per_gpu_mb=observed,
+                        vram_needed_mb=raised_total,
+                        required_gpu_vram_mb=raised_per_gpu,
+                        ceilings_mb=ceilings,
+                    )
+                vram_needed, required_gpu_vram_mb = (
+                    raised_total,
+                    raised_per_gpu,
+                )
+        return _LoadPlacement(
+            vram_needed=vram_needed,
+            required_gpu_indices=required_gpu_indices,
+            required_gpu_vram_mb=required_gpu_vram_mb,
+            base_allowed_gpus=base_allowed_gpus,
+            base_allow_split=base_allow_split,
+            observed_fingerprint=observed_fingerprint,
+        )
+
+    async def _resolve_use_case_extra(
+        self, state: "ModelState", gpu_indices: list[int] | None, gpu_managed: bool
+    ) -> Any:
+        """Resolve the use-case plan against the admitted GPUs and return the
+        effective ``extra_config``. Advisory: never blocks a load.
+        Behaviour-preserving seam of :meth:`_load_model` (REF-05)."""
+        model_id = state.model_id
+        # Use-case resolution stays inside the gate because it
+        # depends on the GPU selected by admission.
+        effective_extra = state.extra_config
+        try:
+            if self._gpu_manager and (
+                (gpu_managed and gpu_indices) or state.backend_type == "ollama"
+            ):
+                from ocabra.core.vram_capacity import (
+                    apply_use_case_flags,
+                    resolve_use_case,
+                )
+
+                gpu_states = await self._gpu_manager.get_all_states()
+                if gpu_indices and len(gpu_indices) > 1:
+                    # Multi-GPU forced placement (Ollama's
+                    # shared pool, llama.cpp/bitnet's
+                    # --split-mode layer): capacity is the
+                    # SUM across every selected GPU, not
+                    # just the first one. Using only
+                    # gpu_indices[0] here used to size the
+                    # use-case plan against a single GPU
+                    # (often the smallest) that alone
+                    # can't even hold the weights,
+                    # producing a zero/negative budget —
+                    # apply_use_case_flags then silently
+                    # no-ops on falsy ctx and the load
+                    # keeps whatever stale ctx_size was
+                    # already in extra_config.
+                    gpu_total = sum(
+                        g.total_vram_mb for g in gpu_states if g.index in gpu_indices
+                    )
+                else:
+                    target_gpu = gpu_indices[0] if gpu_indices else state.preferred_gpu
+                    if target_gpu is None and gpu_states:
+                        target_gpu = max(
+                            gpu_states,
+                            key=lambda gpu: gpu.total_vram_mb,
+                        ).index
+                    tgt = next(
+                        (g for g in gpu_states if g.index == target_gpu),
+                        None,
+                    )
+                    gpu_total = tgt.total_vram_mb if tgt else 0
+                if gpu_total:
+                    plan = await resolve_use_case(state, gpu_total)
+                    if plan and plan.get("applied"):
+                        effective_extra = apply_use_case_flags(
+                            state.extra_config,
+                            state.backend_type,
+                            plan,
+                        )
+                        logger.info(
+                            "use_case_applied",
+                            model_id=model_id,
+                            effective_context=plan.get("effective_context"),
+                            slots=plan.get("slots"),
+                            warnings=plan.get("warnings"),
+                        )
+        except Exception as exc:  # noqa: BLE001
+            # Planning is advisory and must never block a load.
+            logger.warning(
+                "use_case_resolution_failed",
+                model_id=model_id,
+                error=str(exc),
+            )
+            effective_extra = state.extra_config
+        return effective_extra
+
+    async def _start_backend_worker(
+        self,
+        state: "ModelState",
+        backend: Any,
+        gpu_indices: list[int] | None,
+        assigned_port: int,
+        effective_extra: Any,
+    ) -> "tuple[WorkerInfo, set]":
+        """Start the worker process under a VRAM-progress monitor and return
+        its :class:`WorkerInfo` plus the pre-load raw PID set used for
+        adoption. Behaviour-preserving seam of :meth:`_load_model` (REF-05)."""
+        model_id = state.model_id
+        # Ollama is one shared daemon now (no per-GPU pools to
+        # pick): the scheduler's GPUs are only its accounting.
+        backend_gpu_indices = gpu_indices
+        monitor_task = (
+            asyncio.create_task(
+                self._monitor_load_vram_progress(model_id, backend_gpu_indices)
+            )
+            if backend_gpu_indices and self._gpu_manager
+            else None
+        )
+        raw_before = (
+            self._gpu_manager.raw_compute_pids(backend_gpu_indices)
+            if backend_gpu_indices
+            and callable(getattr(self._gpu_manager, "raw_compute_pids", None))
+            else set()
+        )
+        try:
+            worker_info = await backend.load(
+                state.backend_model_id,
+                backend_gpu_indices,
+                port=assigned_port,
+                extra_config=effective_extra,
+                load_policy=state.load_policy.value,
+            )
+        finally:
+            if monitor_task is not None:
+                monitor_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await monitor_task
+        return worker_info, raw_before
+
+    async def _commit_loaded_state(
+        self,
+        state: "ModelState",
+        backend: Any,
+        *,
+        worker_info: "WorkerInfo",
+        raw_before: set,
+        vram_needed: int,
+        required_gpu_vram_mb: dict[int, int] | None,
+        observed_fingerprint: str | None,
+        gpu_managed: bool,
+    ) -> tuple[list[int], int]:
+        """Record capabilities, residency and the VRAM lock for a worker that
+        just started, and publish it to the pool. Returns the actual GPU
+        placement and the effective VRAM figure. Behaviour-preserving seam of
+        :meth:`_load_model` (REF-05)."""
+        model_id = state.model_id
+        capabilities = await backend.get_capabilities(state.backend_model_id)
+        capabilities = self._apply_capability_fallbacks(state, capabilities)
+
+        # WorkerInfo.gpu_indices is always a list (never
+        # None) — CPU-only backends (e.g. Piper) report
+        # [] deliberately. An `or gpu_indices` fallback
+        # here would silently replace that empty list
+        # with the scheduler's REQUESTED placement,
+        # making a CPU-only model look GPU-resident in
+        # the UI/stats even though it never touched that
+        # GPU. Found 2026-10-28: Piper models showed a
+        # GPU badge and VRAM attribution on a GPU card
+        # they never loaded onto.
+        actual_gpu_indices = worker_info.gpu_indices
+        adopt = getattr(self._gpu_manager, "adopt_new_processes", None)
+        if callable(adopt) and actual_gpu_indices:
+            with suppress(Exception):
+                adopt(
+                    actual_gpu_indices,
+                    raw_before,
+                    worker_info.pid,
+                    expected_mb=int(vram_needed or 0) or None,
+                )
+        if model_id in self._last_projection and actual_gpu_indices:
+            spawn(
+                self._calibrate_after_load(
+                    model_id, worker_info.pid, list(actual_gpu_indices)
+                ),
+                name=f"llama-fit-calibrate:{model_id}",
+            )
+        state.worker_info = worker_info
+        state.current_gpu = actual_gpu_indices
+        # Prefer the honest pre-load estimate over the backend's
+        # weights-only report so KV cache is represented too.
+        effective_vram_mb = max(worker_info.vram_used_mb, vram_needed)
+        state.vram_used_mb = effective_vram_mb
+        state.vram_estimate_mb = max(0, int(vram_needed or 0))
+        state.ram_used_mb = (
+            await _measure_process_ram_mb(worker_info.pid) if not actual_gpu_indices else 0
+        )
+        state.capabilities = capabilities
+        await self._share_capabilities_with_base(state)
+        state.status = ModelStatus.LOADED
+        state.live_context = self._initial_live_context(state, backend)
+        self._live_context_unsupported.discard(state.model_id)
+        state.loaded_at = datetime.now(UTC)
+        state.error_message = None
+
+        if gpu_managed and self._gpu_manager:
+            fallback_per_gpu = effective_vram_mb // max(1, len(actual_gpu_indices))
+            # An even split across GPUs is wrong whenever
+            # a tensor-split worker doesn't actually land
+            # evenly (the common case — layer counts and
+            # KV share rarely divide cleanly). Prefer the
+            # real per-GPU usage NVML already reports for
+            # this worker's PID, which GPUManager samples
+            # into GPUState.processes.
+            #
+            # Only trust it when every GPU this worker
+            # touched has a reading — a partial one (hw-
+            # monitor's poll hasn't caught up with the
+            # just-spawned PID on every GPU yet) is worse
+            # than the even-split fallback: locking 0 on
+            # a GPU that's actually heavily used lets the
+            # next admission over-subscribe it. Reproduced
+            # live 2026-11-04: qwen3.8:27b split 8.3 GB/
+            # 23.2 GB across two GPUs but got locked for
+            # ~15.7 GB on *each*, making GPU0 register as
+            # fully reserved (free computed as negative,
+            # clamped to 0) while it actually had ~3.6 GB
+            # physically free — starving an unrelated
+            # whisper load that would have fit there.
+            #
+            # Read live from this container's NVML: the
+            # polled snapshot came from hw-monitor, whose
+            # PID namespace sees no processes at all, so
+            # until 2026-11-09 this always fell back to the
+            # even split. Limited to llama.cpp, whose worker
+            # execs llama-server so the recorded PID is the
+            # one holding the memory; vLLM's is not (its
+            # EngineCore child allocates), and a small
+            # reading there would under-lock every GPU.
+            real_per_gpu_mb: dict[int, int] = {}
+            if worker_info.pid and is_llama_cpp_family(state.backend_type):
+                try:
+                    for gpu_idx in actual_gpu_indices:
+                        measured = self._gpu_manager.get_process_vram_mb(gpu_idx).get(
+                            worker_info.pid
+                        )
+                        if measured:
+                            real_per_gpu_mb[gpu_idx] = int(measured)
+                except Exception:  # noqa: BLE001
+                    real_per_gpu_mb = {}
+            measured_everywhere = bool(actual_gpu_indices) and len(real_per_gpu_mb) == len(
+                actual_gpu_indices
+            )
+            if measured_everywhere and observed_fingerprint is not None:
+                await observed_vram.record(
+                    model_id,
+                    fingerprint=observed_fingerprint,
+                    per_gpu_mb=real_per_gpu_mb,
+                )
+            if measured_everywhere:
+                await self._record_vram_curve_point(
+                    model_id, state, real_per_gpu_mb, list(actual_gpu_indices)
+                )
+            # The single-GPU lock keeps the estimate, as before;
+            # the reading reaches it through the next admission.
+            use_real = len(actual_gpu_indices) > 1 and measured_everywhere
+            for gpu_idx in actual_gpu_indices:
+                configured = (required_gpu_vram_mb or {}).get(gpu_idx)
+                await self._gpu_manager.lock_vram(
+                    gpu_idx,
+                    (
+                        real_per_gpu_mb[gpu_idx]
+                        if use_real
+                        else configured
+                        if configured is not None
+                        else fallback_per_gpu
+                    ),
+                    model_id,
+                )
+
+        # Make the completed model visible to the next admission
+        # before releasing the gate.
+        self._worker_pool.set_worker(model_id, worker_info)
+        return actual_gpu_indices, effective_vram_mb
+
+    async def _rollback_failed_load(
+        self,
+        state: "ModelState",
+        model_id: str,
+        *,
+        backend_to_unload: Any | None,
+        assigned_port: int,
+        cleanup_log_event: str,
+    ) -> None:
+        """Undo a load that failed or was cancelled: stop any started worker,
+        release the port and clear residency. Shared ``rollback`` seam of the
+        three exception handlers in :meth:`_load_model` (REF-05); keeps each
+        handler's own state transition and event publishing at the call site."""
+        try:
+            if backend_to_unload is not None:
+                await backend_to_unload.unload(state.backend_model_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(cleanup_log_event, model_id=model_id)
+        self._worker_pool.remove_worker(model_id)
+        if assigned_port:
+            self._worker_pool.release_port(assigned_port)
+        await self._release_failed_load_residency(state, model_id)
+
     async def _load_model(
         self,
         model_id: str,
@@ -2563,71 +3082,9 @@ class ModelManager:
                         model_artifacts.ollama_root(),
                     )
                 backend = await self._worker_pool.get_backend(state.backend_type)
-                vram_needed = await backend.get_vram_estimate_mb(
-                    state.backend_model_id, extra_config=state.extra_config
+                vram_needed, manually_validated_vram = await self._estimate_load_footprint(
+                    state, backend
                 )
-                manually_validated_vram = False
-                if state.backend_type == "bitnet":
-                    vram_needed = self._estimate_bitnet_vram_from_config(state)
-                elif is_llama_cpp_family(state.backend_type):
-                    # The llama.cpp backend can only estimate VRAM after load
-                    # (its option cache is filled in load()); estimate from the
-                    # GGUF size + config so the scheduler sees the real need and
-                    # can evict/pick a GPU with room instead of blindly starting.
-                    est = estimate_llama_cpp_vram_from_config(
-                        state,
-                        default_gpu_layers=settings.llama_cpp_gpu_layers,
-                        default_ctx_size=settings.llama_cpp_ctx_size,
-                    )
-                    if est > 0:
-                        vram_needed = est
-                    # llama.cpp's own projection beats the formula when the
-                    # tool is installed (2026-11-16: gemma4:26b with experts in
-                    # RAM was refused on Mapache's 1660 for 22 MB by a formula
-                    # estimate 619 MB above the real load). A validated
-                    # measurement below still wins.
-                    projected = await self._project_llama_cpp_vram(state, backend)
-                    if projected:
-                        vram_needed = projected
-                    runtime_meta = (
-                        state.extra_config.get("_runtime")
-                        if isinstance(state.extra_config, dict)
-                        else None
-                    )
-                    calibrated_vram = (
-                        runtime_meta.get("capacity_vram_mb")
-                        if isinstance(runtime_meta, dict) and runtime_meta.get("capacity_validated")
-                        else None
-                    )
-                    try:
-                        calibrated_vram_mb = int(calibrated_vram or 0)
-                    except (TypeError, ValueError):
-                        calibrated_vram_mb = 0
-                    if calibrated_vram_mb > 0:
-                        logger.info(
-                            "llama_cpp_validated_vram_applied",
-                            model_id=model_id,
-                            estimated_vram_mb=vram_needed,
-                            calibrated_vram_mb=calibrated_vram_mb,
-                        )
-                        vram_needed = calibrated_vram_mb
-                        manually_validated_vram = True
-                elif state.backend_type == "vllm":
-                    # vLLM's own get_vram_estimate_mb is weights-only. Long-context
-                    # loads then pass the eviction filter (weights fit) but crash
-                    # inside vLLM when the paged KV pool can't hold one sequence
-                    # at max_model_len — no eviction was ever going to fix that
-                    # because oCabra never asked for the KV reserve. Estimate the
-                    # honest weights + KV(max_model_len × 1) + overhead so the
-                    # eviction path frees the right amount.
-                    est = estimate_vllm_vram_from_config(
-                        state,
-                        models_dir=settings.models_dir,
-                        default_gpu_memory_utilization=float(settings.vllm_gpu_memory_utilization),
-                        hf_cache_dir=getattr(settings, "hf_cache_dir", None),
-                    )
-                    if est > 0:
-                        vram_needed = est
 
                 bitnet_cpu_only = (
                     state.backend_type == "bitnet" and self._resolve_bitnet_gpu_layers(state) <= 0
@@ -2673,147 +3130,19 @@ class ModelManager:
                             if state.backend_type == "ollama":
                                 await self._prepare_ollama_runtime_switch(state)
                             # Admission must share the same critical section as the
-                            # backend start. Otherwise another model (notably Ollama,
-                            # whose runner may span every GPU) can consume VRAM after
-                            # vLLM's headroom check but before its process starts.
-                            # Runtime placement ``_runtime.gpu_indices`` bypasses
-                            # scheduler placement for both one and many GPUs.
-                            # A forced single-GPU preset must not be widened to a
-                            # spill allocation merely because its conservative
-                            # estimate exceeds that card while the backend's
-                            # measured configuration is known to fit there.
-                            _runtime_meta = (
-                                state.extra_config.get("_runtime")
-                                if isinstance(state.extra_config, dict)
-                                else None
+                            # backend start (see _resolve_load_placement / _admit_gpu_load
+                            # / _start_backend_worker). Otherwise another model (notably
+                            # Ollama, whose runner may span every GPU) can consume VRAM
+                            # after vLLM's headroom check but before its process starts.
+                            placement = await self._resolve_load_placement(
+                                state,
+                                vram_needed=vram_needed,
+                                gpu_managed=gpu_managed,
+                                manually_validated_vram=manually_validated_vram,
                             )
-                            required_gpu_indices: list[int] | None = None
-                            required_gpu_vram_mb: dict[int, int] | None = None
-                            if isinstance(_runtime_meta, dict):
-                                raw_indices = _runtime_meta.get("gpu_indices") or []
-                                if isinstance(raw_indices, list) and raw_indices:
-                                    try:
-                                        required_gpu_indices = [int(i) for i in raw_indices]
-                                    except (TypeError, ValueError):
-                                        required_gpu_indices = None
-                                raw_per_gpu = _runtime_meta.get("capacity_vram_by_gpu_mb")
-                                if isinstance(raw_per_gpu, dict) and required_gpu_indices:
-                                    try:
-                                        candidate = {
-                                            int(index): max(0, int(value))
-                                            for index, value in raw_per_gpu.items()
-                                        }
-                                        if all(
-                                            index in candidate for index in required_gpu_indices
-                                        ):
-                                            required_gpu_vram_mb = {
-                                                index: candidate[index]
-                                                for index in required_gpu_indices
-                                            }
-                                    except (TypeError, ValueError):
-                                        required_gpu_vram_mb = None
-                            # A llama.cpp model without a preset placement picks
-                            # its GPUs by ``split_policy`` among the GPUs it does
-                            # not exclude (see _llama_cpp_base_placement).
-                            base_allowed_gpus: list[int] | None = None
-                            base_allow_split = True
-                            if (
-                                is_llama_cpp_family(state.backend_type)
-                                and gpu_managed
-                                and not required_gpu_indices
-                            ):
-                                (
-                                    always_gpus,
-                                    base_allowed_gpus,
-                                    base_allow_split,
-                                ) = await self._llama_cpp_base_placement(state)
-                                if always_gpus:
-                                    required_gpu_indices = always_gpus
-                            if (
-                                is_llama_cpp_family(state.backend_type)
-                                and required_gpu_indices
-                                and len(required_gpu_indices) > 1
-                                and required_gpu_vram_mb is None
-                            ):
-                                llama_config = state.extra_config.get("llama_cpp")
-                                tensor_split = (
-                                    llama_config.get("tensor_split")
-                                    if isinstance(llama_config, dict)
-                                    else None
-                                )
-                                if isinstance(tensor_split, list) and len(tensor_split) == len(
-                                    required_gpu_indices
-                                ):
-                                    try:
-                                        ratios = [max(0.0, float(value)) for value in tensor_split]
-                                        ratio_total = sum(ratios)
-                                        if ratio_total > 0:
-                                            required_gpu_vram_mb = {
-                                                gpu_index: math.ceil(
-                                                    vram_needed * ratio / ratio_total
-                                                )
-                                                for gpu_index, ratio in zip(
-                                                    required_gpu_indices,
-                                                    ratios,
-                                                    strict=True,
-                                                )
-                                            }
-                                    except (TypeError, ValueError):
-                                        required_gpu_vram_mb = None
-                            # Raise the estimate to what this exact configuration
-                            # was measured to hold last time (see observed_vram).
-                            # Fingerprinted here, before use-case resolution
-                            # rewrites extra_config, and recorded with the same
-                            # fingerprint once the worker is up.
-                            observed_fingerprint: str | None = None
-                            # A preset validated by hand keeps its measured figure:
-                            # those sit at the edge of the card on purpose (qwen3.8
-                            # "normal": 24,000 of 24,159), and margin on top would
-                            # make them unloadable. Learning still records them.
-                            if is_llama_cpp_family(state.backend_type) and gpu_managed:
-                                observed_fingerprint = observed_vram.footprint_fingerprint(
-                                    state.extra_config
-                                )
-                                observed = await observed_vram.lookup(
-                                    model_id, fingerprint=observed_fingerprint
-                                )
-                                if (
-                                    observed
-                                    and not manually_validated_vram
-                                    and settings.llama_cpp_observed_vram_apply
-                                    and self._gpu_manager is not None
-                                ):
-                                    # Same free-VRAM reading the admission will use:
-                                    # physical for validated presets, buffered else.
-                                    physical = bool(
-                                        isinstance(_runtime_meta, dict)
-                                        and _runtime_meta.get("capacity_validated")
-                                    )
-                                    ceilings = {
-                                        gpu: self._gpu_manager.admission_ceiling_mb(
-                                            gpu, physical=physical
-                                        )
-                                        for gpu in set(observed) | set(required_gpu_vram_mb or {})
-                                    }
-                                    raised_total, raised_per_gpu = observed_vram.raise_to_observed(
-                                        vram_needed, required_gpu_vram_mb, observed, ceilings
-                                    )
-                                    if raised_total != vram_needed or (
-                                        raised_per_gpu != required_gpu_vram_mb
-                                    ):
-                                        logger.info(
-                                            "llama_cpp_observed_vram_applied",
-                                            model_id=model_id,
-                                            estimated_vram_mb=vram_needed,
-                                            observed_per_gpu_mb=observed,
-                                            vram_needed_mb=raised_total,
-                                            required_gpu_vram_mb=raised_per_gpu,
-                                            ceilings_mb=ceilings,
-                                        )
-                                    vram_needed, required_gpu_vram_mb = (
-                                        raised_total,
-                                        raised_per_gpu,
-                                    )
+                            vram_needed = placement.vram_needed
+                            required_gpu_vram_mb = placement.required_gpu_vram_mb
+                            observed_fingerprint = placement.observed_fingerprint
                             gpu_indices = await self._admit_gpu_load(
                                 model_id=model_id,
                                 vram_needed=vram_needed,
@@ -2823,244 +3152,31 @@ class ModelManager:
                                 gpu_managed=gpu_managed,
                                 enforce_vllm_headroom=enforce_vllm_headroom,
                                 vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
-                                required_gpu_indices=required_gpu_indices,
+                                required_gpu_indices=placement.required_gpu_indices,
                                 required_gpu_vram_mb=required_gpu_vram_mb,
                                 allow_pressure_eviction=allow_pressure_eviction,
-                                allowed_gpus=base_allowed_gpus,
-                                allow_split=base_allow_split,
+                                allowed_gpus=placement.base_allowed_gpus,
+                                allow_split=placement.base_allow_split,
                             )
 
-                            # Use-case resolution stays inside the gate because it
-                            # depends on the GPU selected by admission.
-                            effective_extra = state.extra_config
-                            try:
-                                if self._gpu_manager and (
-                                    (gpu_managed and gpu_indices) or state.backend_type == "ollama"
-                                ):
-                                    from ocabra.core.vram_capacity import (
-                                        apply_use_case_flags,
-                                        resolve_use_case,
-                                    )
-
-                                    gpu_states = await self._gpu_manager.get_all_states()
-                                    if gpu_indices and len(gpu_indices) > 1:
-                                        # Multi-GPU forced placement (Ollama's
-                                        # shared pool, llama.cpp/bitnet's
-                                        # --split-mode layer): capacity is the
-                                        # SUM across every selected GPU, not
-                                        # just the first one. Using only
-                                        # gpu_indices[0] here used to size the
-                                        # use-case plan against a single GPU
-                                        # (often the smallest) that alone
-                                        # can't even hold the weights,
-                                        # producing a zero/negative budget —
-                                        # apply_use_case_flags then silently
-                                        # no-ops on falsy ctx and the load
-                                        # keeps whatever stale ctx_size was
-                                        # already in extra_config.
-                                        gpu_total = sum(
-                                            g.total_vram_mb
-                                            for g in gpu_states
-                                            if g.index in gpu_indices
-                                        )
-                                    else:
-                                        target_gpu = (
-                                            gpu_indices[0] if gpu_indices else state.preferred_gpu
-                                        )
-                                        if target_gpu is None and gpu_states:
-                                            target_gpu = max(
-                                                gpu_states,
-                                                key=lambda gpu: gpu.total_vram_mb,
-                                            ).index
-                                        tgt = next(
-                                            (g for g in gpu_states if g.index == target_gpu),
-                                            None,
-                                        )
-                                        gpu_total = tgt.total_vram_mb if tgt else 0
-                                    if gpu_total:
-                                        plan = await resolve_use_case(state, gpu_total)
-                                        if plan and plan.get("applied"):
-                                            effective_extra = apply_use_case_flags(
-                                                state.extra_config,
-                                                state.backend_type,
-                                                plan,
-                                            )
-                                            logger.info(
-                                                "use_case_applied",
-                                                model_id=model_id,
-                                                effective_context=plan.get("effective_context"),
-                                                slots=plan.get("slots"),
-                                                warnings=plan.get("warnings"),
-                                            )
-                            except Exception as exc:  # noqa: BLE001
-                                # Planning is advisory and must never block a load.
-                                logger.warning(
-                                    "use_case_resolution_failed",
-                                    model_id=model_id,
-                                    error=str(exc),
-                                )
-                                effective_extra = state.extra_config
-
-                            # Ollama is one shared daemon now (no per-GPU pools to
-                            # pick): the scheduler's GPUs are only its accounting.
-                            backend_gpu_indices = gpu_indices
-                            monitor_task = (
-                                asyncio.create_task(
-                                    self._monitor_load_vram_progress(model_id, backend_gpu_indices)
-                                )
-                                if backend_gpu_indices and self._gpu_manager
-                                else None
+                            effective_extra = await self._resolve_use_case_extra(
+                                state, gpu_indices, gpu_managed
                             )
-                            raw_before = (
-                                self._gpu_manager.raw_compute_pids(backend_gpu_indices)
-                                if backend_gpu_indices
-                                and callable(getattr(self._gpu_manager, "raw_compute_pids", None))
-                                else set()
+
+                            worker_info, raw_before = await self._start_backend_worker(
+                                state, backend, gpu_indices, assigned_port, effective_extra
                             )
-                            try:
-                                worker_info = await backend.load(
-                                    state.backend_model_id,
-                                    backend_gpu_indices,
-                                    port=assigned_port,
-                                    extra_config=effective_extra,
-                                    load_policy=state.load_policy.value,
-                                )
-                            finally:
-                                if monitor_task is not None:
-                                    monitor_task.cancel()
-                                    with suppress(asyncio.CancelledError):
-                                        await monitor_task
                             backend_loaded = True
-                            capabilities = await backend.get_capabilities(state.backend_model_id)
-                            capabilities = self._apply_capability_fallbacks(state, capabilities)
-
-                            # WorkerInfo.gpu_indices is always a list (never
-                            # None) — CPU-only backends (e.g. Piper) report
-                            # [] deliberately. An `or gpu_indices` fallback
-                            # here would silently replace that empty list
-                            # with the scheduler's REQUESTED placement,
-                            # making a CPU-only model look GPU-resident in
-                            # the UI/stats even though it never touched that
-                            # GPU. Found 2026-10-28: Piper models showed a
-                            # GPU badge and VRAM attribution on a GPU card
-                            # they never loaded onto.
-                            actual_gpu_indices = worker_info.gpu_indices
-                            adopt = getattr(self._gpu_manager, "adopt_new_processes", None)
-                            if callable(adopt) and actual_gpu_indices:
-                                with suppress(Exception):
-                                    adopt(
-                                        actual_gpu_indices,
-                                        raw_before,
-                                        worker_info.pid,
-                                        expected_mb=int(vram_needed or 0) or None,
-                                    )
-                            if model_id in self._last_projection and actual_gpu_indices:
-                                spawn(
-                                    self._calibrate_after_load(
-                                        model_id, worker_info.pid, list(actual_gpu_indices)
-                                    ),
-                                    name=f"llama-fit-calibrate:{model_id}",
-                                )
-                            state.worker_info = worker_info
-                            state.current_gpu = actual_gpu_indices
-                            # Prefer the honest pre-load estimate over the backend's
-                            # weights-only report so KV cache is represented too.
-                            effective_vram_mb = max(worker_info.vram_used_mb, vram_needed)
-                            state.vram_used_mb = effective_vram_mb
-                            state.vram_estimate_mb = max(0, int(vram_needed or 0))
-                            state.ram_used_mb = (
-                                await _measure_process_ram_mb(worker_info.pid)
-                                if not actual_gpu_indices
-                                else 0
+                            actual_gpu_indices, effective_vram_mb = await self._commit_loaded_state(
+                                state,
+                                backend,
+                                worker_info=worker_info,
+                                raw_before=raw_before,
+                                vram_needed=vram_needed,
+                                required_gpu_vram_mb=required_gpu_vram_mb,
+                                observed_fingerprint=observed_fingerprint,
+                                gpu_managed=gpu_managed,
                             )
-                            state.capabilities = capabilities
-                            await self._share_capabilities_with_base(state)
-                            state.status = ModelStatus.LOADED
-                            state.live_context = self._initial_live_context(state, backend)
-                            self._live_context_unsupported.discard(state.model_id)
-                            state.loaded_at = datetime.now(UTC)
-                            state.error_message = None
-
-                            if gpu_managed and self._gpu_manager:
-                                fallback_per_gpu = effective_vram_mb // max(
-                                    1, len(actual_gpu_indices)
-                                )
-                                # An even split across GPUs is wrong whenever
-                                # a tensor-split worker doesn't actually land
-                                # evenly (the common case — layer counts and
-                                # KV share rarely divide cleanly). Prefer the
-                                # real per-GPU usage NVML already reports for
-                                # this worker's PID, which GPUManager samples
-                                # into GPUState.processes.
-                                #
-                                # Only trust it when every GPU this worker
-                                # touched has a reading — a partial one (hw-
-                                # monitor's poll hasn't caught up with the
-                                # just-spawned PID on every GPU yet) is worse
-                                # than the even-split fallback: locking 0 on
-                                # a GPU that's actually heavily used lets the
-                                # next admission over-subscribe it. Reproduced
-                                # live 2026-11-04: qwen3.8:27b split 8.3 GB/
-                                # 23.2 GB across two GPUs but got locked for
-                                # ~15.7 GB on *each*, making GPU0 register as
-                                # fully reserved (free computed as negative,
-                                # clamped to 0) while it actually had ~3.6 GB
-                                # physically free — starving an unrelated
-                                # whisper load that would have fit there.
-                                #
-                                # Read live from this container's NVML: the
-                                # polled snapshot came from hw-monitor, whose
-                                # PID namespace sees no processes at all, so
-                                # until 2026-11-09 this always fell back to the
-                                # even split. Limited to llama.cpp, whose worker
-                                # execs llama-server so the recorded PID is the
-                                # one holding the memory; vLLM's is not (its
-                                # EngineCore child allocates), and a small
-                                # reading there would under-lock every GPU.
-                                real_per_gpu_mb: dict[int, int] = {}
-                                if worker_info.pid and is_llama_cpp_family(state.backend_type):
-                                    try:
-                                        for gpu_idx in actual_gpu_indices:
-                                            measured = self._gpu_manager.get_process_vram_mb(
-                                                gpu_idx
-                                            ).get(worker_info.pid)
-                                            if measured:
-                                                real_per_gpu_mb[gpu_idx] = int(measured)
-                                    except Exception:  # noqa: BLE001
-                                        real_per_gpu_mb = {}
-                                measured_everywhere = bool(actual_gpu_indices) and len(
-                                    real_per_gpu_mb
-                                ) == len(actual_gpu_indices)
-                                if measured_everywhere and observed_fingerprint is not None:
-                                    await observed_vram.record(
-                                        model_id,
-                                        fingerprint=observed_fingerprint,
-                                        per_gpu_mb=real_per_gpu_mb,
-                                    )
-                                if measured_everywhere:
-                                    await self._record_vram_curve_point(
-                                        model_id, state, real_per_gpu_mb, list(actual_gpu_indices)
-                                    )
-                                # The single-GPU lock keeps the estimate, as before;
-                                # the reading reaches it through the next admission.
-                                use_real = len(actual_gpu_indices) > 1 and measured_everywhere
-                                for gpu_idx in actual_gpu_indices:
-                                    configured = (required_gpu_vram_mb or {}).get(gpu_idx)
-                                    await self._gpu_manager.lock_vram(
-                                        gpu_idx,
-                                        (
-                                            real_per_gpu_mb[gpu_idx]
-                                            if use_real
-                                            else configured
-                                            if configured is not None
-                                            else fallback_per_gpu
-                                        ),
-                                        model_id,
-                                    )
-
-                            # Make the completed model visible to the next admission
-                            # before releasing the gate.
-                            self._worker_pool.set_worker(model_id, worker_info)
                         finally:
                             self._load_in_progress.discard(model_id)
                             self._load_started_at.pop(model_id, None)
@@ -3093,15 +3209,13 @@ class ModelManager:
                 # worker startup. Backends clean their partial process, while
                 # the manager must also release its port and reset residency
                 # state so a later load is not blocked by a ghost LOADING row.
-                try:
-                    if "backend" in locals():
-                        await backend.unload(state.backend_model_id)
-                except Exception:  # noqa: BLE001
-                    logger.warning("model_load_cancel_cleanup_failed", model_id=model_id)
-                self._worker_pool.remove_worker(model_id)
-                if "assigned_port" in locals() and assigned_port:
-                    self._worker_pool.release_port(assigned_port)
-                await self._release_failed_load_residency(state, model_id)
+                await self._rollback_failed_load(
+                    state,
+                    model_id,
+                    backend_to_unload=backend if "backend" in locals() else None,
+                    assigned_port=assigned_port if "assigned_port" in locals() else 0,
+                    cleanup_log_event="model_load_cancel_cleanup_failed",
+                )
                 state.status = ModelStatus.UNLOADED
                 state.live_context = None
                 self._live_context_unsupported.discard(state.model_id)
@@ -3114,15 +3228,17 @@ class ModelManager:
                 # and nothing is broken (BUG-24). Put the model back as it was
                 # — not ERROR, no system alert — so the caller's 503 carries
                 # Retry-After and concurrent waiters see a retryable state.
-                try:
-                    if "backend_loaded" in locals() and backend_loaded:
-                        await backend.unload(state.backend_model_id)
-                except Exception:  # noqa: BLE001
-                    logger.warning("model_load_cleanup_failed", model_id=model_id)
-                self._worker_pool.remove_worker(model_id)
-                if "assigned_port" in locals() and assigned_port:
-                    self._worker_pool.release_port(assigned_port)
-                await self._release_failed_load_residency(state, model_id)
+                await self._rollback_failed_load(
+                    state,
+                    model_id,
+                    backend_to_unload=(
+                        backend
+                        if "backend_loaded" in locals() and backend_loaded
+                        else None
+                    ),
+                    assigned_port=assigned_port if "assigned_port" in locals() else 0,
+                    cleanup_log_event="model_load_cleanup_failed",
+                )
                 state.status = status_before_load
                 state.error_message = error_before_load
                 await self._publish_event(model_id, "status_changed")
@@ -3132,18 +3248,17 @@ class ModelManager:
                 state.status = ModelStatus.ERROR
                 state.error_message = str(e)
                 # Ensure no leaked subprocess/port after partial load failures.
-                try:
-                    if "backend_loaded" in locals() and backend_loaded:
-                        await backend.unload(state.backend_model_id)
-                except Exception:
-                    logger.warning(
-                        "model_load_cleanup_failed",
-                        model_id=model_id,
-                    )
-                self._worker_pool.remove_worker(model_id)
-                if "assigned_port" in locals() and assigned_port:
-                    self._worker_pool.release_port(assigned_port)
-                await self._release_failed_load_residency(state, model_id)
+                await self._rollback_failed_load(
+                    state,
+                    model_id,
+                    backend_to_unload=(
+                        backend
+                        if "backend_loaded" in locals() and backend_loaded
+                        else None
+                    ),
+                    assigned_port=assigned_port if "assigned_port" in locals() else 0,
+                    cleanup_log_event="model_load_cleanup_failed",
+                )
                 await self._publish_event(model_id, "load_failed")
                 # ``str(e)`` returns empty for ``asyncio.TimeoutError`` and
                 # some bare exception classes, which used to hide the real
