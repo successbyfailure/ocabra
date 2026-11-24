@@ -154,15 +154,20 @@ export function normalizeEvent(rawEvent: unknown): WSEvent | null {
   return maybeEvent as WSEvent
 }
 
+/** Ventana de agrupación de ``model_event``: en una ráfaga (una carga toca
+ *  varios modelos a la vez) llegaban N eventos y se disparaba un GET por cada
+ *  uno, sin orden garantizado. Se juntan en un único resync desde la lista. */
+const MODEL_EVENT_DEBOUNCE_MS = 200
+
 export function useWebSocket() {
   const [connected, setConnected] = useState(false)
   const [lastEvent, setLastEvent] = useState<WSEvent | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectDelayMs = useRef(1000)
   const reconnectTimer = useRef<number | null>(null)
+  const modelResyncTimer = useRef<number | null>(null)
 
   const setGpus = useGpuStore((state) => state.setGpus)
-  const updateModel = useModelStore((state) => state.updateModel)
   const updateJob = useDownloadStore((state) => state.updateJob)
   const updateService = useServiceStore((state) => state.updateService)
   const handleBackendEvent = useBackendsStore((state) => state.handleWSEvent)
@@ -197,6 +202,27 @@ export function useWebSocket() {
 
     let cancelled = false
 
+    // Coalesce model events: a burst of them collapses into one authoritative
+    // ``models.list()`` (correct order + federation info), debounced. Also used
+    // to resync after a reconnect, when we may have missed events while down.
+    const resyncModels = () => {
+      void api.models
+        .list()
+        .then((models) => {
+          if (!cancelled) setModels(models)
+        })
+        .catch(() => {
+          /* transient: the next event or reconnect retries */
+        })
+    }
+    const scheduleModelResync = () => {
+      if (modelResyncTimer.current !== null) return
+      modelResyncTimer.current = window.setTimeout(() => {
+        modelResyncTimer.current = null
+        resyncModels()
+      }, MODEL_EVENT_DEBOUNCE_MS)
+    }
+
     function connect() {
       if (cancelled) return
       const ws = new WebSocket(getWebSocketUrl())
@@ -205,6 +231,8 @@ export function useWebSocket() {
       ws.onopen = () => {
         setConnected(true)
         reconnectDelayMs.current = 1000
+        // Resync whatever changed while the socket was down.
+        resyncModels()
       }
 
       ws.onmessage = (e) => {
@@ -216,18 +244,10 @@ export function useWebSocket() {
             setGpus(event.data)
           } else if (event.type === "model_event") {
             // Runtime presets publish events with their derived ``::<hash>``
-            // worker id. Refresh the canonical projection so transitions,
-            // target GPUs, slots and action flags change immediately without
-            // creating a phantom derived card in the store.
-            const canonicalId = event.data.canonicalModelId ?? event.data.modelId
-            void api.models
-              .get(canonicalId)
-              // GET of one model carries no federation info (only the list
-              // does): keep what the store has instead of wiping it.
-              .then(({ federation, ...model }) =>
-                updateModel(canonicalId, federation ? { ...model, federation } : model),
-              )
-              .catch(() => updateModel(canonicalId, { status: event.data.status }))
+            // worker id. Instead of one GET per event (unordered, and the GET
+            // misses federation info), coalesce the burst into a single
+            // debounced ``models.list()`` resync that is authoritative.
+            scheduleModelResync()
           } else if (event.type === "download_progress") {
             updateJob(event.data.jobId, {
               progressPct: event.data.pct,
@@ -271,9 +291,13 @@ export function useWebSocket() {
       if (reconnectTimer.current !== null) {
         window.clearTimeout(reconnectTimer.current)
       }
+      if (modelResyncTimer.current !== null) {
+        window.clearTimeout(modelResyncTimer.current)
+        modelResyncTimer.current = null
+      }
       wsRef.current?.close()
     }
-  }, [setGpus, setModels, updateJob, updateModel, updateService, handleBackendEvent, handleAgentEvent, handleMCPEvent])
+  }, [setGpus, setModels, updateJob, updateService, handleBackendEvent, handleAgentEvent, handleMCPEvent])
 
   return { connected, lastEvent }
 }

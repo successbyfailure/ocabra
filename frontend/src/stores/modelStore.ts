@@ -17,57 +17,22 @@ export const useModelStore = create<ModelStore>((set) => ({
       models: Object.fromEntries(models.map((m) => [m.modelId, m])),
     }),
   updateModel: (modelId, patch) =>
-    set((state) => ({
-      models: {
-        ...state.models,
-        [modelId]: state.models[modelId]
-          ? { ...state.models[modelId], ...patch }
-          : {
-              modelId,
-              displayName: modelId,
-              backendType: "vllm",
-              status: "configured",
-              loadPolicy: "on_demand",
-              pinPermanent: false,
-              preferredGpu: null,
-              currentGpu: [],
-              vramUsedMb: 0,
-              ramUsedMb: 0,
-              diskSizeBytes: null,
-              capabilities: {
-                chat: false,
-                completion: false,
-                tools: false,
-                vision: false,
-                embeddings: false,
-                pooling: false,
-                rerank: false,
-                classification: false,
-                score: false,
-                reasoning: false,
-                imageGeneration: false,
-                imageEditing: false,
-                audioTranscription: false,
-                musicGeneration: false,
-                tts: false,
-        audioInput: false,
-        audioOutput: false,
-        videoInput: false,
-                streaming: false,
-                contextLength: 0,
-                nativeContextLength: 0,
-              },
-              lastRequestAt: null,
-              loadedAt: null,
-              runtimePhase: "configured",
-              runtimeWorkerId: null,
-              runtimeSlots: 1,
-              canCancelLoad: false,
-              canDownsize: false,
-              ...patch,
-            },
-      },
-    })),
+    set((state) => {
+      const existing = state.models[modelId]
+      if (existing) {
+        return { models: { ...state.models, [modelId]: { ...existing, ...patch } } }
+      }
+      // Unknown model. Only insert when the patch is a *complete* ModelState
+      // (the WebSocket resync hands over the full object from GET/list). We no
+      // longer fabricate a phantom with backendType:"vllm" and all-false
+      // capabilities from a partial status event — that invented a card that
+      // never matched the real model and drifted from the backend. A partial
+      // update for an unknown id is dropped; the next list resync fills it in.
+      if (typeof (patch as Partial<ModelState>).backendType === "string") {
+        return { models: { ...state.models, [modelId]: patch as ModelState } }
+      }
+      return state
+    }),
   loadModel: async (modelId) => {
     const updated = await api.models.load(modelId)
     set((state) => ({

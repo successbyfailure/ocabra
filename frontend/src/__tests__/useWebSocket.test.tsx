@@ -44,6 +44,9 @@ describe("useWebSocket", () => {
     MockWebSocket.instances = []
     vi.useRealTimers()
     vi.stubGlobal("WebSocket", MockWebSocket)
+    // The hook resyncs the model list on open and after model events; default
+    // it to empty so unrelated tests don't hit the network.
+    vi.spyOn(api.models, "list").mockResolvedValue([])
     useGpuStore.setState({ gpus: [], lastUpdated: null })
     useModelStore.setState({ models: {} })
   })
@@ -99,44 +102,47 @@ describe("useWebSocket", () => {
     expect(MockWebSocket.instances).toHaveLength(2)
   })
 
-  it("refreshes a derived model event into its canonical card", async () => {
-    const getModel = vi.spyOn(api.models, "get").mockResolvedValue({
-      modelId: "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M",
-      status: "loading",
-      runtimePhase: "upsizing",
-      runtimeSlots: 4,
-    } as ModelState)
+  it("coalesces a burst of model events into one authoritative list resync", async () => {
+    const canonical = "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M"
+    const listModels = vi.spyOn(api.models, "list").mockResolvedValue([
+      {
+        modelId: canonical,
+        backendType: "llama_cpp",
+        status: "loading",
+        runtimePhase: "upsizing",
+        runtimeSlots: 4,
+      } as ModelState,
+    ])
     render(<Harness />)
     const socket = MockWebSocket.instances[0]
+    // The open itself triggers one resync; ignore it and count events after.
+    act(() => socket.emitOpen())
+    await waitFor(() => expect(listModels).toHaveBeenCalled())
+    listModels.mockClear()
 
+    // A burst of three derived events must collapse into a single list() call.
     act(() => {
-      socket.emitMessage({
-        type: "model_event",
-        data: {
-          model_id:
-            "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M::0123456789ab",
-          canonical_model_id:
-            "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M",
-          new_status: "loading",
-        },
-      })
+      for (let i = 0; i < 3; i++) {
+        socket.emitMessage({
+          type: "model_event",
+          data: {
+            model_id: `${canonical}::0123456789ab`,
+            canonical_model_id: canonical,
+            new_status: "loading",
+          },
+        })
+      }
     })
 
-    await waitFor(() => {
-      expect(getModel).toHaveBeenCalledWith(
-        "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M",
-      )
-      expect(
-        useModelStore.getState().models[
-          "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M"
-        ].runtimePhase,
-      ).toBe("upsizing")
-      expect(
-        useModelStore.getState().models[
-          "llama_cpp/deadbydawn/chaos-gguf::Chaos-Q4_K_M::0123456789ab"
-        ],
-      ).toBeUndefined()
-    })
-    getModel.mockRestore()
+    await waitFor(() => expect(listModels).toHaveBeenCalledTimes(1))
+    expect(useModelStore.getState().models[canonical]?.runtimePhase).toBe("upsizing")
+    // No phantom derived card from the ``::<hash>`` worker id.
+    expect(useModelStore.getState().models[`${canonical}::0123456789ab`]).toBeUndefined()
+    listModels.mockRestore()
+  })
+
+  it("does not invent a phantom model from a partial update", () => {
+    useModelStore.getState().updateModel("unknown/model", { status: "loading" })
+    expect(useModelStore.getState().models["unknown/model"]).toBeUndefined()
   })
 })
