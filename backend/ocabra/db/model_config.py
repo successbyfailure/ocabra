@@ -79,6 +79,23 @@ class ModelConfig(Base):
     pin_permanent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     preferred_gpu: Mapped[int | None] = mapped_column(Integer)
     extra_config: Mapped[dict | None] = mapped_column(JSONB)
+    # REF-20: execution-state/config promoted out of the ``extra_config``
+    # grab-bag into real columns, kept in sync by ``ModelManager`` through
+    # ``model_manager_helpers.promoted_columns_from_extra_config``. These are
+    # still DENORMALIZED mirrors: the matching ``extra_config`` keys are kept
+    # because ~20 read sites across ``api/`` and ``backends/`` still read them
+    # (see docs/REVISION-2026-11-16.md REF-20 for the deferred reader cutover).
+    # Promotion of the top-level ``_runtime`` execution-state blob.
+    # ``none_as_null=True`` so a cleared value binds SQL ``NULL``, not JSON
+    # ``null`` — the same JSONB trap already documented on
+    # ``ModelProfile.routing_targets`` (line 150).
+    runtime_state: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    # Top-level ``default_reasoning_effort`` (per-model default).
+    default_reasoning_effort: Mapped[str | None] = mapped_column(String(16))
+    # Cold-start context length snapshot (top level or per-backend section).
+    context_length: Mapped[int | None] = mapped_column(Integer)
+    # Operator ``vram_estimate_mb`` override snapshot (per-backend section).
+    vram_estimate_mb: Mapped[int | None] = mapped_column(Integer)
     # GGUF tokenizer fingerprint (Sprint 17.4) — populated by the local scanner
     # for llama.cpp/bitnet models. Nullable for non-GGUF backends.
     vocab_size: Mapped[int | None] = mapped_column(Integer)

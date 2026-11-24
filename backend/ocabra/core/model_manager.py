@@ -40,6 +40,7 @@ from ocabra.core.model_manager_helpers import (
     estimate_llama_cpp_vram_from_config,
     estimate_vllm_vram_from_config,
     is_derived_worker_key,
+    promoted_columns_from_extra_config,
     resolve_bitnet_gpu_layers,
     resolve_llama_cpp_allowed_gpus,
     resolve_llama_cpp_gpu_layers,
@@ -6996,6 +6997,8 @@ class ModelManager:
                     vocab_size=vocab_size,
                     bos_id=bos_id,
                     eos_id=eos_id,
+                    # REF-20: keep the promoted columns in sync with extra_config.
+                    **promoted_columns_from_extra_config(persisted_extra, normalized_backend),
                 )
                 session.add(cfg)
                 await session.commit()
@@ -7157,6 +7160,14 @@ class ModelManager:
                             setattr(cfg, key, _deep_merge_dicts(existing_extra, extra_patch or {}))
                         else:
                             setattr(cfg, key, val)
+                    if "extra_config" in patch:
+                        # REF-20: resync the promoted columns from the merged
+                        # extra_config. Read-only on extra_config (the deep-merge
+                        # above already ran), so the PATCH data-loss fix stands.
+                        for col, value in promoted_columns_from_extra_config(
+                            cfg.extra_config, state.backend_type
+                        ).items():
+                            setattr(cfg, col, value)
                     await session.commit()
 
         for key, val in patch.items():

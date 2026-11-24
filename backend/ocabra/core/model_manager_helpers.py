@@ -36,6 +36,87 @@ from ocabra.core.vram_planner import (
     plan_llama_cpp_vram_mb,
 )
 
+# Per-backend ``extra_config`` section that may hold a ``vram_estimate_mb``
+# override. Mirrors ``config_schema._VRAM_OVERRIDE_SECTIONS`` (kept in sync by a
+# test): llama.cpp variants share the ``llama_cpp`` section, vLLM its own.
+_VRAM_OVERRIDE_SECTIONS = {"llama_cpp": "llama_cpp", "llamacpp_mks": "llama_cpp", "vllm": "vllm"}
+
+# Sections the cold-start context fallback scans, in order. Mirrors
+# ``capabilities.resolve_context_length_fallback``.
+_CONTEXT_SECTIONS = ("vllm", "sglang", "strata", "llama_cpp", "bitnet", "tensorrt_llm", "whisper")
+_CONTEXT_KEYS = ("context_length", "max_model_len", "ctx_size")
+
+
+def _context_length_from_extra(extra_config: dict) -> int | None:
+    """Cold-start context length snapshot from ``extra_config`` (top level then
+    per-backend section, snake or camelCase). Mirrors
+    ``capabilities.resolve_context_length_fallback`` but returns ``None`` when
+    nothing is configured, for a nullable column."""
+    for key in _CONTEXT_KEYS:
+        value = extra_config.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    for section_name in _CONTEXT_SECTIONS:
+        section = extra_config.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for key in _CONTEXT_KEYS:
+            for candidate in (key, snake_to_camel(key)):
+                value = section.get(candidate)
+                if isinstance(value, int) and value > 0:
+                    return value
+    return None
+
+
+def _vram_estimate_override_from_extra(extra_config: dict, backend_type: str) -> int | None:
+    """Operator ``vram_estimate_mb`` override snapshot from the backend's
+    section (``llama_cpp``/``vllm``) or top level, snake or camelCase."""
+    candidates: list = []
+    section_name = _VRAM_OVERRIDE_SECTIONS.get(backend_type)
+    if section_name:
+        section = extra_config.get(section_name)
+        if isinstance(section, dict):
+            candidates += [section.get("vram_estimate_mb"), section.get("vramEstimateMb")]
+    candidates += [extra_config.get("vram_estimate_mb"), extra_config.get("vramEstimateMb")]
+    for value in candidates:
+        if isinstance(value, bool):
+            continue
+        try:
+            as_int = int(value)
+        except (TypeError, ValueError):
+            continue
+        if as_int > 0:
+            return as_int
+    return None
+
+
+def promoted_columns_from_extra_config(
+    extra_config: dict | None, backend_type: str
+) -> dict[str, object]:
+    """Derive the ``ModelConfig`` columns promoted out of ``extra_config`` (REF-20).
+
+    Single bridge between the ``extra_config`` grab-bag and the real columns
+    ``runtime_state``, ``default_reasoning_effort``, ``context_length`` and
+    ``vram_estimate_mb``. Read-only: never mutates ``extra_config``. Returns a
+    dict keyed by column name, with ``None`` where nothing is configured, so the
+    columns can be kept in sync wherever the row is written.
+
+    The ``extra_config`` keys are intentionally left in place: ~20 read sites
+    across ``api/`` and ``backends/`` still consume them. See
+    docs/REVISION-2026-11-16.md REF-20 for the deferred reader cutover.
+    """
+    extra = extra_config if isinstance(extra_config, dict) else {}
+    runtime = extra.get("_runtime")
+    runtime_state = runtime if isinstance(runtime, dict) else None
+    raw_effort = extra.get("default_reasoning_effort") or extra.get("defaultReasoningEffort")
+    default_reasoning_effort = str(raw_effort).strip().lower() if raw_effort else None
+    return {
+        "runtime_state": runtime_state,
+        "default_reasoning_effort": default_reasoning_effort,
+        "context_length": _context_length_from_extra(extra),
+        "vram_estimate_mb": _vram_estimate_override_from_extra(extra, backend_type),
+    }
+
 
 def estimate_bitnet_vram_from_config(
     state,
