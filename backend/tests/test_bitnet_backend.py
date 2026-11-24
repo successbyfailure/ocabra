@@ -12,16 +12,11 @@ from ocabra.core.model_manager_helpers import (
     estimate_bitnet_vram_from_config,
     resolve_bitnet_gpu_layers,
 )
+from tests._helpers import make_fake_proc
 
 
 def _fake_proc(returncode: int | None = None) -> MagicMock:
-    proc = MagicMock()
-    proc.pid = 4242
-    proc.returncode = returncode
-    proc.terminate = MagicMock()
-    proc.kill = MagicMock()
-    proc.wait = AsyncMock(return_value=0)
-    return proc
+    return make_fake_proc(pid=4242, returncode=returncode)
 
 
 @pytest.mark.asyncio

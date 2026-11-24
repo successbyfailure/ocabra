@@ -7,18 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ocabra.backends.tensorrt_llm_backend import TensorRTLLMBackend
+from tests._helpers import make_fake_proc
 
 
 def _fake_proc(returncode: int | None = None) -> MagicMock:
-    proc = MagicMock()
-    proc.pid = 7373
-    proc.returncode = returncode
-    proc.terminate = MagicMock()
-    proc.kill = MagicMock()
-    proc.wait = AsyncMock(return_value=0)
-    proc.stderr = MagicMock()
-    proc.stderr.read = AsyncMock(return_value=b"")
-    return proc
+    return make_fake_proc(pid=7373, returncode=returncode, with_stderr=True)
 
 
 @pytest.mark.asyncio

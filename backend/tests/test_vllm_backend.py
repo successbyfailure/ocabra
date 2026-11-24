@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from tests._helpers import make_fake_proc
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -42,13 +44,7 @@ def _make_model(base: Path, model_id: str, config: dict, tok_cfg: dict | None = 
 
 
 def _fake_proc(returncode: int | None = None) -> MagicMock:
-    proc = MagicMock()
-    proc.pid = 12345
-    proc.returncode = returncode
-    proc.terminate = MagicMock()
-    proc.kill = MagicMock()
-    proc.wait = AsyncMock(return_value=0)
-    return proc
+    return make_fake_proc(pid=12345, returncode=returncode)
 
 
 @pytest.mark.asyncio

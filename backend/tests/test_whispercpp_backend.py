@@ -15,6 +15,7 @@ from ocabra.backends.whispercpp_backend import (
     _extract_audio_file,
     _is_diarize_requested,
 )
+from tests._helpers import make_fake_proc
 
 
 def test_supported_modality_is_audio_transcription() -> None:
@@ -160,13 +161,7 @@ def test_resolve_diarization_python_bin_raises_when_whisper_not_installed() -> N
 
 
 def _fake_process(returncode: int | None = None) -> MagicMock:
-    proc = MagicMock()
-    proc.returncode = returncode
-    proc.pid = 4242
-    proc.wait = AsyncMock(return_value=0)
-    proc.terminate = MagicMock()
-    proc.kill = MagicMock()
-    return proc
+    return make_fake_proc(pid=4242, returncode=returncode)
 
 
 @pytest.mark.asyncio
