@@ -20,7 +20,14 @@ def find_local_hf_dir(
     Must stay in sync with ``VLLMBackend._resolve_local_model_dir`` — otherwise
     a model the backend can load fine looks "unknown" to the estimator, which
     returns 0, and the scheduler falls back to the weights-only heuristic we
-    are trying to replace. Checks (same priority as the vLLM backend):
+    are trying to replace.
+
+    NOT the same as ``core.memory_estimate._resolve_local_model_path`` (do not
+    merge): that one is permissive (``exists()``, no ``config.json``), keeps the
+    ``::`` variant in the dir name, and resolves single-file GGUF for the
+    disk-size readout. This one requires a valid HF weights dir (``config.json``)
+    and strips the variant, because vLLM estimation must reject anything that
+    isn't a loadable HF snapshot. Checks (same priority as the vLLM backend):
 
       1. ``<models_dir>/<repo>`` — direct legacy layout
       2. ``<models_dir>/huggingface/<flat>`` — flat HF layout
@@ -79,7 +86,12 @@ def find_local_hf_dir(
 
 
 def sum_hf_weight_files_mb(model_dir: Path) -> float:
-    """Total MiB of the ``*.safetensors``/``*.bin`` weight files in ``model_dir``."""
+    """Total MiB of the ``*.safetensors``/``*.bin`` weight files in ``model_dir``.
+
+    Weights only (for VRAM estimation), top-level, in MiB — distinct from
+    ``core.memory_estimate._compute_path_size_bytes``, which is the full on-disk
+    footprint (every file, recursive, in bytes). Keep them separate.
+    """
     total = 0
     for pattern in ("*.safetensors", "*.bin"):
         for f in model_dir.glob(pattern):

@@ -39,6 +39,25 @@ logger = structlog.get_logger(__name__)
 
 
 def _resolve_local_model_path(model_id: str) -> Path | None:
+    """Resolve *any* registered model to its on-disk path, for size/display.
+
+    Deliberately distinct from ``core.model_files.find_local_hf_dir`` — do NOT
+    merge them:
+
+    - This one is permissive (only needs the path to ``exist()``), keeps the
+      ``::<variant>`` suffix when building the HF dir name
+      (``org--repo--variant``), and falls back to resolving a GGUF **file** for
+      llama.cpp/bitnet. It answers "where does this model live on disk" for a
+      disk-size readout, so it must handle every backend including single-file
+      GGUF.
+    - ``find_local_hf_dir`` requires a ``config.json`` (a *valid* HF weights
+      dir), strips the ``::`` variant, and also probes the HF cache snapshots.
+      It mirrors ``VLLMBackend._resolve_local_model_dir`` for VRAM estimation,
+      where a dir without ``config.json`` must NOT count.
+
+    Collapsing either requirement into the other would break the other caller
+    (GGUF resolution here, or vLLM estimation there).
+    """
     base = Path(settings.models_dir)
     direct = base / model_id
     if direct.exists():
@@ -153,6 +172,13 @@ def _resolve_tensorrt_engine_path(engine_name: str) -> Path | None:
 
 
 def _compute_path_size_bytes(path: Path) -> int:
+    """Total **bytes** of ``path`` (a file, or every file under a dir).
+
+    Distinct from ``core.model_files.sum_hf_weight_files_mb``, which sums only
+    the ``*.safetensors``/``*.bin`` weight files of a dir and returns **MiB**
+    for VRAM estimation. This one is the full on-disk footprint (any file type,
+    GGUF included) used for the disk-size readout — keep them separate.
+    """
     if path.is_file():
         return path.stat().st_size
     total = 0
