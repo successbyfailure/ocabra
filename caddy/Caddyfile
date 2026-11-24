@@ -39,6 +39,12 @@
     handle /ocabra/* {
         import api
     }
+    # /_node/<nodo>/v1/... es /v1/... con X-Ocabra-Node: <nodo> (federación),
+    # para clientes que solo dejan cambiar la URL base. Sin esta regla caía al
+    # SPA del frontend y respondía el 404 de nginx.
+    handle /_node/* {
+        import api
+    }
     handle /health {
         import api
     }
