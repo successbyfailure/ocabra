@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from ocabra.api._deps_auth import UserContext
+from ocabra.core.inference.pipeline import RequestDescriptor, RequestOutcome, run_request
 from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError, WorkerGoneError
 
 from ._deps import (
@@ -35,6 +36,21 @@ from ._schemas import PoolingRequest, validate_body
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
+
+# REF-01: /v1/pooling declara su flujo y delega en ``run_request`` (fase A).
+# Rellena sus dos huecos de la matriz: ``Desconexión`` (cancela el pooling en
+# curso si el cliente se va) y la formalización del paso ``admit``, que para
+# pooling NO añade reja de reparto justo (conserva su concurrencia alta, igual
+# que embeddings; ver ``project_embeddings_inflight_cap``). ``/score``,
+# ``/rerank`` y ``/classify`` quedan en ``_resolve_and_forward`` (fase B+).
+_POOLING_DESCRIPTOR = RequestDescriptor(
+    request_kind="pooling",
+    capability="pooling",
+    dispatch_path="/pooling",
+    federates=True,
+    honors_disconnect=True,
+    applies_fair_share=False,
+)
 
 
 def _normalize_non_empty_text(value: Any, *, param: str, code: str, message: str) -> str:
@@ -311,7 +327,35 @@ async def pooling(
     # ``/score``, ``/rerank`` and ``/classify`` already validate their shape
     # (and accept aliases a strict schema would reject), so they are left as-is.
     body = validate_body(PoolingRequest, await read_json_object(request))
-    return await _resolve_and_forward(request, body, "pooling", "pooling", "/pooling", user)
+
+    model_manager = get_model_manager(request)
+    profile_registry = get_profile_registry(request)
+
+    async def _federate(fed_model_id: str, fed_body: dict):
+        return await try_proxy_json(
+            request,
+            model_id=fed_model_id,
+            body=fed_body,
+            federation_manager=get_federation_manager(request),
+            model_manager=model_manager,
+            profile_registry=profile_registry,
+            logger=logger,
+        )
+
+    outcome = await run_request(
+        request,
+        descriptor=_POOLING_DESCRIPTOR,
+        body=body,
+        user=user,
+        model_manager=model_manager,
+        profile_registry=profile_registry,
+        worker_pool=request.app.state.worker_pool,
+        federate=_federate,
+    )
+    if not isinstance(outcome, RequestOutcome):
+        # La federación sirvió la petición: devuelve la respuesta del peer.
+        return outcome
+    return JSONResponse(content=outcome.result, headers=outcome.response_headers)
 
 
 @router.post("/score", summary="Score text pairs", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
