@@ -51,6 +51,7 @@ from ._deps import (
     stream_error_details,
     to_backend_body,
 )
+from ._schemas import CompletionRequest, validate_body
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -68,7 +69,9 @@ async def completions(
     """
     Create a text completion. Proxies to the resolved model worker (backend-agnostic).
     """
-    body = await read_json_object(request)
+    # Permissive early validation (REF-11/BUG-18): no ``model`` or no
+    # ``prompt`` is a clear 422 before any load; extras pass through.
+    body = validate_body(CompletionRequest, await read_json_object(request))
     model_id: str = body.get("model", "")
     stream: bool = body.get("stream", False)
 

@@ -36,6 +36,7 @@ from ._deps import (
     to_backend_body,
 )
 from ._federation import try_proxy_json
+from ._schemas import EmbeddingRequest, validate_body
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -92,7 +93,9 @@ async def embeddings(
     Create text embeddings. Proxies to the resolved model worker (backend-agnostic).
     Requires a model with capability embeddings=True.
     """
-    body = await read_json_object(request)
+    # Permissive early validation (REF-11/BUG-18): no ``model`` or no ``input``
+    # is a clear 422; token-id arrays and extra fields still pass through.
+    body = validate_body(EmbeddingRequest, await read_json_object(request))
     model_id: str = body.get("model", "")
 
     model_manager = get_model_manager(request)

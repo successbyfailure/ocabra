@@ -76,6 +76,7 @@ from ._deps import (
     stream_error_details,
     to_backend_body,
 )
+from ._schemas import ChatCompletionRequest, validate_body
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -120,7 +121,10 @@ async def chat_completions(
     answer was written. Don't render an empty response to the end user;
     retry with a larger `max_tokens` and/or a lower `reasoning_effort`.
     """
-    body = await read_json_object(request)
+    # Permissive early validation (REF-11/BUG-18): catches a malformed body —
+    # no ``model``, ``messages`` not a list — with a clear 422 before any model
+    # load, without changing what a valid request forwards (extras are kept).
+    body = validate_body(ChatCompletionRequest, await read_json_object(request))
     model_id: str = body.get("model", "")
     stream: bool = body.get("stream", False)
 

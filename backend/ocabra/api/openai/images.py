@@ -43,6 +43,7 @@ from ._deps import (
     resolve_profile,
 )
 from ._federation import try_proxy_json, try_proxy_multipart
+from ._schemas import ImageGenerationRequest, validate_body
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -184,7 +185,9 @@ async def image_generations(
     Supports `response_format`: ``b64_json`` (default, preserves existing behavior)
     or ``url`` (image is persisted to disk and a temporary URL is returned).
     """
-    body = await read_json_object(request)
+    # Permissive early validation (REF-11/BUG-18): no ``model`` or no
+    # ``prompt`` is a clear 422 before any load; extras pass through.
+    body = validate_body(ImageGenerationRequest, await read_json_object(request))
     requested_model: str = body.get("model", "") or ""
     model_id, user = _resolve_openai_image_compat(request, user, requested_model)
     if model_id != requested_model:

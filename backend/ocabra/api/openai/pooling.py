@@ -31,6 +31,7 @@ from ._deps import (
     to_backend_body,
 )
 from ._federation import try_proxy_json
+from ._schemas import PoolingRequest, validate_body
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -305,7 +306,11 @@ async def pooling(
     """
     Run pooling/embedding-style inference on a model configured with pooling support.
     """
-    body = await read_json_object(request)
+    # Permissive early validation (REF-11/BUG-18): a missing ``model`` is a
+    # clear 422; ``input`` and every other field pass through untouched.
+    # ``/score``, ``/rerank`` and ``/classify`` already validate their shape
+    # (and accept aliases a strict schema would reject), so they are left as-is.
+    body = validate_body(PoolingRequest, await read_json_object(request))
     return await _resolve_and_forward(request, body, "pooling", "pooling", "/pooling", user)
 
 

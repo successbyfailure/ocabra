@@ -1,14 +1,26 @@
-"""OpenAI-compatible request/response schemas for API documentation.
+"""OpenAI/Ollama-compatible request schemas, for OpenAPI docs and validation.
 
-These schemas are used ONLY for OpenAPI spec generation (Swagger/ReDoc).
-The actual endpoints parse request.json() directly for flexibility.
+These schemas feed the OpenAPI spec (Swagger/ReDoc) *and*, via
+:func:`validate_body`, give the request handlers a permissive early gate on
+the body they read with :func:`ocabra.core.inference.body.read_json_object`
+(REF-11, closes BUG-18).
+
+The validation is deliberately **permissive**: every model sets
+``extra="allow"`` so unknown fields a real OpenAI/Ollama client sends pass
+through untouched, and optional fields stay loosely typed. :func:`validate_body`
+only rejects input that is genuinely malformed — a wrong JSON type for a known
+field, or a missing truly-required field (``model``/``messages``/``input``/…) —
+and returns the original ``dict`` unchanged so the backend body is identical to
+the raw-dict path it replaced.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from ocabra.core.inference.errors import _openai_error
 
 # ── Chat Completions ────────────────────────────────────────────
 
@@ -21,6 +33,10 @@ class ChatMessage(BaseModel):
     name: str | None = Field(None, description="Optional name for the participant")
     tool_calls: list[Any] | None = Field(None, description="Tool calls (assistant only)")
     tool_call_id: str | None = Field(None, description="Tool call ID (tool role only)")
+
+    # Clients send extra per-message keys (``refusal``, ``function_call``,
+    # Ollama's ``images``, ``thinking``…); keep them.
+    model_config = ConfigDict(extra="allow")
 
 
 class ChatCompletionRequest(BaseModel):
@@ -82,6 +98,7 @@ class ChatCompletionRequest(BaseModel):
     )
 
     model_config = {
+        "extra": "allow",
         "json_schema_extra": {
             "examples": [
                 {
@@ -130,11 +147,15 @@ class ChatCompletionRequest(BaseModel):
 
 class CompletionRequest(BaseModel):
     model: str = Field(..., description="Profile ID o model ID", examples=["qwen3-8b"])
-    prompt: str | list[str] = Field(..., description="Input prompt(s)")
+    # ``list[Any]`` also covers OpenAI's token-id arrays (``list[int]`` /
+    # ``list[list[int]]``); backends that reject them answer the client.
+    prompt: str | list[Any] = Field(..., description="Input prompt(s)")
     max_tokens: int | None = Field(256, description="Max tokens to generate")
     temperature: float | None = Field(0.7, description="Sampling temperature")
     stream: bool = Field(False, description="Stream response via SSE")
     stop: str | list[str] | None = Field(None, description="Stop sequences")
+
+    model_config = ConfigDict(extra="allow")
 
 
 # ── Embeddings ──────────────────────────────────────────────────
@@ -142,8 +163,11 @@ class CompletionRequest(BaseModel):
 
 class EmbeddingRequest(BaseModel):
     model: str = Field(..., description="Profile ID o model ID", examples=["qwen3-embedding-8b"])
-    input: str | list[str] = Field(..., description="Text(s) to embed", examples=["Hello world"])
+    # ``list[Any]`` also covers OpenAI's token-id arrays for embeddings.
+    input: str | list[Any] = Field(..., description="Text(s) to embed", examples=["Hello world"])
     encoding_format: str | None = Field("float", description="Encoding format: float or base64")
+
+    model_config = ConfigDict(extra="allow")
 
 
 # ── TTS ─────────────────────────────────────────────────────────
@@ -207,6 +231,8 @@ class ImageGenerationRequest(BaseModel):
     num_inference_steps: int | None = Field(None, description="Pasos de inferencia")
     guidance_scale: float | None = Field(None, description="Guidance scale (CFG)")
     negative_prompt: str | None = Field(None, description="Negative prompt")
+
+    model_config = ConfigDict(extra="allow")
 
 
 # ── Rerank ──────────────────────────────────────────────────────
@@ -281,3 +307,79 @@ class MusicGenerationRequest(BaseModel):
         json_schema_extra={"enum": ["mp3", "wav", "flac"]},
         description="Formato de audio de salida (default 'mp3')",
     )
+
+    model_config = ConfigDict(extra="allow")
+
+
+# ── Ollama-compatible requests (/api/*) ─────────────────────────
+# These are not part of the OpenAI OpenAPI tables; they exist so the Ollama
+# handlers get the same permissive early validation. Only ``model`` is truly
+# required — Ollama's own API treats a body with just ``model`` (no
+# ``messages``/``prompt``) as a model-load/keepalive call, so those stay
+# optional. ``extra="allow"`` keeps ``options``, ``think``, ``format``,
+# ``keep_alive``, ``tools``, ``images``… untouched.
+
+
+class OllamaChatRequest(BaseModel):
+    model: str = Field(..., description="Profile ID or Ollama model name")
+    messages: list[Any] | None = Field(None, description="Conversation messages")
+    stream: bool | None = Field(None, description="Stream the response as NDJSON")
+
+    model_config = ConfigDict(extra="allow")
+
+
+class OllamaGenerateRequest(BaseModel):
+    model: str = Field(..., description="Profile ID or Ollama model name")
+    prompt: str | None = Field(None, description="Prompt text")
+    stream: bool | None = Field(None, description="Stream the response as NDJSON")
+
+    model_config = ConfigDict(extra="allow")
+
+
+class OllamaEmbedRequest(BaseModel):
+    model: str = Field(..., description="Profile ID or Ollama model name")
+    input: str | list[Any] | None = Field(None, description="Text(s) to embed")
+    prompt: str | None = Field(None, description="Legacy single-text input alias")
+
+    model_config = ConfigDict(extra="allow")
+
+
+# ── Permissive validation gate (REF-11 / BUG-18) ────────────────
+
+
+def _first_validation_error(exc: ValidationError) -> tuple[str | None, str]:
+    """A ``(param, message)`` pair describing the first validation failure."""
+    errors = exc.errors()
+    if not errors:
+        return None, "The request body is invalid."
+    first = errors[0]
+    loc = [str(p) for p in first.get("loc", ()) if p != "body"]
+    param = ".".join(loc) or None
+    msg = str(first.get("msg") or "invalid value")
+    return param, (f"{param}: {msg}" if param else msg)
+
+
+def validate_body(model_cls: type[BaseModel], body: dict[str, Any]) -> dict[str, Any]:
+    """Validate *body* against *model_cls* and return it **unchanged**.
+
+    The model is used purely as a gate: on success the original ``body`` dict
+    is returned verbatim (same object), so unknown/extra fields and
+    loosely-typed values a working client sends reach the backend exactly as
+    before. On a genuinely malformed body — a known field with the wrong JSON
+    type, or a missing required field — it raises an OpenAI-shaped
+    :class:`fastapi.HTTPException` (``status_code=422``). ``main.py``'s
+    per-family error handler (REF-10) renders it as a top-level ``error``
+    object on ``/v1`` and an ``error`` string on ``/api``.
+    """
+    try:
+        model_cls.model_validate(body)
+    except ValidationError as exc:
+        param, message = _first_validation_error(exc)
+        raise _openai_error(
+            message,
+            "invalid_request_error",
+            param=param,
+            code="invalid_body",
+            status_code=422,
+        ) from exc
+    return body

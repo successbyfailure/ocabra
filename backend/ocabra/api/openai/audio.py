@@ -35,6 +35,7 @@ from ._deps import (
     resolve_profile,
 )
 from ._federation import try_proxy_json, try_proxy_multipart
+from ._schemas import MusicGenerationRequest, validate_body
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -947,7 +948,9 @@ async def generate_music(
 
     Returns the generated audio file as binary.
     """
-    body = await read_json_object(request)
+    # Permissive early validation (REF-11/BUG-18): no ``model`` or no
+    # ``prompt`` is a clear 422 before any load; extras pass through.
+    body = validate_body(MusicGenerationRequest, await read_json_object(request))
     model_id: str = body.get("model", "")
     response_format: str = str(body.get("response_format") or "mp3").lower()
     if response_format not in {"mp3", "wav", "flac"}:
