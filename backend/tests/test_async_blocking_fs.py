@@ -273,6 +273,7 @@ async def test_capability_fallbacks_run_off_the_loop(monkeypatch):
 
 async def test_llama_cpp_memory_estimate_runs_off_the_loop(monkeypatch):
     from ocabra.api.internal import models as models_api
+    from ocabra.core import memory_estimate
 
     on_loop: list[bool] = []
 
@@ -280,7 +281,9 @@ async def test_llama_cpp_memory_estimate_runs_off_the_loop(monkeypatch):
         on_loop.append(_on_event_loop())
         return {**estimate, "source": "fake"}
 
-    monkeypatch.setattr(models_api, "_estimate_llama_cpp_memory", fake_estimate)
+    # REF-07: _build_model_memory_estimate / _estimate_llama_cpp_memory moved to
+    # core.memory_estimate; patch where the caller resolves it.
+    monkeypatch.setattr(memory_estimate, "_estimate_llama_cpp_memory", fake_estimate)
 
     class _Backend:
         async def get_vram_estimate_mb(self, *_a, **_k):
