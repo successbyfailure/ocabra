@@ -7,39 +7,49 @@ from __future__ import annotations
 import base64
 import math
 import struct
-import time
 from typing import Annotated, Any
 
-import httpx
 import structlog
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from ocabra.api._deps_auth import UserContext
+from ocabra.core.inference.pipeline import (
+    PipelineContext,
+    RequestDescriptor,
+    RequestOutcome,
+    run_request,
+)
 from ocabra.core.request_telemetry import mark_prefill_since
-from ocabra.core.worker_pool import InferenceTimeoutError, WorkerDegradedError, WorkerGoneError
 
 from ._deps import (
     NON_STREAMING_LOAD_RESPONSE_DOC,
     _openai_error,
-    check_capability,
     get_federation_manager,
     get_model_manager,
     get_openai_user,
     get_profile_registry,
-    merge_profile_defaults,
-    ocabra_response_headers,
-    raise_inference_dispatch_error,
-    raise_upstream_http_error,
     read_json_object,
-    resolve_profile,
-    to_backend_body,
 )
 from ._federation import try_proxy_json
 from ._schemas import EmbeddingRequest, validate_body
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
+
+# REF-01: /v1/embeddings declara su flujo y delega en ``run_request``. Rellena
+# sus dos huecos de la matriz respecto a hoy: ``Desconexión`` (un cliente que se
+# va cancela el embedding en curso) y la formalización del paso ``admit`` —que
+# para embeddings NO añade reja de reparto justo, conservando su concurrencia
+# alta (ver ``project_embeddings_inflight_cap``).
+_EMBEDDINGS_DESCRIPTOR = RequestDescriptor(
+    request_kind="embeddings",
+    capability="embeddings",
+    dispatch_path="/v1/embeddings",
+    federates=True,
+    honors_disconnect=True,
+    applies_fair_share=False,
+)
 
 
 def _truncate_and_renormalize(values: list[float], dimensions: int) -> list[float]:
@@ -84,6 +94,17 @@ def _apply_requested_dimensions(result: dict, dimensions: int) -> None:
                 ).decode("ascii")
 
 
+def _validate_dimensions(body: dict) -> None:
+    dimensions = body.get("dimensions")
+    if dimensions is not None and (not isinstance(dimensions, int) or dimensions < 1):
+        raise _openai_error(
+            "The 'dimensions' field must be a positive integer.",
+            "invalid_request_error",
+            param="dimensions",
+            code="invalid_dimensions",
+        )
+
+
 @router.post("/embeddings", summary="Create embeddings", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def embeddings(
     request: Request,
@@ -96,66 +117,45 @@ async def embeddings(
     # Permissive early validation (REF-11/BUG-18): no ``model`` or no ``input``
     # is a clear 422; token-id arrays and extra fields still pass through.
     body = validate_body(EmbeddingRequest, await read_json_object(request))
-    model_id: str = body.get("model", "")
 
     model_manager = get_model_manager(request)
     profile_registry = get_profile_registry(request)
 
-    fed_resp = await try_proxy_json(
+    async def _federate(fed_model_id: str, fed_body: dict):
+        return await try_proxy_json(
+            request,
+            model_id=fed_model_id,
+            body=fed_body,
+            federation_manager=get_federation_manager(request),
+            model_manager=model_manager,
+            profile_registry=profile_registry,
+            logger=logger,
+        )
+
+    async def _pre_dispatch(ctx: PipelineContext) -> None:
+        # ``dimensions`` se valida con el cuerpo ya fusionado, antes del despacho.
+        _validate_dimensions(ctx.merged_body)
+
+    outcome = await run_request(
         request,
-        model_id=model_id,
+        descriptor=_EMBEDDINGS_DESCRIPTOR,
         body=body,
-        federation_manager=get_federation_manager(request),
+        user=user,
         model_manager=model_manager,
         profile_registry=profile_registry,
-        logger=logger,
+        worker_pool=request.app.state.worker_pool,
+        federate=_federate,
+        pre_dispatch=_pre_dispatch,
     )
-    if fed_resp is not None:
-        return fed_resp
+    if not isinstance(outcome, RequestOutcome):
+        # La federación sirvió la petición: devuelve la respuesta del peer.
+        return outcome
 
-    profile, state = await resolve_profile(
-        model_id,
-        model_manager,
-        profile_registry,
-        user=user,
-        request_body=body,
-        router_resolver=getattr(request.app.state, "router_resolver", None),
-        request_state=request.state,
-    )
-    check_capability(state, "embeddings", "embeddings")
-
-    merged_body = merge_profile_defaults(profile, body)
-    # El worker que resolve_profile ha cargado: su clave incluye el preset de
-    # runtime, que compute_worker_key(base, load_overrides) no ve.
-    worker_key = state.model_id
-
-    dimensions = merged_body.get("dimensions")
-    if dimensions is not None and (not isinstance(dimensions, int) or dimensions < 1):
-        raise _openai_error(
-            "The 'dimensions' field must be a positive integer.",
-            "invalid_request_error",
-            param="dimensions",
-            code="invalid_dimensions",
-        )
-
-    worker_pool = request.app.state.worker_pool
-    forward_started = time.monotonic()
-    try:
-        result = await worker_pool.forward_request(
-            worker_key,
-            "/v1/embeddings",
-            to_backend_body(state, merged_body),
-        )
-    except httpx.HTTPStatusError as exc:
-        raise_upstream_http_error(exc)
-    except (InferenceTimeoutError, WorkerDegradedError, WorkerGoneError) as exc:
-        raise_inference_dispatch_error(exc)
+    result = outcome.result
     # Un embedding es todo prefill: con este tiempo el middleware de stats
     # calcula los tokens/s que el worker no devuelve.
-    mark_prefill_since(request.state, forward_started)
+    mark_prefill_since(request.state, outcome.forward_started)
+    dimensions = outcome.merged_body.get("dimensions")
     if isinstance(dimensions, int) and dimensions >= 1:
         _apply_requested_dimensions(result, dimensions)
-    resp_headers = await ocabra_response_headers(
-        request, model_manager, worker_key, profile.base_model_id
-    )
-    return JSONResponse(content=result, headers=resp_headers)
+    return JSONResponse(content=result, headers=outcome.response_headers)

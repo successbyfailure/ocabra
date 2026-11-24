@@ -157,13 +157,14 @@ def test_embeddings_forwards_extra_fields_unchanged():
         capabilities=SimpleNamespace(embeddings=True),
     )
     mod = "ocabra.api.openai.embeddings"
+    pipeline = "ocabra.core.inference.pipeline"
     with (
         patch(f"{mod}.try_proxy_json", AsyncMock(return_value=None)),
-        patch(f"{mod}.resolve_profile", AsyncMock(return_value=(profile, state))),
-        patch(f"{mod}.check_capability"),
-        patch(f"{mod}.merge_profile_defaults", lambda _p, body: body),
-        patch(f"{mod}.to_backend_body", lambda _s, body: body),
-        patch(f"{mod}.ocabra_response_headers", AsyncMock(return_value={})),
+        patch(f"{pipeline}.resolve_profile", AsyncMock(return_value=(profile, state))),
+        patch(f"{pipeline}.check_capability"),
+        patch(f"{pipeline}.merge_profile_defaults", lambda _p, body: body),
+        patch(f"{pipeline}.to_backend_body", lambda _s, body: body),
+        patch(f"{pipeline}.ocabra_response_headers", AsyncMock(return_value={})),
     ):
         resp = TestClient(app, raise_server_exceptions=True).post(
             "/v1/embeddings",

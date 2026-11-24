@@ -19,6 +19,9 @@ from fastapi.testclient import TestClient
 from ocabra.api._deps_auth import UserContext, get_current_user
 
 MODULE = "ocabra.api.openai.embeddings"
+# REF-01: la resolución/capacidad/despacho los ejecuta ahora el motor
+# ``core/inference/pipeline``; la federación sigue inyectándose desde el endpoint.
+PIPELINE = "ocabra.core.inference.pipeline"
 BASE = "llamacpp_mks/harrier"
 WORKER_KEY = f"{BASE}::ff9550da9dfb"
 
@@ -55,10 +58,10 @@ def test_usa_la_clave_del_worker_con_el_preset_de_runtime():
     )
     with (
         patch(f"{MODULE}.try_proxy_json", AsyncMock(return_value=None)),
-        patch(f"{MODULE}.resolve_profile", AsyncMock(return_value=(profile, state))),
-        patch(f"{MODULE}.check_capability"),
-        patch(f"{MODULE}.to_backend_body", lambda _state, body: body),
-        patch(f"{MODULE}.ocabra_response_headers", AsyncMock(return_value={})),
+        patch(f"{PIPELINE}.resolve_profile", AsyncMock(return_value=(profile, state))),
+        patch(f"{PIPELINE}.check_capability"),
+        patch(f"{PIPELINE}.to_backend_body", lambda _state, body: body),
+        patch(f"{PIPELINE}.ocabra_response_headers", AsyncMock(return_value={})),
     ):
         resp = TestClient(app, raise_server_exceptions=True).post(
             "/v1/embeddings", json={"model": "harrier", "input": ["hola"]}
