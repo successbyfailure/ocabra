@@ -456,6 +456,36 @@ async def _persist_tool_call_stats(
 # ── Agent executor ─────────────────────────────────────────────
 
 
+@dataclass
+class _LoopSetup:
+    """Estado compartido que ``run`` y ``run_stream`` calculan igual antes de
+    entrar en el bucle de hops (herramientas, opciones fusionadas, modelo…)."""
+
+    agent_chain: tuple[uuid.UUID, ...]
+    lookup: dict[str, ToolTarget]
+    all_tools: list[dict[str, Any]]
+    require_approval: str
+    tool_choice: Any
+    loop_messages: list[dict[str, Any]]
+    merged_options: dict[str, Any]
+    agent_id: uuid.UUID
+    root_id: uuid.UUID | None
+    base_model: str
+    max_tool_hops: int
+
+
+@dataclass
+class _HopOutcome:
+    """Resultado de un hop del LLM, común a las dos vías."""
+
+    response: dict[str, Any]
+    assistant_msg: dict[str, Any]
+    tool_calls: list[dict[str, Any]]
+    usage: dict[str, Any]
+    content_text: str
+    finish_reason: str | None
+
+
 class AgentExecutor:
     """Orchestrate the tool-loop for one agent invocation.
 
@@ -901,6 +931,147 @@ class AgentExecutor:
                 )
                 return msg, rec
 
+    # ── Shared tool-loop machinery ───────────────────────────
+
+    async def _prepare_loop(
+        self,
+        agent: AgentSpec,
+        messages: list[dict[str, Any]],
+        request_options: dict[str, Any],
+        *,
+        per_request_allowed_tools: list[str] | None,
+        caller_tools: list[dict[str, Any]] | None,
+        require_approval_override: str | None,
+        agent_chain_prefix: tuple[uuid.UUID, ...] | None,
+    ) -> _LoopSetup:
+        """Preparación común de ``run``/``run_stream`` antes del bucle de hops.
+
+        Carga las herramientas, resuelve ``require_approval`` y ``tool_choice``,
+        antepone el system prompt y fusiona ``request_defaults`` (gana el cuerpo
+        de la petición), quitando las claves que el bucle fija por hop.
+        """
+        agent_chain = (*(agent_chain_prefix or ()), agent.id)
+        agent_tools, lookup = await self._load_tools(agent, per_request_allowed_tools)
+        all_tools = self._merge_caller_tools(agent_tools, caller_tools)
+        require_approval = _resolve_require_approval(
+            agent.require_approval, require_approval_override
+        )
+        # Resolve tool_choice precedence: per-request body > agent default.
+        body_tool_choice = request_options.get("tool_choice")
+        tool_choice = (
+            body_tool_choice if body_tool_choice is not None else agent.tool_choice_default
+        )
+        loop_messages = _ensure_system_prompt(messages, agent.system_prompt)
+        # Apply request_defaults from the agent (caller body wins).
+        defaults = agent.request_defaults or {}
+        merged_options: dict[str, Any] = {**defaults, **request_options}
+        for key in ("tool_choice", "tools", "messages", "model", "stream"):
+            merged_options.pop(key, None)
+        return _LoopSetup(
+            agent_chain=agent_chain,
+            lookup=lookup,
+            all_tools=all_tools,
+            require_approval=require_approval,
+            tool_choice=tool_choice,
+            loop_messages=loop_messages,
+            merged_options=merged_options,
+            agent_id=agent.id,
+            root_id=current_root_request_id.get(),
+            base_model=agent.base_model_id or agent.profile_id or "",
+            max_tool_hops=agent.max_tool_hops,
+        )
+
+    def _build_hop_body(
+        self, setup: _LoopSetup, loop_messages: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Cuerpo (no-stream) de un hop del LLM."""
+        body: dict[str, Any] = {
+            **setup.merged_options,
+            "model": setup.base_model,
+            "messages": loop_messages,
+            "stream": False,
+        }
+        if setup.all_tools:
+            body["tools"] = setup.all_tools
+            body["tool_choice"] = setup.tool_choice
+        return body
+
+    async def _record_hop(
+        self,
+        setup: _LoopSetup,
+        response: dict[str, Any],
+        *,
+        started: datetime,
+        t_hop_start: float,
+    ) -> _HopOutcome:
+        """Persiste la estadística del hop y extrae el mensaje del asistente."""
+        duration_ms = int((time.monotonic() - t_hop_start) * 1000)
+        usage = (response or {}).get("usage") or {}
+        await _persist_hop_request_stat(
+            agent_id=setup.agent_id,
+            parent_request_id=setup.root_id,
+            base_model_id=setup.base_model,
+            duration_ms=duration_ms,
+            input_tokens=usage.get("prompt_tokens"),
+            output_tokens=usage.get("completion_tokens"),
+            status_code=200,
+            error_message=None,
+            started_at=started,
+        )
+        assistant_msg = _extract_message(response) or {}
+        return _HopOutcome(
+            response=response,
+            assistant_msg=assistant_msg,
+            tool_calls=assistant_msg.get("tool_calls") or [],
+            usage=usage,
+            content_text=assistant_msg.get("content") or "",
+            finish_reason=_finish_reason(response),
+        )
+
+    def _classify_terminal(self, setup: _LoopSetup, outcome: _HopOutcome, hop: int) -> str:
+        """Decide qué hacer tras un hop: terminar o ejecutar herramientas.
+
+        Devuelve ``"no_tools"``, ``"hop_limit"``, ``"approval"`` o ``"execute"``.
+        El mismo árbol de decisión que tenían ``run`` y ``run_stream``.
+        """
+        if not outcome.tool_calls:
+            return "no_tools"
+        if hop >= setup.max_tool_hops:
+            return "hop_limit"
+        if setup.require_approval == REQUIRE_APPROVAL_ALWAYS:
+            return "approval"
+        return "execute"
+
+    def _build_tool_tasks(
+        self,
+        setup: _LoopSetup,
+        outcome: _HopOutcome,
+        hop: int,
+        *,
+        worker: WorkerInvoker,
+        per_request_headers: dict[str, str] | None,
+        user_ctx: UserContext,
+        per_request_allowed_tools: list[str] | None,
+        tool_timeout_seconds: float,
+    ) -> list[Awaitable[tuple[dict[str, Any], ToolCallRecord]]]:
+        """Coroutines que ejecutan en paralelo los ``tool_calls`` de un hop."""
+        sem = asyncio.Semaphore(self._max_concurrency)
+        return [
+            self._invoke_tool(
+                tool_call=tc,
+                lookup=setup.lookup,
+                timeout_seconds=float(tool_timeout_seconds),
+                per_request_headers=per_request_headers,
+                hop_index=hop,
+                vision_capable=worker.vision_capable,
+                sem=sem,
+                user_ctx=user_ctx,
+                agent_chain=setup.agent_chain,
+                per_request_allowed_tools=per_request_allowed_tools,
+            )
+            for tc in outcome.tool_calls
+        ]
+
     # ── Public API: non-streaming ────────────────────────────
 
     async def run(
@@ -917,61 +1088,25 @@ class AgentExecutor:
         _agent_chain: tuple[uuid.UUID, ...] | None = None,
     ) -> AgentExecutorResult:
         """Execute the tool-loop until either no tool_calls remain or hop cap."""
-        agent_chain = (*(_agent_chain or ()), agent.id)
-
-        agent_tools, lookup = await self._load_tools(agent, per_request_allowed_tools)
-        all_tools = self._merge_caller_tools(agent_tools, caller_tools)
-
-        require_approval = _resolve_require_approval(
-            agent.require_approval, require_approval_override
+        setup = await self._prepare_loop(
+            agent,
+            messages,
+            request_options,
+            per_request_allowed_tools=per_request_allowed_tools,
+            caller_tools=caller_tools,
+            require_approval_override=require_approval_override,
+            agent_chain_prefix=_agent_chain,
         )
-
-        # Resolve tool_choice precedence: per-request body > agent default.
-        body_tool_choice = request_options.get("tool_choice")
-        tool_choice = (
-            body_tool_choice if body_tool_choice is not None else agent.tool_choice_default
-        )
-
-        loop_messages = _ensure_system_prompt(messages, agent.system_prompt)
-
-        # Detect handshake continuation: when the agent is `always` and the
-        # client has just sent tool results, we *skip* re-emitting them and
-        # let the LLM continue from where it left off.
-        # No-op here; the messages already contain the role=tool turns.
-
-        # Apply request_defaults from the agent (caller body wins).
-        defaults = agent.request_defaults or {}
-        merged_options: dict[str, Any] = {**defaults, **request_options}
-        merged_options.pop("tool_choice", None)  # we set it explicitly below
-        merged_options.pop("tools", None)
-        merged_options.pop("messages", None)
-        merged_options.pop("model", None)
-        merged_options.pop("stream", None)
-
-        agent_id = agent.id
-        root_id = current_root_request_id.get()
+        loop_messages = setup.loop_messages
         records: list[ToolCallRecord] = []
         last_response: dict[str, Any] | None = None
-
-        last_role = _last_message_role(loop_messages)
-        # When require_approval=always and the last message is `role=tool`,
-        # the client is continuing a previous handshake — proceed normally.
-        del last_role  # documentation only
 
         # Hold the worker busy for the entire loop (LLM hops + tool execution)
         # so the idle eviction watchdog cannot desalojate the model between
         # hops. See ProfileWorkerInvoker.acquire_run_lease.
         async with worker.acquire_run_lease():
             for hop in range(agent.max_tool_hops + 1):
-                body = {
-                    **merged_options,
-                    "model": agent.base_model_id or agent.profile_id or "",
-                    "messages": loop_messages,
-                    "stream": False,
-                }
-                if all_tools:
-                    body["tools"] = all_tools
-                    body["tool_choice"] = tool_choice
+                body = self._build_hop_body(setup, loop_messages)
                 t_hop_start = time.monotonic()
                 started = datetime.now(UTC)
                 try:
@@ -979,50 +1114,23 @@ class AgentExecutor:
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("agent_executor_worker_error", error=str(exc))
                     raise
-                duration_ms = int((time.monotonic() - t_hop_start) * 1000)
-                usage = (response or {}).get("usage") or {}
-                await _persist_hop_request_stat(
-                    agent_id=agent_id,
-                    parent_request_id=root_id,
-                    base_model_id=str(body["model"]),
-                    duration_ms=duration_ms,
-                    input_tokens=usage.get("prompt_tokens"),
-                    output_tokens=usage.get("completion_tokens"),
-                    status_code=200,
-                    error_message=None,
-                    started_at=started,
+                outcome = await self._record_hop(
+                    setup, response, started=started, t_hop_start=t_hop_start
                 )
                 last_response = response
 
-                assistant_msg = _extract_message(response) or {}
-                tool_calls = assistant_msg.get("tool_calls") or []
-                finish_reason = _finish_reason(response)
-
                 # Always append the assistant turn so subsequent hops see it.
-                loop_messages = [*loop_messages, assistant_msg]
+                loop_messages = [*loop_messages, outcome.assistant_msg]
 
-                if not tool_calls or finish_reason in (None, "stop", "length", "content_filter"):
-                    if not tool_calls:
-                        return AgentExecutorResult(
-                            openai_response=response,
-                            hops_used=hop,
-                            tool_calls=records,
-                        )
-
-                if hop >= agent.max_tool_hops:
+                terminal = self._classify_terminal(setup, outcome, hop)
+                if terminal == "hop_limit":
                     # Hop budget exhausted — return whatever the LLM said with a hint.
                     response.setdefault("choices", [{}])
                     if response["choices"]:
                         response["choices"][0]["finish_reason"] = "tool_hop_limit"
-                    return AgentExecutorResult(
-                        openai_response=response,
-                        hops_used=hop,
-                        tool_calls=records,
-                    )
-
-                if require_approval == REQUIRE_APPROVAL_ALWAYS:
-                    # Two-turn handshake: hand the unresolved tool_calls back to
-                    # the caller and stop.
+                if terminal != "execute":
+                    # no_tools, hop_limit and approval all stop here with the
+                    # current response and collected records.
                     return AgentExecutorResult(
                         openai_response=response,
                         hops_used=hop,
@@ -1030,29 +1138,23 @@ class AgentExecutor:
                     )
 
                 # Execute tool_calls in parallel (auto mode).
-                sem = asyncio.Semaphore(self._max_concurrency)
-                tasks = [
-                    self._invoke_tool(
-                        tool_call=tc,
-                        lookup=lookup,
-                        timeout_seconds=float(agent.tool_timeout_seconds),
-                        per_request_headers=per_request_headers,
-                        hop_index=hop,
-                        vision_capable=worker.vision_capable,
-                        sem=sem,
-                        user_ctx=user_ctx,
-                        agent_chain=agent_chain,
-                        per_request_allowed_tools=per_request_allowed_tools,
-                    )
-                    for tc in tool_calls
-                ]
+                tasks = self._build_tool_tasks(
+                    setup,
+                    outcome,
+                    hop,
+                    worker=worker,
+                    per_request_headers=per_request_headers,
+                    user_ctx=user_ctx,
+                    per_request_allowed_tools=per_request_allowed_tools,
+                    tool_timeout_seconds=agent.tool_timeout_seconds,
+                )
                 results = await asyncio.gather(*tasks, return_exceptions=False)
                 for tool_msg, record in results:
                     loop_messages.append(tool_msg)
                     records.append(record)
                 await _persist_tool_call_stats(
-                    agent_id=agent_id,
-                    request_stat_id=root_id,
+                    agent_id=setup.agent_id,
+                    request_stat_id=setup.root_id,
                     records=[r for _, r in results],
                 )
 
@@ -1103,28 +1205,20 @@ class AgentExecutor:
         ignore those frames; the standard ``data:`` chunks remain valid
         OpenAI-compat output.
         """
-        agent_chain = (*(_agent_chain or ()), agent.id)
-        agent_tools, lookup = await self._load_tools(agent, per_request_allowed_tools)
-        all_tools = self._merge_caller_tools(agent_tools, caller_tools)
-        require_approval = _resolve_require_approval(
-            agent.require_approval, require_approval_override
+        setup = await self._prepare_loop(
+            agent,
+            messages,
+            request_options,
+            per_request_allowed_tools=per_request_allowed_tools,
+            caller_tools=caller_tools,
+            require_approval_override=require_approval_override,
+            agent_chain_prefix=_agent_chain,
         )
-        body_tool_choice = request_options.get("tool_choice")
-        tool_choice = (
-            body_tool_choice if body_tool_choice is not None else agent.tool_choice_default
-        )
-        loop_messages = _ensure_system_prompt(messages, agent.system_prompt)
-        defaults = agent.request_defaults or {}
-        merged_options: dict[str, Any] = {**defaults, **request_options}
-        for key in ("tool_choice", "tools", "messages", "model", "stream"):
-            merged_options.pop(key, None)
-
-        agent_id = agent.id
-        root_id = current_root_request_id.get()
+        loop_messages = setup.loop_messages
+        base_model = setup.base_model
 
         request_id = f"chatcmpl-agent-{uuid.uuid4().hex[:24]}"
         created_ts = int(time.time())
-        base_model = agent.base_model_id or agent.profile_id or ""
 
         # Hold the worker busy for the whole streaming run (LLM hops + tool
         # execution + keepalives) so the idle eviction watchdog cannot
@@ -1132,40 +1226,21 @@ class AgentExecutor:
         # ProfileWorkerInvoker.acquire_run_lease.
         async with worker.acquire_run_lease():
             for hop in range(agent.max_tool_hops + 1):
-                body: dict[str, Any] = {
-                    **merged_options,
-                    "model": base_model,
-                    "messages": loop_messages,
-                    "stream": False,
-                }
-                if all_tools:
-                    body["tools"] = all_tools
-                    body["tool_choice"] = tool_choice
-
+                body = self._build_hop_body(setup, loop_messages)
                 t_hop_start = time.monotonic()
                 started = datetime.now(UTC)
                 response = await worker.forward(body)
-                duration_ms = int((time.monotonic() - t_hop_start) * 1000)
-                usage = (response or {}).get("usage") or {}
-                await _persist_hop_request_stat(
-                    agent_id=agent_id,
-                    parent_request_id=root_id,
-                    base_model_id=base_model,
-                    duration_ms=duration_ms,
-                    input_tokens=usage.get("prompt_tokens"),
-                    output_tokens=usage.get("completion_tokens"),
-                    status_code=200,
-                    error_message=None,
-                    started_at=started,
+                outcome = await self._record_hop(
+                    setup, response, started=started, t_hop_start=t_hop_start
                 )
+                tool_calls = outcome.tool_calls
+                content_text = outcome.content_text
+                usage = outcome.usage
 
-                assistant_msg = _extract_message(response) or {}
-                tool_calls = assistant_msg.get("tool_calls") or []
-                content_text = assistant_msg.get("content") or ""
+                loop_messages = [*loop_messages, outcome.assistant_msg]
 
-                loop_messages = [*loop_messages, assistant_msg]
-
-                if not tool_calls:
+                terminal = self._classify_terminal(setup, outcome, hop)
+                if terminal == "no_tools":
                     # Final hop: emit the content as a single delta chunk + final.
                     yield _sse_chunk(
                         {
@@ -1201,7 +1276,7 @@ class AgentExecutor:
                     yield b"data: [DONE]\n\n"
                     return
 
-                if hop >= agent.max_tool_hops:
+                if terminal == "hop_limit":
                     yield _sse_chunk(
                         {
                             "id": request_id,
@@ -1242,7 +1317,7 @@ class AgentExecutor:
                     }
                 )
 
-                if require_approval == REQUIRE_APPROVAL_ALWAYS:
+                if terminal == "approval":
                     yield _sse_chunk(
                         {
                             "id": request_id,
@@ -1269,22 +1344,16 @@ class AgentExecutor:
                             },
                         )
 
-                sem = asyncio.Semaphore(self._max_concurrency)
-                tasks = [
-                    self._invoke_tool(
-                        tool_call=tc,
-                        lookup=lookup,
-                        timeout_seconds=float(agent.tool_timeout_seconds),
-                        per_request_headers=per_request_headers,
-                        hop_index=hop,
-                        vision_capable=worker.vision_capable,
-                        sem=sem,
-                        user_ctx=user_ctx,
-                        agent_chain=agent_chain,
-                        per_request_allowed_tools=per_request_allowed_tools,
-                    )
-                    for tc in tool_calls
-                ]
+                tasks = self._build_tool_tasks(
+                    setup,
+                    outcome,
+                    hop,
+                    worker=worker,
+                    per_request_headers=per_request_headers,
+                    user_ctx=user_ctx,
+                    per_request_allowed_tools=per_request_allowed_tools,
+                    tool_timeout_seconds=agent.tool_timeout_seconds,
+                )
                 # Subagent calls and slow MCP tools can keep gather() blocked for
                 # tens of seconds while the SSE stream emits nothing, which makes
                 # proxies and browsers drop the connection ("network error" in the
@@ -1347,8 +1416,8 @@ class AgentExecutor:
                         },
                     )
                 await _persist_tool_call_stats(
-                    agent_id=agent_id,
-                    request_stat_id=root_id,
+                    agent_id=setup.agent_id,
+                    request_stat_id=setup.root_id,
                     records=[r for _, r in results],
                 )
 
