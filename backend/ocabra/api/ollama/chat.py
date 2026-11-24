@@ -40,6 +40,7 @@ from ocabra.api.openai._deps import (
     resolve_profile,
     to_backend_body,
 )
+from ocabra.api.openai._schemas import OllamaChatRequest, validate_body
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.federation import note_federation_fallback
@@ -97,7 +98,11 @@ async def chat(
     out during reasoning before any answer was written; don't render that
     as-is, retry with a bigger budget. See docs/API.md.
     """
-    body = await read_json_object(request)
+    # Permissive early validation (REF-11/BUG-18): a missing ``model`` or a
+    # ``messages`` that is not a list is a clear 422 (rendered as Ollama's
+    # ``{"error": "..."}`` by main.py); ``options``/``think``/``tools``/…
+    # pass through untouched. ``messages`` may be absent (model-load call).
+    body = validate_body(OllamaChatRequest, await read_json_object(request))
     ollama_model = str(body.get("model", ""))
     stream = bool(body.get("stream", True))
 

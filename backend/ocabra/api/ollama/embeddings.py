@@ -24,6 +24,7 @@ from ocabra.api.openai._deps import (
     resolve_profile,
     to_backend_body,
 )
+from ocabra.api.openai._schemas import OllamaEmbedRequest, validate_body
 from ocabra.api.openai.embeddings import _truncate_and_renormalize
 from ocabra.core.federation import note_federation_fallback
 from ocabra.core.privacy import preview as privacy_preview
@@ -45,6 +46,9 @@ async def _run_embeddings(
     user: UserContext,
 ) -> dict:
     """Shared logic for /api/embeddings and /api/embed."""
+    # Permissive early validation (REF-11/BUG-18): a missing ``model`` is a
+    # clear 422; ``input``/``prompt`` may be absent and extras pass through.
+    body = validate_body(OllamaEmbedRequest, body)
     ollama_model = str(body.get("model", ""))
 
     model_manager = get_model_manager(request)

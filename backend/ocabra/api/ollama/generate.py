@@ -31,6 +31,7 @@ from ocabra.api.openai._deps import (
     resolve_profile,
     to_backend_body,
 )
+from ocabra.api.openai._schemas import OllamaGenerateRequest, validate_body
 from ocabra.config import settings
 from ocabra.core.fair_slot_gate import KVCapacityError
 from ocabra.core.federation import note_federation_fallback
@@ -69,7 +70,10 @@ async def generate(
     Request fields include model, prompt, stream, and options.
     Streaming responses are returned as NDJSON lines.
     """
-    body = await read_json_object(request)
+    # Permissive early validation (REF-11/BUG-18): a missing ``model`` or a
+    # non-string ``prompt`` is a clear 422; ``prompt`` may be absent (an Ollama
+    # model-load call) and every other field passes through untouched.
+    body = validate_body(OllamaGenerateRequest, await read_json_object(request))
     ollama_model = str(body.get("model", ""))
     stream = bool(body.get("stream", True))
 
