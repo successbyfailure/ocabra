@@ -137,6 +137,8 @@ def harness(monkeypatch):
     monkeypatch.setattr("ocabra.core.secrets_box.rotate_stored_secrets", AsyncMock())
     monkeypatch.setattr(main_mod, "_scan_and_register_trtllm_engines", AsyncMock())
 
+    # The lifespan references the periodic loops through the
+    # ocabra.maintenance_loops module, so patch them there.
     for loop_name in (
         "_idle_eviction_loop",
         "_schedule_maintenance_loop",
@@ -145,7 +147,7 @@ def harness(monkeypatch):
         "_image_outputs_cleanup_loop",
         "_ollama_inventory_loop",
     ):
-        h.fake_loop("ocabra.main", loop_name)
+        h.fake_loop("ocabra.maintenance_loops", loop_name)
     h.fake_loop("ocabra.core.files_retention", "retention_loop")
 
     async def _updater_run(stop):
