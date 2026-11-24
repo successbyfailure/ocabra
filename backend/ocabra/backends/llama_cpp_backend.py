@@ -368,7 +368,16 @@ class LlamaCppBackend(BackendInterface):
             return None
 
         breakdown = {g: dict(parts) for g, parts in projection.gpus.items()}
+        host_extras: dict[str, int] = {}
+        # The draft and LoRA adapters go where llama.cpp puts its main device:
+        # --main-gpu is an index into the visible devices. Counting them on the
+        # first visible GPU hid 1.1 GB of MTP draft on the 3090 of
+        # qwen3.8-flash-next-coder (main_gpu 1): the preview showed it fitting
+        # and every load died allocating the draft's KV (2026-11-24).
         main = visible[0] if visible else None
+        main_index = self._to_int_or_none(options.get("main_gpu"))
+        if main_index is not None and 0 <= main_index < len(visible):
+            main = visible[main_index]
         extras: dict[str, int] = {}
         speculative = options.get("speculative")
         if isinstance(speculative, dict) and speculative.get("spec_type") and main is not None:
@@ -388,6 +397,14 @@ class LlamaCppBackend(BackendInterface):
                     extras["draft"] += int(Path(draft_path).stat().st_size / 1048576)  # noqa: ASYNC240 — stat, microsegundos
                 except OSError:
                     pass
+            elif draft_path is not None:
+                # --cpu-moe-draft: the draft's experts stay in RAM, which
+                # llama-fit-params (it only sees the main model) leaves out.
+                from ocabra.core.gguf_reader import read_gguf_header
+
+                header = read_gguf_header(draft_path)
+                if header is not None and header.expert_mb_by_layer:
+                    host_extras["draft"] = int(sum(header.expert_mb_by_layer.values()))
         # LoRA adapters: llama-fit-params ignores --lora (its projection is the
         # same with and without one), and llama.cpp keeps them in VRAM next to
         # the weights they modify.
@@ -430,8 +447,8 @@ class LlamaCppBackend(BackendInterface):
             "vram_by_gpu": {g: sum(p.values()) for g, p in breakdown.items()},
             "vram_breakdown_by_gpu": breakdown,
             "estimated_vram_mb": sum(sum(p.values()) for p in breakdown.values()),
-            "host_mb": projection.host_mb,
-            "host_breakdown": dict(projection.host),
+            "host_mb": projection.host_mb + sum(host_extras.values()),
+            "host_breakdown": {**dict(projection.host), **host_extras},
             "context_tokens": int(options.get("ctx_size") or 0),
             "gpu_indices": list(visible),
         }

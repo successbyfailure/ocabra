@@ -175,3 +175,35 @@ def test_calibration_offset_follows_real_loads():
     assert lf.record_measurement(f, 0, 3058, 4416) == 0
     assert lf.calibration_offset_mb(f, 0) == 0
     lf._offsets.clear()
+
+
+@pytest.mark.asyncio
+async def test_the_draft_is_counted_on_the_main_gpu(tmp_path, monkeypatch):
+    """--main-gpu 1 puts the MTP draft on the second visible card; counting it
+    on the first made a config that does not fit look like it did."""
+    from types import SimpleNamespace
+
+    from ocabra.backends.llama_cpp_backend import LlamaCppBackend
+    from ocabra.core import llama_fit
+
+    modelo = tmp_path / "m.gguf"
+    modelo.write_bytes(b"GGUF" * 16)
+    backend = LlamaCppBackend()
+    monkeypatch.setattr(backend, "_resolve_model_file", lambda *a: modelo)
+    monkeypatch.setattr(backend, "_get_binary_path", lambda *a: "/bin/llama-server")
+    monkeypatch.setattr(
+        llama_fit,
+        "project",
+        AsyncMock(return_value=SimpleNamespace(gpus={0: {"weights": 8000}, 1: {"weights": 20000}}, host={}, host_mb=0)),
+    )
+    extra = {
+        "llama_cpp": {
+            "main_gpu": 1,
+            "tensor_split": [14, 34],
+            "parallel_slots": 2,
+            "speculative": {"spec_type": "draft-mtp", "draft_cpu_moe": True},
+        }
+    }
+    out = await backend.project_memory("m", [0, 1], extra)
+    assert "draft" in out["vram_breakdown_by_gpu"][1]
+    assert "draft" not in out["vram_breakdown_by_gpu"][0]

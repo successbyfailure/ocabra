@@ -1440,11 +1440,14 @@ async def _preview_host(state: Any, materialized: dict, estimate: dict) -> dict 
     mlock = bool(settings.llama_cpp_mlock if mlock_opt is None else mlock_opt)
     model_file = section.get("model_path")
     file_mb = await asyncio.to_thread(host_memory.file_mb, model_file)
+    lookup_mb = await asyncio.to_thread(host_memory.lookup_tables_mb, model_file)
     projected = int(estimate.get("host_ram_mb") or estimate.get("cpu_mb") or 0)
     if not projected and not mlock:
         need = 0
     else:
-        need = host_memory.llama_ram_need_mb(projected, model_file_mb=file_mb, mlock=mlock)
+        need = host_memory.llama_ram_need_mb(
+            projected, model_file_mb=file_mb, mlock=mlock, lookup_mb=lookup_mb
+        )
     own = 0
     if (
         getattr(state, "status", None) is not None

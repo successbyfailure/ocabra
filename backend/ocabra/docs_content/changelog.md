@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.135.2 — 2026-11-24
+
+### Arreglos
+
+- **`qwen3.8-flash-next-coder:iq1_m` respondía 503 a todas las peticiones.**
+  No cabía en la 3090: con 128k de contexto y el borrador MTP en la tarjeta
+  principal, cada carga moría al reservar memoria. Ahora arranca con 80k de
+  contexto (el prompt más largo que ha recibido fueron 64k), se reparte
+  siempre entre las dos GPU y oCabra reserva lo que de verdad ocupa
+  (32,5 GB), así que hace sitio antes de cargarlo.
+
+**Acción:** ninguna. Si mandabas prompts de más de 80k a este modelo, ahora
+recibirás un error de contexto en lugar de un 503.
+
+---
+
 ## 0.135.0 — 2026-11-24
 
 ### Cambiado

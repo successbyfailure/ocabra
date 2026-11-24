@@ -371,6 +371,9 @@ async def plan_setup(
         model_file_mb=host_memory.file_mb(
             section.get("model_path") if isinstance(section, dict) else None
         ),
+        lookup_mb=host_memory.lookup_tables_mb(
+            section.get("model_path") if isinstance(section, dict) else None
+        ),
     )
     return plan
 
@@ -512,7 +515,9 @@ async def _plan_setup(
     return plan
 
 
-def warn_ram(plan: SetupPlan, *, mlock: bool = False, model_file_mb: int = 0) -> None:
+def warn_ram(
+    plan: SetupPlan, *, mlock: bool = False, model_file_mb: int = 0, lookup_mb: int = 0
+) -> None:
     """Flag rungs whose RAM share does not fit in what this host has free.
 
     Against MemAvailable (reclaimable cache counts as free), keeping
@@ -529,7 +534,9 @@ def warn_ram(plan: SetupPlan, *, mlock: bool = False, model_file_mb: int = 0) ->
     for rung in plan.rungs:
         if not rung.host_mb and not mlock:
             continue
-        need = host_memory.llama_ram_need_mb(rung.host_mb, model_file_mb=model_file_mb, mlock=mlock)
+        need = host_memory.llama_ram_need_mb(
+            rung.host_mb, model_file_mb=model_file_mb, mlock=mlock, lookup_mb=lookup_mb
+        )
         if need + host_memory.RAM_MARGIN_MB <= free:
             continue
         text = (

@@ -17,6 +17,7 @@ reclaimable: the whole file is pinned.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 #: Kept free for the OS, other processes and the worker's own growth.
@@ -72,14 +73,51 @@ def file_mb(path: str | os.PathLike[str] | None) -> int:
         return 0
 
 
-def llama_ram_need_mb(host_projection_mb: int, *, model_file_mb: int, mlock: bool) -> int:
+_SPLIT_PART = re.compile(r"^(?P<stem>.+)-(?P<no>\d{5})-of-(?P<count>\d{5})\.gguf$")
+
+
+def lookup_tables_mb(path: str | os.PathLike[str] | None) -> int:
+    """MiB of row-lookup tables (token embeddings, per-layer embeddings) in a
+    GGUF, across every part of a split one: they live in host RAM but a token
+    reads a few KB of them, so they need not be resident (see
+    ``gguf_reader._LOOKUP_TENSOR``). qwen3.8-flash-next-coder keeps a 27 GB
+    per-layer table in the second part; counting it as resident made the
+    editor say the model did not fit the node's RAM (2026-11-24).
+    """
+    if not path:
+        return 0
+    from ocabra.core.gguf_reader import read_gguf_header
+
+    first = Path(path)
+    match = _SPLIT_PART.match(first.name)
+    if match:
+        count = int(match.group("count"))
+        parts = [
+            first.with_name(f"{match.group('stem')}-{i:05d}-of-{count:05d}.gguf")
+            for i in range(1, count + 1)
+        ]
+    else:
+        parts = [first]
+    total = 0.0
+    for part in parts:
+        header = read_gguf_header(part)
+        if header is not None:
+            total += header.lookup_mb
+    return int(total)
+
+
+def llama_ram_need_mb(
+    host_projection_mb: int, *, model_file_mb: int, mlock: bool, lookup_mb: int = 0
+) -> int:
     """RAM a llama.cpp load must keep resident.
 
     ``host_projection_mb``: what llama-fit-params puts on the CPU side. With
     ``--mlock`` the whole mapped file is pinned on top of the host buffers
     that are not file-backed (those are small: KV and compute stay on GPU).
+    Without it, ``lookup_mb`` of row-lookup tables (``lookup_tables_mb``)
+    inside that CPU side is paged in on demand and does not count.
     """
     need = max(0, int(host_projection_mb))
     if mlock and model_file_mb:
-        need = max(need, int(model_file_mb))
-    return need
+        return max(need, int(model_file_mb))
+    return max(0, need - max(0, int(lookup_mb)))

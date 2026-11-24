@@ -56,6 +56,11 @@ _GGUF_MAX_ARRAY_CAPTURE = 4096
 # (LLM_FFN_EXPS_REGEX, ``\.ffn_(up|down|gate|gate_up)_(ch|)exps``). The shared
 # expert (``ffn_*_shexp``) is not one of them and stays on the GPU.
 _EXPERT_TENSOR = re.compile(r"^blk\.(\d+)\.ffn_(?:up|down|gate|gate_up)_(?:ch|)exps")
+# Tables only ever read by row (get_rows): the token embeddings and, in
+# per-layer-embedding models (qwen4exp, gemma3n), one row per token per layer.
+# llama.cpp keeps them in host RAM, but a token touches a few KB of them, so
+# they do not need to be resident: the mapping pages in what is read.
+_LOOKUP_TENSOR = re.compile(r"^(?:per_layer_)?token_embd\.weight$")
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,8 @@ class GgufHeader:
     array_lengths: dict[str, int]
     tensor_names: tuple[str, ...]
     expert_mb_by_layer: dict[int, float]
+    #: MiB of row-lookup tables (see ``_LOOKUP_TENSOR``) in this file.
+    lookup_mb: float = 0.0
 
 
 def _gguf_read(f, fmt: str):
@@ -110,6 +117,7 @@ def _parse(path: str) -> GgufHeader:
     array_lengths: dict[str, int] = {}
     tensor_names: list[str] = []
     experts: dict[int, float] = {}
+    lookup_mb = 0.0
     with open(path, "rb") as f:
         if f.read(4) != _GGUF_MAGIC:
             raise ValueError("not a GGUF file")
@@ -147,13 +155,17 @@ def _parse(path: str) -> GgufHeader:
                 return GgufHeader(metadata, array_lengths, (), {})
             ordered = sorted(entries)
             for i, (offset, name) in enumerate(ordered):
+                end = ordered[i + 1][0] if i + 1 < len(ordered) else data_size
+                size_mb = max(0, end - offset) / (1024 * 1024)
+                if _LOOKUP_TENSOR.match(name):
+                    lookup_mb += size_mb
+                    continue
                 match = _EXPERT_TENSOR.match(name)
                 if not match:
                     continue
-                end = ordered[i + 1][0] if i + 1 < len(ordered) else data_size
                 layer = int(match.group(1))
-                experts[layer] = experts.get(layer, 0.0) + max(0, end - offset) / (1024 * 1024)
-    return GgufHeader(metadata, array_lengths, tuple(tensor_names), experts)
+                experts[layer] = experts.get(layer, 0.0) + size_mb
+    return GgufHeader(metadata, array_lengths, tuple(tensor_names), experts, lookup_mb)
 
 
 @functools.lru_cache(maxsize=256)

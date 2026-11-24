@@ -329,11 +329,15 @@ class ContextProbeService:
         mlock_opt = section.get("mlock")
         mlock = bool(settings.llama_cpp_mlock if mlock_opt is None else mlock_opt)
         file_mb = host_memory.file_mb(model_file)
+        lookup_mb = host_memory.lookup_tables_mb(model_file)
         mem = host_memory.read_host_memory()
 
         def ram_need(proj: dict | None) -> int:
             return host_memory.llama_ram_need_mb(
-                int((proj or {}).get("host_mb") or 0), model_file_mb=file_mb, mlock=mlock
+                int((proj or {}).get("host_mb") or 0),
+                model_file_mb=file_mb,
+                mlock=mlock,
+                lookup_mb=lookup_mb,
             )
 
         if mem and ram_need(first_proj) + host_memory.RAM_MARGIN_MB > mem["available_mb"]:
