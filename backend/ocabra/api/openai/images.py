@@ -171,6 +171,30 @@ def _build_public_url(request: Request, name: str) -> str:
     return f"{base}/v1/images/files/{name}"
 
 
+# REF-01 fase C: ``/v1/images/generations`` y ``/v1/images/edits`` se quedan
+# INLINE a propósito (no pasan por ``core/inference/pipeline.run_request``). El
+# prefijo común —federación, resolve+ACL+router por ``image_generation`` /
+# ``image_editing`` y ``check_capability``— sí coincide con el motor, pero el
+# DESPACHO diverge del paso fijo del motor en cuatro puntos independientes, y
+# forzarlo cambiaría el comportamiento observable:
+#   1. worker_key = ``compute_worker_key(base, load_overrides)``, no
+#      ``state.model_id`` (diffusers no tiene peldaños de contexto en la clave).
+#   2. El cuerpo al worker es una traducción propia (OpenAI ``n``/``size``/
+#      ``quality`` → ``num_images``/``width``/``height``/``num_inference_steps``)
+#      despachada a ``/generate`` y ``/edit``, no ``to_backend_body(merged)`` a
+#      ``/v1/images/*``.
+#   3. Admisión por ``EndpointInflight`` (toma el slot ya abierto y lo mantiene
+#      "en vuelo" bajo el worker_key para que el bucle de evicción por ociosidad
+#      no descargue el modelo a mitad de una generación de minutos), no la reja
+#      de reparto justo ni ``admission_kwargs`` del motor.
+#   4. Cabeceras por ``build_model_status_headers(pre_status, elapsed_ms)`` con
+#      el ``pre_status`` tomado DESPUÉS de resolver (mide la generación), no el
+#      ``ocabra_response_headers`` del motor (que mide el cold-start real vía
+#      ``_snapshot_pre_load``, un valor distinto).
+# Meterlo por el motor exigiría cuatro seams específicos de imagen en un
+# ``pipeline.py`` compartido (lo editan otras sesiones) sin ganancia neta. La
+# desconexión (matriz: N) tampoco se añade: el worker de diffusers hace una
+# llamada /generate bloqueante sin cancelación verificada.
 @router.post("/images/generations", summary="Create image", responses=NON_STREAMING_LOAD_RESPONSE_DOC)
 async def image_generations(
     request: Request,
