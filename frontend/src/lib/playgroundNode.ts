@@ -5,6 +5,7 @@
  * compare the same model on two nodes. Kept per tab.
  */
 import { useSyncExternalStore } from "react"
+import { httpFetch } from "@/api/http"
 
 const KEY = "ocabra.playgroundNode"
 const listeners = new Set<() => void>()
@@ -38,11 +39,15 @@ export function usePlaygroundNode(): string {
   )
 }
 
-/** ``fetch`` that adds ``X-Ocabra-Node`` when a node is chosen. */
+/**
+ * ``httpFetch`` (capa HTTP única: enrutado al nodo remoto + 401) que además
+ * añade ``X-Ocabra-Node`` cuando se ha elegido un nodo del Playground. Acepta
+ * ``init.signal`` para poder cancelar la petición (botón Detener).
+ */
 export function playgroundFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const node = getPlaygroundNode()
-  if (node === "auto") return fetch(input, init)
+  if (node === "auto") return httpFetch(input, init)
   const headers = new Headers(init.headers)
   headers.set("X-Ocabra-Node", node)
-  return fetch(input, { ...init, headers })
+  return httpFetch(input, { ...init, headers })
 }

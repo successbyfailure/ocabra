@@ -99,6 +99,8 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
   // Voice metadata from worker
   const [voiceInfo, setVoiceInfo] = useState<VoiceInfo | null>(null)
 
+  const abortRef = useRef<AbortController | null>(null)
+  const stopRequest = () => abortRef.current?.abort()
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const refRecorderRef = useRef<MediaRecorder | null>(null)
@@ -154,6 +156,8 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
     if (!modelId) return toast.error("Selecciona un modelo")
     if (!audioBlob) return toast.error("Sube o graba un audio primero")
     setRunningTranscription(true)
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
       const form = new FormData()
       form.append("file", audioBlob, "audio.webm")
@@ -161,7 +165,11 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
       form.append("response_format", params.responseFormat)
       form.append("temperature", String(params.temperature))
 
-      const response = await playgroundFetch("/v1/audio/transcriptions", { method: "POST", body: form })
+      const response = await playgroundFetch("/v1/audio/transcriptions", {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      })
       if (!response.ok) {
         const err = await response.json().catch(() => ({}))
         const msg = err?.error?.message ?? err?.detail?.error?.message ?? (typeof err?.detail === "string" ? err.detail : null) ?? `HTTP ${response.status}`
@@ -184,8 +192,13 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
         )
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Error en transcripcion")
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+        toast.info("Transcripción detenida")
+      } else {
+        toast.error(err instanceof Error ? err.message : "Error en transcripcion")
+      }
     } finally {
+      abortRef.current = null
       setRunningTranscription(false)
     }
   }
@@ -223,6 +236,8 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
     if (!modelId) return toast.error("Selecciona un modelo")
     if (!ttsText.trim()) return
     setRunningTTS(true)
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
       const body: Record<string, unknown> = {
         model: modelId,
@@ -254,6 +269,7 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal: controller.signal,
       })
       if (!response.ok) {
         const err = await response.json().catch(() => ({}))
@@ -265,8 +281,13 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
       setTtsAudioUrl(URL.createObjectURL(blob))
       toast.success("TTS generado")
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Error generando TTS")
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+        toast.info("Generación detenida")
+      } else {
+        toast.error(err instanceof Error ? err.message : "Error generando TTS")
+      }
     } finally {
+      abortRef.current = null
       setRunningTTS(false)
     }
   }
@@ -302,6 +323,12 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
                   setAudioBlob(file)
                 }} />
             </label>
+            {runningTranscription && (
+              <button type="button" onClick={stopRequest}
+                className="rounded-md border border-rose-500/50 bg-rose-500/15 px-3 py-2 text-sm font-medium text-rose-100 hover:bg-rose-500/25">
+                Detener
+              </button>
+            )}
             <button type="button" onClick={() => void transcribe()}
               disabled={runningTranscription || !modelId}
               className="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50">
@@ -434,11 +461,19 @@ export function AudioInterface({ modelId, params, canTranscribe = true, canTTS =
             </div>
           )}
 
-          <button type="button" onClick={() => void generateTTS()}
-            disabled={runningTTS || !modelId}
-            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50">
-            {runningTTS ? "Generando..." : "Generar TTS"}
-          </button>
+          <div className="flex items-center gap-2">
+            {runningTTS && (
+              <button type="button" onClick={stopRequest}
+                className="rounded-md border border-rose-500/50 bg-rose-500/15 px-4 py-2 text-sm font-medium text-rose-100 hover:bg-rose-500/25">
+                Detener
+              </button>
+            )}
+            <button type="button" onClick={() => void generateTTS()}
+              disabled={runningTTS || !modelId}
+              className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50">
+              {runningTTS ? "Generando..." : "Generar TTS"}
+            </button>
+          </div>
 
           {ttsAudioUrl && <audio controls src={ttsAudioUrl} className="w-full" />}
         </section>

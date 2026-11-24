@@ -1,4 +1,4 @@
-import { remotePath } from "@/lib/remoteNode"
+import { httpFetch } from "@/api/http"
 import { useEffect, useState, useCallback } from "react"
 import { Save, Zap, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
@@ -23,7 +23,7 @@ function GPUPowerCard({ gpu, isAdmin }: { gpu: GPUState; isAdmin: boolean }) {
 
   const fetchLimits = useCallback(async () => {
     try {
-      const resp = await fetch(remotePath(`/ocabra/gpus/${gpu.index}/power-limits`), { credentials: "include" })
+      const resp = await httpFetch(`/ocabra/gpus/${gpu.index}/power-limits`, { credentials: "include" })
       if (resp.ok) {
         const data: PowerLimits = await resp.json()
         setLimits(data)
@@ -37,7 +37,7 @@ function GPUPowerCard({ gpu, isAdmin }: { gpu: GPUState; isAdmin: boolean }) {
   const applyPowerLimit = async () => {
     setSaving(true)
     try {
-      const resp = await fetch(remotePath(`/ocabra/gpus/${gpu.index}/power`), {
+      const resp = await httpFetch(`/ocabra/gpus/${gpu.index}/power`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -61,7 +61,7 @@ function GPUPowerCard({ gpu, isAdmin }: { gpu: GPUState; isAdmin: boolean }) {
   const resetDefault = async () => {
     setSaving(true)
     try {
-      const resp = await fetch(remotePath(`/ocabra/gpus/${gpu.index}/power`), {
+      const resp = await httpFetch(`/ocabra/gpus/${gpu.index}/power`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         credentials: "include",

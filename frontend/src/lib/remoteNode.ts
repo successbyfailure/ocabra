@@ -59,44 +59,8 @@ export const REMOTE_HIDDEN_ROUTES = new Set([
   "/settings",
 ])
 
-function rewriteUrl(url: string, node: RemoteNode): string {
-  if (url.startsWith("/")) return remotePath(url, node)
-  try {
-    const u = new URL(url)
-    if (u.origin !== window.location.origin) return url
-    return `${u.origin}${remotePath(u.pathname, node)}${u.search}${u.hash}`
-  } catch {
-    return url
-  }
-}
-
-let installed = false
-
-/**
- * In remote mode, send *every* ``fetch`` and ``EventSource`` of the UI to the
- * remote node, not only the ones made through ``api/client.ts``: pages with
- * their own fetch helpers (MCP, agents), the Playground and the SSE streams
- * used to talk to this server instead, so e.g. the MCP page of a pod listed
- * ours. ``remotePath`` is idempotent, so calls already rewritten pass as is.
- */
-export function installRemoteRouting(node: RemoteNode | null = getRemoteNode()): void {
-  if (!node || installed || typeof window === "undefined") return
-  installed = true
-  const target: RemoteNode = node
-  const nativeFetch = window.fetch.bind(window)
-  window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-    if (typeof input === "string") return nativeFetch(rewriteUrl(input, node), init)
-    if (input instanceof URL) return nativeFetch(rewriteUrl(input.toString(), node), init)
-    const url = rewriteUrl(input.url, node)
-    return nativeFetch(url === input.url ? input : new Request(url, input), init)
-  }
-  const NativeEventSource = window.EventSource
-  if (NativeEventSource) {
-    class RemoteEventSource extends NativeEventSource {
-      constructor(url: string | URL, config?: EventSourceInit) {
-        super(rewriteUrl(url.toString(), target), config)
-      }
-    }
-    window.EventSource = RemoteEventSource as typeof EventSource
-  }
-}
+// El enrutado al nodo remoto ya no se hace parcheando ``window.fetch`` /
+// ``EventSource`` globalmente: toda la UI pasa por la capa HTTP única
+// (``api/http.ts``), que aplica ``remotePath`` a cada ruta, y los pocos
+// ``EventSource`` construyen su URL con ``sseUrl`` (que también llama a
+// ``remotePath``). Ver REF-14.

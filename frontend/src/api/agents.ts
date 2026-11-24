@@ -1,5 +1,6 @@
 // Typed client for /ocabra/agents.
 
+import { request } from "@/api/http"
 import type {
   Agent,
   AgentCreate,
@@ -11,28 +12,10 @@ import type {
   ToolCallsData,
 } from "@/types/agents"
 
-const BASE = ""
-
 type AnyRecord = Record<string, unknown>
 
 function isRecord(value: unknown): value is AnyRecord {
   return typeof value === "object" && value !== null
-}
-
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    const error = new Error(err.detail ?? res.statusText) as Error & { status?: number }
-    error.status = res.status
-    throw error
-  }
-  if (res.status === 204) return undefined as T
-  return res.json() as Promise<T>
 }
 
 function buildQuery(params: Record<string, string | number | undefined>): string {

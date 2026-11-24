@@ -2,7 +2,7 @@
 // Stream 1-D fills in the method implementations.
 // Streams 4-A/B/C/D consume this client.
 
-import { remotePath } from "@/lib/remoteNode";
+import { extractErrorMessage, httpFetch, request, sseUrl } from "@/api/http";
 import type {
   ContextProbeJob,
   BackendType,
@@ -89,7 +89,10 @@ import type {
   BenchmarkSchedule,
   BenchmarkScheduleInput,
 } from "@/types";
-import { useAuthStore } from "@/stores/authStore";
+
+// request/httpFetch/sseUrl/extractErrorMessage ahora viven en @/api/http.
+// Se reexporta ``request`` porque varios módulos lo importan desde aquí.
+export { request };
 
 const BASE = "";
 
@@ -1768,57 +1771,6 @@ function toFederationTestResult(raw: unknown): FederationTestResult {
   };
 }
 
-// FastAPI's HTTPException(detail=...) always wraps the response as
-// {"detail": <value>}. oCabra's own /ocabra/* endpoints raise with a plain
-// string detail, but the OpenAI-compatible /v1/* endpoints (batches, files,
-// chat, ...) raise with detail={"error": {"message": ...}} to match the
-// OpenAI error shape — unwrap both so callers never do `new Error(object)`
-// (which renders as the literal string "[object Object]" in a toast).
-function extractErrorMessage(err: unknown): string | undefined {
-  if (!isRecord(err)) return undefined;
-  const detail = err.detail;
-  if (typeof detail === "string") return detail;
-  // /ocabra/* validation errors: {"detail": {"message": ..., "errors": [...]}}
-  if (isRecord(detail) && typeof detail.message === "string") return detail.message;
-  if (
-    isRecord(detail) &&
-    isRecord(detail.error) &&
-    typeof detail.error.message === "string"
-  ) {
-    return detail.error.message;
-  }
-  if (isRecord(err.error) && typeof err.error.message === "string")
-    return err.error.message;
-  return undefined;
-}
-
-export async function request<T>(
-  method: string,
-  path: string,
-  body?: unknown,
-): Promise<T> {
-  const res = await fetch(`${BASE}${remotePath(path)}`, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    // Session gone → clear user so ProtectedRoute redirects to /login and
-    // the dashboard's setInterval polls unmount instead of looping on 401.
-    // Skip for /ocabra/auth/* so a failed login attempt doesn't nuke an
-    // already-null user and the login form keeps its own error flow.
-    if (res.status === 401 && !path.startsWith("/ocabra/auth/")) {
-      useAuthStore.getState().setUser(null);
-    }
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(extractErrorMessage(err) ?? res.statusText);
-  }
-  if (res.status === 204) {
-    return undefined as T;
-  }
-  return res.json() as Promise<T>;
-}
-
 function buildQuery(
   params: Record<string, string | number | boolean | undefined>,
 ): string {
@@ -2637,16 +2589,13 @@ export const api = {
     ): Promise<ModelProfile> => {
       const form = new FormData();
       form.append("file", file);
-      const res = await fetch(
-        `${BASE}${remotePath(`/ocabra/profiles/${encodeURIComponent(profileId)}/assets`)}`,
-        {
-          method: "POST",
-          body: form,
-        },
+      const res = await httpFetch(
+        `/ocabra/profiles/${encodeURIComponent(profileId)}/assets`,
+        { method: "POST", body: form },
       );
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail ?? res.statusText);
+        throw new Error(extractErrorMessage(err) ?? res.statusText);
       }
       const json = (await res.json()) as Record<string, unknown>;
       return toModelProfile(json.profile);
@@ -2761,7 +2710,7 @@ export const api = {
         `/ocabra/downloads?status=${encodeURIComponent(status)}`,
       ),
     streamProgress: (jobId: string): EventSource =>
-      new EventSource(`/ocabra/downloads/${encodeURIComponent(jobId)}/stream`),
+      new EventSource(sseUrl(`/ocabra/downloads/${encodeURIComponent(jobId)}/stream`)),
   },
 
   registry: {
@@ -2984,10 +2933,7 @@ export const api = {
       const form = new FormData();
       form.append("file", file);
       form.append("purpose", purpose);
-      const res = await fetch(`${BASE}${remotePath("/v1/files")}`, {
-        method: "POST",
-        body: form,
-      });
+      const res = await httpFetch("/v1/files", { method: "POST", body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(extractErrorMessage(err) ?? res.statusText);
@@ -3135,7 +3081,7 @@ export const api = {
     ): EventSource => {
       const qs = new URLSearchParams({ method });
       return new EventSource(
-        `/ocabra/backends/${encodeURIComponent(backendType)}/install?${qs.toString()}`,
+        sseUrl(`/ocabra/backends/${encodeURIComponent(backendType)}/install?${qs.toString()}`),
       );
     },
     uninstall: async (
@@ -3148,12 +3094,10 @@ export const api = {
       return raw ? toBackendModuleState(raw) : null;
     },
     logs: async (backendType: string): Promise<string> => {
-      const res = await fetch(
-        `${BASE}${remotePath(`/ocabra/backends/${encodeURIComponent(backendType)}/logs`)}`,
-      );
+      const res = await httpFetch(`/ocabra/backends/${encodeURIComponent(backendType)}/logs`);
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail ?? res.statusText);
+        throw new Error(extractErrorMessage(err) ?? res.statusText);
       }
       return res.text();
     },
@@ -3287,7 +3231,7 @@ export const api = {
         ),
       ),
     streamUrl: (jobId: string): string =>
-      `/ocabra/trtllm/compile/${encodeURIComponent(jobId)}/stream`,
+      sseUrl(`/ocabra/trtllm/compile/${encodeURIComponent(jobId)}/stream`),
     deleteEngine: async (engineName: string): Promise<void> => {
       await request<unknown>(
         "DELETE",

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { AlertCircle, Loader2, RefreshCw } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { httpFetch } from "@/api/http"
 import type { ModelProfile, OpenAIImageModelMapEntry, OpenAITTSVoiceMapEntry } from "@/types"
 
 const OPENAI_TTS_MODELS = ["tts-1", "tts-1-hd", "gpt-4o-mini-tts"]
@@ -84,7 +85,7 @@ export function OpenAICompat() {
     const key = `${model}:${voice}`
     setProbes((prev) => ({ ...prev, [key]: { state: "loading" } }))
     try {
-      const res = await fetch(
+      const res = await httpFetch(
         `/v1/audio/voices?model=${encodeURIComponent(model)}&voice=${encodeURIComponent(voice)}`,
       )
       if (!res.ok) throw new Error(`HTTP ${res.status}`)

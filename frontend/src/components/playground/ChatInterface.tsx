@@ -106,6 +106,10 @@ export function ChatInterface({
   const recorderChunksRef = useRef<Blob[]>([])
   const recorderStartRef = useRef<number>(0)
   const recorderStreamRef = useRef<MediaStream | null>(null)
+  // Aborts the in-flight chat request when the user hits "Detener".
+  const abortRef = useRef<AbortController | null>(null)
+
+  const stopGeneration = () => abortRef.current?.abort()
 
   useEffect(() => {
     return () => {
@@ -266,6 +270,8 @@ export function ChatInterface({
     setMessages((prev) => [...prev, userMessage])
     setInput("")
     setSending(true)
+    const controller = new AbortController()
+    abortRef.current = controller
     const assistantId = `msg-${Date.now()}-assistant`
     try {
       const useOllama = backendType === "ollama"
@@ -312,6 +318,7 @@ export function ChatInterface({
         // standards-clean stream.
         headers: { "Content-Type": "application/json", "X-Ocabra-Stream-Events": "true" },
         body: requestBody,
+        signal: controller.signal,
       })
       if (!response.ok) {
         const err = await response.json().catch(() => ({}))
@@ -351,8 +358,8 @@ export function ChatInterface({
           }
         : await readOpenAIChatStream(response, onPatch)
 
-      if (!useOllama && isEmptyResponseContent(responseContent)) {
-        responseContent = await retryOpenAINonStreaming(requestBody)
+      if (!useOllama && isEmptyResponseContent(responseContent) && !controller.signal.aborted) {
+        responseContent = await retryOpenAINonStreaming(requestBody, controller.signal)
       }
 
       setMessages((prev) =>
@@ -365,9 +372,22 @@ export function ChatInterface({
       setDragImage(null)
       setAudioAttachment(null)
     } catch (err) {
-      setMessages((prev) => prev.filter((msg) => msg.id !== assistantId))
-      toast.error(err instanceof Error ? err.message : "Error en chat")
+      // User hit "Detener": keep whatever streamed so far, no error toast.
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantId && !(msg.content || msg.reasoning || (msg.toolCalls?.length ?? 0))
+              ? { ...msg, content: "_(detenido)_" }
+              : msg,
+          ),
+        )
+        toast.info("Generación detenida")
+      } else {
+        setMessages((prev) => prev.filter((msg) => msg.id !== assistantId))
+        toast.error(err instanceof Error ? err.message : "Error en chat")
+      }
     } finally {
+      abortRef.current = null
       setSending(false)
       setStreamingMessageId(null)
     }
@@ -636,6 +656,16 @@ export function ChatInterface({
             {modelId && !sending && (estimate || estimateLoading) && (
               <EtaBadge estimate={estimate} loading={estimateLoading} />
             )}
+            {sending && (
+              <button
+                type="button"
+                onClick={stopGeneration}
+                className="inline-flex items-center gap-2 rounded-md border border-rose-500/50 bg-rose-500/15 px-4 py-2.5 text-sm font-medium text-rose-100 hover:bg-rose-500/25"
+              >
+                <X size={14} />
+                Detener
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void sendMessage()}
@@ -676,13 +706,17 @@ export function ChatInterface({
   )
 }
 
-async function retryOpenAINonStreaming(requestBody: string): Promise<ResponseContent> {
+async function retryOpenAINonStreaming(
+  requestBody: string,
+  signal?: AbortSignal,
+): Promise<ResponseContent> {
   const parsedBody = JSON.parse(requestBody) as Record<string, unknown>
   const retryBody = JSON.stringify({ ...parsedBody, stream: false })
   const response = await playgroundFetch("/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: retryBody,
+    signal,
   })
   if (!response.ok) {
     return {

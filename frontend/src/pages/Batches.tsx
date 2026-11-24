@@ -16,6 +16,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
+import { httpFetch } from "@/api/http"
 import type { BatchEndpoint, BatchStatus, OpenAIBatchJob } from "@/types"
 
 const ENDPOINTS: { value: BatchEndpoint; label: string }[] = [
@@ -790,7 +791,7 @@ function BatchDetailModal({ batch, onClose }: { batch: OpenAIBatchJob; onClose: 
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const loadFile = async (fileId: string): Promise<BatchLineResult[]> => {
-    const res = await fetch(api.batches.fileContentUrl(fileId))
+    const res = await httpFetch(api.batches.fileContentUrl(fileId))
     if (!res.ok) throw new Error(`No se pudo descargar ${fileId}`)
     const text = await res.text()
     return text

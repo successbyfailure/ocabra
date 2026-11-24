@@ -102,6 +102,8 @@ export function ImageInterface({
   const [strength, setStrength] = useState(0.75)
   const [results, setResults] = useState<ImageResult[]>([])
   const [generating, setGenerating] = useState(false)
+  const abortRef = useRef<AbortController | null>(null)
+  const stopGeneration = () => abortRef.current?.abort()
 
   // Edit-mode inputs — hasta 3 imágenes de referencia en modelos que lo
   // soportan (Qwen-Image-Edit-Plus). El primer slot es la imagen principal.
@@ -214,6 +216,8 @@ export function ImageInterface({
 
     const perImageSeed = seed
     setGenerating(true)
+    const controller = new AbortController()
+    abortRef.current = controller
     const t0 = performance.now()
     try {
       let response: Response
@@ -221,6 +225,7 @@ export function ImageInterface({
         response = await playgroundFetch("/v1/images/generations", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
           body: JSON.stringify({
             model: modelId,
             prompt: prompt.trim(),
@@ -253,7 +258,11 @@ export function ImageInterface({
           }
         }
         if (maskFile) fd.append("mask", maskFile, maskFile.name)
-        response = await playgroundFetch("/v1/images/edits", { method: "POST", body: fd })
+        response = await playgroundFetch("/v1/images/edits", {
+          method: "POST",
+          body: fd,
+          signal: controller.signal,
+        })
       }
 
       if (!response.ok) {
@@ -292,8 +301,13 @@ export function ImageInterface({
           : `${next.length} imagen(es) generada(s) en ${(durationMs / 1000).toFixed(1)}s (${params.responseFormat})`,
       )
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Error procesando imagen")
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+        toast.info("Generación detenida")
+      } else {
+        toast.error(err instanceof Error ? err.message : "Error procesando imagen")
+      }
     } finally {
+      abortRef.current = null
       setGenerating(false)
     }
   }
@@ -566,6 +580,15 @@ export function ImageInterface({
           <Shuffle size={14} />
           Random
         </button>
+        {generating && (
+          <button
+            type="button"
+            onClick={stopGeneration}
+            className="rounded-md border border-rose-500/50 bg-rose-500/15 px-4 py-2 text-sm font-medium text-rose-100 hover:bg-rose-500/25"
+          >
+            Detener
+          </button>
+        )}
         <button
           type="button"
           onClick={() => void submit()}

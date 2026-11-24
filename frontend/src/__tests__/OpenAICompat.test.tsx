@@ -128,7 +128,9 @@ describe("OpenAICompat", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Verificar" })[0])
 
     await waitFor(() => expect(screen.getByText("→ es_MX-claude-high")).toBeTruthy())
-    expect(fetch).toHaveBeenCalledWith("/v1/audio/voices?model=tts-1&voice=alloy")
+    // Ahora pasa por la capa HTTP única (httpFetch), que siempre invoca
+    // fetch(path, init); el probe sigue yendo a la misma URL.
+    expect(fetch).toHaveBeenCalledWith("/v1/audio/voices?model=tts-1&voice=alloy", {})
   })
 
   it("pins an OpenAI image model name to an image router", async () => {
