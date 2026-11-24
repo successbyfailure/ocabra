@@ -23,17 +23,25 @@ from ocabra.core.vram_planner import (
     arch_from_gguf,
     arch_from_hf_config,
     arch_from_ollama_model_info,
+    kv_dtype_bytes_for_cache_type,
 )
 
 _MB = 1024 * 1024
 
+# kv_dtype label -> (vLLM kv_cache_dtype | None, llama.cpp cache type). The
+# bytes/KV element are not kept here: they come from the single source in
+# vram_planner (KV_CACHE_TYPE_BYTES) keyed by the llama.cpp cache type (DUP-02).
+_KV_DTYPE_TARGETS: dict[str, tuple[str | None, str]] = {
+    "fp16": (None, "f16"),
+    "bf16": (None, "f16"),
+    "fp8": ("fp8", "q8_0"),
+    "q8": (None, "q8_0"),
+    "q4": (None, "q4_0"),
+}
 # kv_dtype label -> (bytes/KV element, vLLM kv_cache_dtype | None, llama.cpp cache type)
 KV_DTYPES: dict[str, tuple[float, str | None, str]] = {
-    "fp16": (2.0, None, "f16"),
-    "bf16": (2.0, None, "f16"),
-    "fp8": (1.0, "fp8", "q8_0"),
-    "q8": (1.0, None, "q8_0"),
-    "q4": (0.5, None, "q4_0"),
+    label: (kv_dtype_bytes_for_cache_type(llama_ct), vllm_kv, llama_ct)
+    for label, (vllm_kv, llama_ct) in _KV_DTYPE_TARGETS.items()
 }
 
 

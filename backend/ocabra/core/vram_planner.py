@@ -126,6 +126,21 @@ def kv_dtype_bytes_for_cache_type(cache_type: str | None) -> float:
     return KV_CACHE_TYPE_BYTES.get(str(cache_type).lower(), 2.0)
 
 
+#: Friendlier UI/preset aliases -> the canonical llama.cpp ``--cache-type`` spelling.
+_CACHE_TYPE_ALIASES = {"q8": "q8_0", "q4": "q4_0", "fp16": "f16"}
+
+
+def normalize_cache_type_alias(value: object) -> str:
+    """Canonical llama.cpp cache-type spelling for a configured value.
+
+    ``None``/empty becomes ``f16`` (the default); the friendlier aliases
+    ``q8``/``q4``/``fp16`` map to ``q8_0``/``q4_0``/``f16``; anything else is
+    passed through lowercased. Single source so the curve-key normalization and
+    any other caller can't drift apart (DUP-02)."""
+    text = str(value or "f16").lower()
+    return _CACHE_TYPE_ALIASES.get(text, text)
+
+
 def rs_cache_vram_mb(arch: ModelArch, slots: int = 1, rollback_snapshots: int = 0) -> float:
     """VRAM (MiB) for the hybrid SSM recurrent-state cache ("rs cache") across
     ``slots`` concurrent sequences. 0 for non-hybrid architectures.

@@ -28,6 +28,7 @@ from typing import Any
 
 import structlog
 
+from ocabra.core.vram_planner import normalize_cache_type_alias
 from ocabra.redis_client import get_key, set_key
 
 logger = structlog.get_logger(__name__)
@@ -184,8 +185,7 @@ _CURVE_KEY_OPTIONS = (
 
 
 def _norm_cache_type(value: Any) -> str:
-    text = str(value or "f16").lower()
-    return {"q8": "q8_0", "q4": "q4_0", "fp16": "f16"}.get(text, text)
+    return normalize_cache_type_alias(value)
 
 
 def curve_key(llama: dict[str, Any] | None, gpus: list[int] | None) -> str:

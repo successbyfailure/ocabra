@@ -90,13 +90,7 @@ def estimate_bitnet_vram_from_config(
                 or extra.get("cache_type_v")
                 or "f16"
             ).lower()
-            kv_dtype_bytes = {
-                "q8_0": 1.0,
-                "q8": 1.0,
-                "q4_0": 0.5,
-                "q4_1": 0.5,
-                "q4": 0.5,
-            }.get(cache_type, 2.0)
+            kv_dtype_bytes = kv_dtype_bytes_for_cache_type(cache_type)
             estimate = plan_llama_cpp_vram_mb(
                 arch,
                 file_size_mb,
