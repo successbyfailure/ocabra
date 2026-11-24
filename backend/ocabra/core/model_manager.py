@@ -147,7 +147,6 @@ def _request_attribution(user) -> dict:
 
 
 class ModelStatus(str, Enum):
-    DISCOVERED = "discovered"
     CONFIGURED = "configured"
     LOADING = "loading"
     LOADED = "loaded"
