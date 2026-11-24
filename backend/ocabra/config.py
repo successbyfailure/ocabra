@@ -502,6 +502,24 @@ class Settings(BaseSettings):
     # as a gap — 2026-10-26: this was hardcoded to 30s while the real
     # interval was 60s, silently halving every coverage/activity/kWh figure.
     gpu_stats_expected_interval_s: int = 90
+
+    # Stats retention (stats/retention.py). No stats table had retention and
+    # they only grow (gpu_stats ~708k rows, server_stats ~304k, request_stats
+    # ~161k since 2026-03-12 when this was added). The periodic prune is OFF by
+    # default on purpose: enabling it on first boot would silently delete
+    # months of history before the operator has seen the knob. Turn it on from
+    # Settings once the horizons below look right. Per-table max age in days
+    # (0 = keep forever); request_stats is kept far longer than the
+    # high-frequency gpu/server samples. Pruning is batched, async and
+    # non-blocking; it never touches data the migration added, only old rows.
+    stats_retention_enabled: bool = False
+    stats_retention_request_stats_days: int = 365
+    stats_retention_gpu_stats_days: int = 90
+    stats_retention_server_stats_days: int = 90
+    # How often the prune runs (seconds) and how many rows each batched DELETE
+    # removes before committing and yielding.
+    stats_retention_interval_s: int = 86400
+    stats_retention_batch_size: int = 10000
     # 11.1: Proactive VRAM eviction threshold (fraction 0.0-1.0).
     # When used VRAM exceeds this fraction, the VRAM watchdog evicts LRU
     # models. Default 0.96 — vLLM is configured per-model with

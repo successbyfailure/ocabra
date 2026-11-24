@@ -14,8 +14,8 @@ import sqlalchemy as sa
 
 from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
-from ocabra.db.stats import GpuStat, ModelLoadStat, RequestStat, ServerStat
-from ocabra.stats.cost_calculator import estimate_cost_for_rows
+from ocabra.db.stats import RequestStat
+from ocabra.stats.cost_calculator import classify_model_tier, estimate_request_cost
 
 _WORKER_HASH_RE = re.compile(r"::[0-9a-f]{12}$")
 
@@ -157,8 +157,269 @@ def _percentile(data: list[int], p: float) -> int:
     return data[min(idx, len(data) - 1)]
 
 
-def _truncate_minute(dt: datetime) -> datetime:
-    return dt.replace(second=0, microsecond=0)
+# --- SQL aggregation helpers (REF-12) ------------------------------------
+# These let the aggregator compute totals in PostgreSQL instead of pulling
+# every ORM row into Python (161k request_stats rows and growing). The
+# expressions reproduce, result for result, the semantics the old row-by-row
+# code had:
+#   * ``GREATEST(COALESCE(x, 0), 0)`` for the ``max(0, int(x or 0))`` guards;
+#   * an error predicate that treats ``NULL`` and the empty string as "no
+#     error" (Python truthiness of ``r.error``);
+#   * ``percentile_disc(p)`` which is the exact SQL equivalent of
+#     ``_percentile`` — both pick the nearest rank with ``ceil(p*n)``.
+# ``date_trunc('minute', started_at)`` keeps the column's ``timestamptz`` type
+# so asyncpg returns a UTC-aware datetime whose ``.isoformat()`` carries the
+# ``+00:00`` offset, matching the old ``_truncate_minute(...).isoformat()``.
+
+
+def _dur() -> sa.ColumnElement:
+    """``max(0, int(duration_ms or 0))`` in SQL."""
+    return sa.func.greatest(sa.func.coalesce(RequestStat.duration_ms, 0), 0)
+
+
+def _pos(col: sa.ColumnElement) -> sa.ColumnElement:
+    """``max(0, int(col or 0))`` in SQL (non-negative integer column)."""
+    return sa.func.greatest(sa.func.coalesce(col, 0), 0)
+
+
+def _is_error_sql(*, exclude_429: bool = False) -> sa.ColumnElement:
+    """Mirror ``r.error or (status_code is not None and status_code >= 400)``.
+
+    ``r.error`` is Python-truthy only for a non-empty string, so an empty
+    string counts as no error. With ``exclude_429`` the admission back-pressure
+    status is kept out of the *status* branch (but an explicit error message on
+    a 429 still counts, exactly as the old code did).
+    """
+    status = sa.and_(RequestStat.status_code.is_not(None), RequestStat.status_code >= 400)
+    if exclude_429:
+        status = sa.and_(status, RequestStat.status_code != 429)
+    return sa.or_(sa.and_(RequestStat.error.is_not(None), RequestStat.error != ""), status)
+
+
+def _tokenized_sql() -> sa.ColumnElement:
+    """Mirror ``(input_tokens or 0) > 0 or (output_tokens or 0) > 0``."""
+    return sa.or_(
+        sa.func.coalesce(RequestStat.input_tokens, 0) > 0,
+        sa.func.coalesce(RequestStat.output_tokens, 0) > 0,
+    )
+
+
+def _cost_from_token_groups(groups) -> float:
+    """Reference USD cost from token sums grouped by what sets the price tier.
+
+    ``classify_model_tier`` depends only on ``(model_id, backend_type,
+    request_kind)`` and ``estimate_request_cost`` is linear in the token
+    counts, so summing tokens per that triple in SQL and costing each group
+    gives the same total as costing every row (``estimate_cost_for_rows``) —
+    without loading the rows. ``groups`` yields
+    ``(model_id, backend_type, request_kind, input_sum, output_sum)``.
+    """
+    total = 0.0
+    for model_id, backend_type, request_kind, in_sum, out_sum in groups:
+        tier = classify_model_tier(model_id, backend_type, request_kind)
+        total += estimate_request_cost(int(in_sum or 0), int(out_sum or 0), tier)
+    return total
+
+
+async def _cost_by_entity(session, entity_col, window) -> dict:
+    """USD cost per entity, grouped in SQL by the cost-tier triple.
+
+    Returns ``{entity_value: cost}``. ``window`` is the list of WHERE clauses
+    (time range plus any ``isnot(None)`` guard the caller already applies).
+    """
+    rows = (
+        await session.execute(
+            sa.select(
+                entity_col,
+                RequestStat.model_id,
+                RequestStat.backend_type,
+                RequestStat.request_kind,
+                sa.func.sum(_pos(RequestStat.input_tokens)),
+                sa.func.sum(_pos(RequestStat.output_tokens)),
+            )
+            .where(*window)
+            .group_by(
+                entity_col,
+                RequestStat.model_id,
+                RequestStat.backend_type,
+                RequestStat.request_kind,
+            )
+        )
+    ).all()
+    by_entity: dict = defaultdict(list)
+    for entity, model_id, backend_type, request_kind, in_sum, out_sum in rows:
+        by_entity[entity].append((model_id, backend_type, request_kind, in_sum, out_sum))
+    return {entity: _cost_from_token_groups(groups) for entity, groups in by_entity.items()}
+
+
+async def _cost_total(session, window) -> float:
+    """Total reference USD cost over a window, grouped by the cost-tier triple."""
+    rows = (
+        await session.execute(
+            sa.select(
+                RequestStat.model_id,
+                RequestStat.backend_type,
+                RequestStat.request_kind,
+                sa.func.sum(_pos(RequestStat.input_tokens)),
+                sa.func.sum(_pos(RequestStat.output_tokens)),
+            )
+            .where(*window)
+            .group_by(RequestStat.model_id, RequestStat.backend_type, RequestStat.request_kind)
+        )
+    ).all()
+    return _cost_from_token_groups(rows)
+
+
+# Raw-SQL fragments used by the text() queries in get_performance_stats. Error
+# predicate includes 429 (that function's error count does, unlike
+# get_request_stats). ``error <> ''`` reproduces Python truthiness.
+_IS_ERROR_SQL = (
+    "((error IS NOT NULL AND error <> '') OR (status_code IS NOT NULL AND status_code >= 400))"
+)
+
+
+def _telemetry_sql(key: str) -> str:
+    """One integer out of ``runtime_telemetry`` JSONB, like ``_telemetry_int``.
+
+    Only accepts JSON numbers and truncates toward zero (``int(float)``),
+    yielding NULL for a missing key or a non-numeric value.
+    """
+    return (
+        f"CASE WHEN jsonb_typeof(runtime_telemetry -> '{key}') = 'number' "
+        f"THEN trunc((runtime_telemetry ->> '{key}')::double precision)::bigint END"
+    )
+
+
+def _json_num(key: str) -> str:
+    """Positive numeric ``work_size_meta`` field, else 0 — like ``_work_amount``."""
+    return (
+        f"CASE WHEN jsonb_typeof(work_size_meta -> '{key}') = 'number' "
+        f"AND (work_size_meta ->> '{key}')::double precision > 0 "
+        f"THEN (work_size_meta ->> '{key}')::double precision ELSE 0 END"
+    )
+
+
+# (field name, per-row amount SQL) for every ``field`` referenced by
+# _WORK_SPEEDS. Token fields read a column; the rest a JSONB numeric.
+_WORK_SPEED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("audio_seconds", _json_num("audio_seconds")),
+    ("text_chars", _json_num("text_chars")),
+    ("n_inputs", _json_num("n_inputs")),
+    ("input_tokens", "GREATEST(COALESCE(input_tokens, 0), 0)"),
+    ("n_documents", _json_num("n_documents")),
+    ("n_images", _json_num("n_images")),
+    ("input_frames", _json_num("input_frames")),
+    ("model_mp", _json_num("model_mp")),
+    ("output_tokens", "GREATEST(COALESCE(output_tokens, 0), 0)"),
+)
+
+
+def _work_speeds_sql(where: str) -> str:
+    """Per ``(model_id, request_kind)`` work/time/count for each work field.
+
+    ``ms`` and ``success`` match ``work_speeds``: wall time minus the load and
+    queue telemetry, and a non-error, non-4xx response.
+    """
+    ms = (
+        f"GREATEST(0, COALESCE(duration_ms, 0) - COALESCE({_telemetry_sql('load_ms')}, 0) "
+        f"- COALESCE({_telemetry_sql('queue_ms')}, 0))"
+    )
+    base_cols = [
+        "model_id",
+        "request_kind",
+        "((error IS NULL OR error = '') AND (status_code IS NULL OR status_code < 400)) AS success",
+        f"{ms} AS ms",
+    ]
+    base_cols += [f"{amount} AS amt_{name}" for name, amount in _WORK_SPEED_FIELDS]
+    agg_cols: list[str] = []
+    for name, _amount in _WORK_SPEED_FIELDS:
+        cond = f"success AND amt_{name} > 0 AND ms > 0"
+        agg_cols.append(f"COALESCE(SUM(amt_{name}) FILTER (WHERE {cond}), 0) AS w_{name}")
+        agg_cols.append(f"COALESCE(SUM(ms) FILTER (WHERE {cond}), 0) AS ms_{name}")
+        agg_cols.append(f"COUNT(*) FILTER (WHERE {cond}) AS n_{name}")
+    return f"""
+        WITH base AS (
+            SELECT {", ".join(base_cols)}
+            FROM request_stats
+            WHERE {where}
+        )
+        SELECT model_id, request_kind, {", ".join(agg_cols)}
+        FROM base
+        GROUP BY model_id, request_kind
+    """
+
+
+async def _summary_by(session, window, key_col, key_name: str, default: str) -> list[dict]:
+    """``_summarize`` groups (totalRequests/errorRate/avgLatency/p95) in SQL.
+
+    Grouped by ``COALESCE(key_col, default)``; the list is sorted in Python by
+    the key (codepoint, like the old ``sorted(by_backend.items())`` / ``by_kind``)
+    rather than by a DB ``ORDER BY`` whose locale collation could reorder keys.
+    The error count includes 429 (the overview/my-stats summaries always did).
+    """
+    label = sa.func.coalesce(key_col, default)
+    rows = (
+        await session.execute(
+            sa.select(
+                label,
+                sa.func.count(),
+                sa.func.count().filter(_is_error_sql()),
+                sa.func.coalesce(sa.func.sum(_dur()), 0),
+                sa.func.percentile_disc(0.95).within_group(_dur()),
+            )
+            .where(*window)
+            .group_by(label)
+        )
+    ).all()
+    out = []
+    for key_value, g_n, g_errors, g_dur, p95 in rows:
+        g_n = int(g_n)
+        out.append(
+            {
+                key_name: key_value,
+                "totalRequests": g_n,
+                "errorRate": round(int(g_errors) / g_n, 4) if g_n else 0.0,
+                "avgLatencyMs": int(int(g_dur) / g_n) if g_n else 0,
+                "p95LatencyMs": int(p95 or 0),
+            }
+        )
+    # Sort in Python (codepoint) to match the old ``sorted(dict.items())``
+    # instead of the DB's locale collation.
+    out.sort(key=lambda d: d[key_name])
+    return out
+
+
+def _work_speeds_from_groups(
+    kind_map: dict[str, dict[str, tuple[float, float, int]]],
+    present_kinds: set[str],
+) -> list[dict]:
+    """Recombine the per-kind SQL sums into ``work_speeds``' output shape."""
+    out: list[dict] = []
+    for kinds, unit, field, rate in _WORK_SPEEDS:
+        work = 0.0
+        ms_total = 0.0
+        samples = 0
+        for k in kinds:
+            per_field = kind_map.get(k)
+            if not per_field:
+                continue
+            w, ms, n = per_field.get(field, (0.0, 0.0, 0))
+            work += w
+            ms_total += ms
+            samples += n
+        seconds = ms_total / 1000.0
+        if not samples or seconds <= 0 or work <= 0:
+            continue
+        value = work / seconds if rate else seconds / work
+        out.append(
+            {
+                "kinds": [k for k in kinds if k in present_kinds],
+                "unit": unit,
+                "value": round(value, 2),
+                "samples": samples,
+            }
+        )
+    return out
 
 
 async def get_request_stats(
@@ -175,18 +436,37 @@ async def get_request_stats(
     """
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
 
+    window = [RequestStat.started_at >= from_dt, RequestStat.started_at <= to_dt]
+    if model_id:
+        window.append(RequestStat.model_id == model_id)
+
+    minute = sa.func.date_trunc("minute", RequestStat.started_at)
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
-        )
-        if model_id:
-            q = q.where(RequestStat.model_id == model_id)
+        # Admission rejections (429) are intentional back-pressure, not
+        # failures — count them separately and keep them out of the error rate.
+        n, errors, rejections, total_dur, p50, p95 = (
+            await session.execute(
+                sa.select(
+                    sa.func.count(),
+                    sa.func.count().filter(_is_error_sql(exclude_429=True)),
+                    sa.func.count().filter(RequestStat.status_code == 429),
+                    sa.func.coalesce(sa.func.sum(_dur()), 0),
+                    sa.func.percentile_disc(0.5).within_group(_dur()),
+                    sa.func.percentile_disc(0.95).within_group(_dur()),
+                ).where(*window)
+            )
+        ).one()
+        series_rows = (
+            await session.execute(
+                sa.select(minute.label("t"), sa.func.count())
+                .where(*window)
+                .group_by(minute)
+                .order_by(minute)
+            )
+        ).all()
 
-        result = await session.execute(q)
-        rows = result.scalars().all()
-
-    if not rows:
+    n = int(n or 0)
+    if not n:
         return {
             "totalRequests": 0,
             "errorRate": 0.0,
@@ -197,34 +477,15 @@ async def get_request_stats(
             "series": [],
         }
 
-    durations = sorted(max(0, int(r.duration_ms or 0)) for r in rows)
-    # Admission rejections (429) are intentional back-pressure, not failures —
-    # count them separately and keep them out of the error rate.
-    rejections = sum(1 for r in rows if r.status_code == 429)
-    errors = sum(
-        1
-        for r in rows
-        if r.error or (r.status_code is not None and r.status_code >= 400 and r.status_code != 429)
-    )
-    n = len(rows)
-
-    per_minute: dict[datetime, int] = defaultdict(int)
-    for row in rows:
-        if row.started_at:
-            per_minute[_truncate_minute(row.started_at)] += 1
-
-    series = [
-        {"timestamp": ts.isoformat(), "count": count}
-        for ts, count in sorted(per_minute.items(), key=lambda item: item[0])
-    ]
+    series = [{"timestamp": ts.isoformat(), "count": int(count)} for ts, count in series_rows]
 
     return {
         "totalRequests": n,
-        "errorRate": round(errors / n, 4) if n else 0.0,
-        "rejections": rejections,
-        "avgDurationMs": int(sum(durations) / n),
-        "p50DurationMs": _percentile(durations, 50),
-        "p95DurationMs": _percentile(durations, 95),
+        "errorRate": round(int(errors) / n, 4),
+        "rejections": int(rejections),
+        "avgDurationMs": int(int(total_dur) / n),
+        "p50DurationMs": int(p50 or 0),
+        "p95DurationMs": int(p95 or 0),
         "series": series,
     }
 
@@ -388,72 +649,87 @@ async def get_energy_stats(
     """
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
 
-    async with AsyncSessionLocal() as session:
-        q = sa.select(GpuStat).where(
-            GpuStat.recorded_at >= from_dt,
-            GpuStat.recorded_at <= to_dt,
-        )
-        q = q.order_by(GpuStat.gpu_index, GpuStat.recorded_at)
-        result = await session.execute(q)
-        rows = result.scalars().all()
-
     from ocabra.config import settings
 
-    by_gpu: dict[int, list[GpuStat]] = {}
-    for row in rows:
-        by_gpu.setdefault(row.gpu_index, []).append(row)
+    # Integrate power over each sample's interval (its timestamp to the next
+    # one, or to the window end for the last). Unlike get_gpu_usage_stats this
+    # applies NO gap cap — the old Python code didn't either. An interval whose
+    # end is not after its start contributes nothing (gap_s > 0 filter), which
+    # matches the old ``if end <= start: continue``.
+    gpu_q = sa.text(
+        """
+        WITH ordered AS (
+            SELECT
+                gpu_index,
+                recorded_at,
+                power_draw_w,
+                LEAD(recorded_at) OVER (
+                    PARTITION BY gpu_index ORDER BY recorded_at
+                ) AS next_at
+            FROM gpu_stats
+            WHERE recorded_at BETWEEN :from_dt AND :to_dt
+        ),
+        gaps AS (
+            SELECT
+                gpu_index,
+                COALESCE(power_draw_w, 0) AS power_draw_w,
+                EXTRACT(EPOCH FROM (COALESCE(next_at, :to_dt) - recorded_at)) AS gap_s
+            FROM ordered
+        )
+        SELECT
+            gpu_index,
+            COALESCE(SUM(power_draw_w * gap_s) FILTER (WHERE gap_s > 0), 0) / 3600.0 AS energy_wh,
+            COALESCE(SUM(gap_s) FILTER (WHERE gap_s > 0), 0) AS total_seconds
+        FROM gaps
+        GROUP BY gpu_index
+        ORDER BY gpu_index
+        """
+    )
+    cpu_q = sa.text(
+        """
+        WITH ordered AS (
+            SELECT
+                recorded_at,
+                cpu_power_w,
+                LEAD(recorded_at) OVER (ORDER BY recorded_at) AS next_at
+            FROM server_stats
+            WHERE recorded_at BETWEEN :from_dt AND :to_dt
+        ),
+        gaps AS (
+            SELECT
+                COALESCE(cpu_power_w, 0) AS cpu_power_w,
+                EXTRACT(EPOCH FROM (COALESCE(next_at, :to_dt) - recorded_at)) AS gap_s
+            FROM ordered
+        )
+        SELECT
+            COALESCE(SUM(cpu_power_w * gap_s) FILTER (WHERE gap_s > 0), 0) / 3600.0 AS cpu_wh
+        FROM gaps
+        """
+    )
+    params = {"from_dt": from_dt, "to_dt": to_dt}
+
+    async with AsyncSessionLocal() as session:
+        gpu_rows = (await session.execute(gpu_q, params)).all()
+        cpu_wh = (await session.execute(cpu_q, params)).scalar() or 0.0
 
     gpu_summaries = []
     total_kwh = 0.0
-    for gpu_index, powers in by_gpu.items():
-        ordered_rows = sorted(powers, key=lambda row: row.recorded_at)
-        energy_wh = 0.0
-        total_seconds = 0.0
-        for i, row in enumerate(ordered_rows):
-            start = row.recorded_at
-            end = ordered_rows[i + 1].recorded_at if i + 1 < len(ordered_rows) else to_dt
-            if end <= start:
-                continue
-            interval_seconds = (end - start).total_seconds()
-            total_seconds += interval_seconds
-            energy_wh += float(row.power_draw_w or 0.0) * interval_seconds / 3600.0
-
+    for row in gpu_rows:
+        m = row._mapping
+        energy_wh = float(m["energy_wh"] or 0.0)
+        total_seconds = float(m["total_seconds"] or 0.0)
         kwh = energy_wh / 1000.0
         total_kwh += kwh
         avg_power_w = energy_wh / (total_seconds / 3600.0) if total_seconds else 0.0
         gpu_summaries.append(
             {
-                "gpuIndex": gpu_index,
+                "gpuIndex": int(m["gpu_index"]),
                 "totalKwh": round(kwh, 4),
                 "powerDrawW": round(avg_power_w, 1),
             }
         )
 
-    # CPU / server energy from ServerStat table
-    async with AsyncSessionLocal() as session:
-        sq = (
-            sa.select(ServerStat)
-            .where(
-                ServerStat.recorded_at >= from_dt,
-                ServerStat.recorded_at <= to_dt,
-            )
-            .order_by(ServerStat.recorded_at)
-        )
-        s_result = await session.execute(sq)
-        s_rows = s_result.scalars().all()
-
-    cpu_energy_wh = 0.0
-    if s_rows:
-        ordered_s = sorted(s_rows, key=lambda r: r.recorded_at)
-        for i, row in enumerate(ordered_s):
-            start = row.recorded_at
-            end = ordered_s[i + 1].recorded_at if i + 1 < len(ordered_s) else to_dt
-            if end <= start:
-                continue
-            interval_s = (end - start).total_seconds()
-            cpu_energy_wh += float(row.cpu_power_w or 0.0) * interval_s / 3600.0
-
-    cpu_kwh = cpu_energy_wh / 1000.0
+    cpu_kwh = float(cpu_wh) / 1000.0
     total_server_kwh = total_kwh + cpu_kwh
 
     return {
@@ -488,160 +764,216 @@ async def get_performance_stats(
     """
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
 
+    # All of the per-model aggregates below are computed in PostgreSQL instead
+    # of loading every request_stats row into Python (REF-12). The telemetry
+    # figures (ttft/queue/load) come out of the ``runtime_telemetry`` JSONB
+    # with the same truncate-towards-zero semantics as ``_telemetry_int`` via
+    # ``jsonb_typeof(...)='number'`` + ``trunc(...)``; ``percentile_disc``
+    # reproduces ``_percentile`` (nearest rank).
+    where = "started_at BETWEEN :from_dt AND :to_dt"
+    params: dict = {"from_dt": from_dt, "to_dt": to_dt}
+    if model_id:
+        where += " AND model_id = :model_id"
+        params["model_id"] = model_id
+
+    d = "GREATEST(COALESCE(duration_ms, 0), 0)"
+    tin = "GREATEST(COALESCE(input_tokens, 0), 0)"
+    tout = "GREATEST(COALESCE(output_tokens, 0), 0)"
+    eff = "CASE WHEN COALESCE(generation_ms, 0) <> 0 THEN generation_ms ELSE duration_ms END"
+    ttft = _telemetry_sql("ttft_ms")
+    queue = _telemetry_sql("queue_ms")
+    load = _telemetry_sql("load_ms")
+    engine = f"GREATEST(0, {ttft} - COALESCE({load}, 0) - COALESCE({queue}, 0))"
+    # percentile_disc ignores NULLs in its ordering input, so a CASE that maps
+    # excluded rows to NULL is the portable equivalent of FILTER on an
+    # ordered-set aggregate (FILTER + WITHIN GROUP is not universally allowed).
+    ttft_val = f"CASE WHEN {ttft} IS NOT NULL AND {ttft} >= 0 THEN {ttft} END"
+    engine_val = f"CASE WHEN {ttft} IS NOT NULL THEN {engine} END"
+    queue_val = f"CASE WHEN {queue} IS NOT NULL AND {queue} >= 0 THEN {queue} END"
+    load_val = f"CASE WHEN {load} IS NOT NULL AND {load} > 0 THEN {load} END"
+
+    perf_q = sa.text(
+        f"""
+        SELECT
+            model_id,
+            COUNT(*) AS n,
+            COUNT(*) FILTER (WHERE {_IS_ERROR_SQL}) AS errors,
+            COALESCE(SUM({d}), 0) AS total_dur,
+            COALESCE(SUM({tin}), 0) AS sum_in,
+            COALESCE(SUM({tout}), 0) AS sum_out,
+            COUNT(*) FILTER (
+                WHERE COALESCE(input_tokens, 0) > 0 OR COALESCE(output_tokens, 0) > 0
+            ) AS tokenized,
+            percentile_disc(0.95) WITHIN GROUP (ORDER BY {d}) AS p95_dur,
+            COALESCE(SUM({tout}) FILTER (WHERE ({eff}) IS NOT NULL AND ({eff}) <> 0), 0)
+                AS tokens_for_rate,
+            COALESCE(
+                SUM(GREATEST({eff}, 0)) FILTER (WHERE ({eff}) IS NOT NULL AND ({eff}) <> 0), 0
+            ) AS ms_for_rate,
+            COALESCE(SUM(COALESCE(draft_n, 0)), 0) AS draft_n_total,
+            COALESCE(SUM(COALESCE(draft_n_accepted, 0)), 0) AS draft_acc_total,
+            SUM(predicted_tokens_per_second)
+                FILTER (WHERE COALESCE(predicted_tokens_per_second, 0) <> 0) AS pred_sum,
+            COUNT(predicted_tokens_per_second)
+                FILTER (WHERE COALESCE(predicted_tokens_per_second, 0) <> 0) AS pred_n,
+            SUM(prompt_tokens_per_second)
+                FILTER (WHERE COALESCE(prompt_tokens_per_second, 0) <> 0) AS prompt_sum,
+            COUNT(prompt_tokens_per_second)
+                FILTER (WHERE COALESCE(prompt_tokens_per_second, 0) <> 0) AS prompt_n,
+            MIN(backend_type) FILTER (WHERE backend_type IS NOT NULL) AS backend_type,
+            array_remove(array_agg(DISTINCT request_kind), NULL) AS kinds_present,
+            bool_or(request_kind IS NULL) AS has_null_kind,
+            COUNT(*) FILTER (WHERE {ttft} IS NOT NULL AND {ttft} >= 0) AS ttft_n,
+            percentile_disc(0.5) WITHIN GROUP (ORDER BY {ttft_val}) AS ttft_p50,
+            percentile_disc(0.95) WITHIN GROUP (ORDER BY {ttft_val}) AS ttft_p95,
+            COUNT(*) FILTER (WHERE {ttft} IS NOT NULL) AS engine_n,
+            percentile_disc(0.5) WITHIN GROUP (ORDER BY {engine_val}) AS engine_p50,
+            percentile_disc(0.95) WITHIN GROUP (ORDER BY {engine_val}) AS engine_p95,
+            COUNT(*) FILTER (WHERE {queue} IS NOT NULL AND {queue} > 1000) AS queued_requests,
+            COALESCE(MAX({queue}) FILTER (WHERE {queue} IS NOT NULL AND {queue} >= 0), 0)
+                AS max_queue,
+            COUNT(*) FILTER (WHERE {queue} IS NOT NULL AND {queue} >= 0) AS queue_n,
+            percentile_disc(0.95) WITHIN GROUP (ORDER BY {queue_val}) AS queue_p95,
+            COUNT(*) FILTER (WHERE {load} IS NOT NULL AND {load} > 0) AS load_n,
+            percentile_disc(0.5) WITHIN GROUP (ORDER BY {load_val}) AS load_p50,
+            COALESCE(MAX({load}) FILTER (WHERE {load} IS NOT NULL AND {load} > 0), 0) AS max_load
+        FROM request_stats
+        WHERE {where}
+        GROUP BY model_id
+        """
+    )
+
+    ws_q = sa.text(_work_speeds_sql(where))
+
+    # Loads are recorded per deployment/worker (``<backend>/<key>[::hash]``)
+    # while requests are recorded per logical model (``<key>``): fold the loads
+    # onto their model with the same regex ``_model_key_of_worker`` applies.
+    load_q = sa.text(
+        """
+        WITH stripped AS (
+            SELECT
+                regexp_replace(model_id, '::[0-9a-f]{12}$', '') AS s,
+                backend_type,
+                GREATEST(COALESCE(duration_ms, 0), 0) AS dur
+            FROM model_load_stats
+            WHERE started_at BETWEEN :from_dt AND :to_dt
+        ),
+        keyed AS (
+            SELECT
+                CASE WHEN position('/' IN s) > 0
+                     THEN substring(s FROM position('/' IN s) + 1)
+                     ELSE s END AS mkey,
+                backend_type,
+                dur
+            FROM stripped
+        )
+        SELECT
+            mkey,
+            COUNT(*) AS load_count,
+            COALESCE(SUM(dur), 0) AS load_dur_sum,
+            percentile_disc(0.95) WITHIN GROUP (ORDER BY dur) AS load_p95,
+            COALESCE(MAX(dur), 0) AS last_load,
+            MIN(backend_type) FILTER (WHERE backend_type IS NOT NULL) AS load_backend
+        FROM keyed
+        GROUP BY mkey
+        """
+    )
+
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
-        )
-        if model_id:
-            q = q.where(RequestStat.model_id == model_id)
-        result = await session.execute(q)
-        rows = result.scalars().all()
+        perf_rows = (await session.execute(perf_q, params)).all()
+        ws_rows = (await session.execute(ws_q, params)).all()
+        load_rows = (await session.execute(load_q, params)).all()
 
-        load_q = sa.select(ModelLoadStat).where(
-            ModelLoadStat.started_at >= from_dt,
-            ModelLoadStat.started_at <= to_dt,
-        )
-        load_result = await session.execute(load_q)
-        # Loads are recorded per deployment/worker (``<backend>/<key>[::hash]``)
-        # while requests are recorded per logical model (``<key>``): fold the
-        # loads onto their model so both land in the same row.
-        load_rows = [
-            row
-            for row in load_result.scalars().all()
-            if not model_id or _model_key_of_worker(row.model_id) == model_id
-        ]
+    # Work speeds: per (model, request_kind) sums per field, recombined in
+    # Python exactly as ``work_speeds`` would over the rows.
+    ws_by_model: dict[str, dict[str, dict[str, tuple[float, float, int]]]] = defaultdict(dict)
+    for row in ws_rows:
+        m = row._mapping
+        mid = m["model_id"]
+        kind = m["request_kind"]
+        per_field: dict[str, tuple[float, float, int]] = {}
+        for field_name, _col in _WORK_SPEED_FIELDS:
+            per_field[field_name] = (
+                float(m[f"w_{field_name}"] or 0.0),
+                float(m[f"ms_{field_name}"] or 0.0),
+                int(m[f"n_{field_name}"] or 0),
+            )
+        ws_by_model[mid][kind] = per_field
 
-    by_model: dict[str, list[RequestStat]] = {}
-    for row in rows:
-        by_model.setdefault(row.model_id, []).append(row)
-
-    load_by_model: dict[str, list[ModelLoadStat]] = {}
+    load_by_model: dict[str, dict] = {}
     for row in load_rows:
-        load_by_model.setdefault(_model_key_of_worker(row.model_id), []).append(row)
+        m = row._mapping
+        mkey = m["mkey"]
+        if model_id and mkey != model_id:
+            continue
+        load_by_model[mkey] = dict(m)
+
+    perf_by_model: dict[str, dict] = {}
+    for row in perf_rows:
+        m = row._mapping
+        perf_by_model[m["model_id"]] = dict(m)
 
     summaries = []
-    for mid in sorted(set(by_model) | set(load_by_model)):
-        model_rows = by_model.get(mid, [])
-        model_load_rows = load_by_model.get(mid, [])
-        durations = [max(0, int(r.duration_ms or 0)) for r in model_rows]
-        in_tokens = [max(0, int(r.input_tokens or 0)) for r in model_rows]
-        out_tokens = [max(0, int(r.output_tokens or 0)) for r in model_rows]
-        errors = sum(
-            1 for r in model_rows if r.error or (r.status_code is not None and r.status_code >= 400)
-        )
-        n = len(model_rows)
-        total_duration_ms = sum(durations)
-        tokenized_requests = sum(
-            1 for r in model_rows if (r.input_tokens or 0) > 0 or (r.output_tokens or 0) > 0
-        )
+    for mid in sorted(set(perf_by_model) | set(load_by_model)):
+        p = perf_by_model.get(mid)
+        lr = load_by_model.get(mid)
+        n = int(p["n"]) if p else 0
+        total_duration_ms = int(p["total_dur"]) if p else 0
 
-        # tokensPerSecond: duration_ms is wall clock from HTTP arrival, so it
-        # includes queue wait / cold-start time under contention — dividing
-        # by it understates real engine throughput (reported 2026-10-27:
-        # ~5 tok/s during a congested window for an engine that does 50-80+
-        # in isolation). generation_ms (when the backend reports it —
-        # llama.cpp/Ollama, not vLLM) is pure engine time; prefer it
-        # per-request and fall back to duration_ms only for rows that don't
-        # have it (older rows, or backends that don't report it).
-        tokens_for_rate = 0
-        ms_for_rate = 0
-        for r in model_rows:
-            effective_ms = r.generation_ms if r.generation_ms else r.duration_ms
-            if effective_ms:
-                tokens_for_rate += max(0, int(r.output_tokens or 0))
-                ms_for_rate += max(0, int(effective_ms))
-        tokens_ps = (tokens_for_rate / ms_for_rate * 1000) if ms_for_rate else 0.0
-        req_per_min = (n * 60000 / total_duration_ms) if total_duration_ms else 0.0
-
-        # TTFT and queue wait were already being captured per request
-        # (RequestRuntimeTelemetry) and stored, but nothing aggregated them, so
-        # they were invisible outside a manual SQL query. They answer two
-        # questions avgLatencyMs cannot: how long before the user sees
-        # *anything*, and how much of the wait was queueing rather than work.
-        # TTFT only exists for streaming responses — a non-streaming reply has
-        # no "first token" event — so the sample count is reported alongside
-        # instead of averaging over rows that structurally cannot have it.
-        ttft_values = sorted(
-            v
-            for v in (_telemetry_int(r, "ttft_ms") for r in model_rows)
-            if v is not None and v >= 0
-        )
-        queue_values = [
-            v
-            for v in (_telemetry_int(r, "queue_ms") for r in model_rows)
-            if v is not None and v >= 0
-        ]
-        # ``ttft_ms`` is measured from HTTP arrival, so it bundles three very
-        # different things: waiting for an admission slot, loading the model,
-        # and the engine actually producing a token. Reporting only the total
-        # makes a cold start look like a slow engine — measured 2026-11-06, a
-        # 68.7s "TTFT" on qwen3:8b that was 68.2s of model load and ~0.5s of
-        # engine. Subtracting both gives the number that answers "how fast does
-        # this model respond once it is up", which is the one worth comparing
-        # across models; the raw total stays alongside it because that is what
-        # the user actually waited.
-        load_values = [
-            v for v in (_telemetry_int(r, "load_ms") for r in model_rows) if v is not None and v > 0
-        ]
-        engine_ttft_values = sorted(
-            max(
-                0,
-                (_telemetry_int(r, "ttft_ms") or 0)
-                - (_telemetry_int(r, "load_ms") or 0)
-                - (_telemetry_int(r, "queue_ms") or 0),
+        if p:
+            draft_n_total = int(p["draft_n_total"])
+            draft_acceptance_rate = (
+                round(int(p["draft_acc_total"]) / draft_n_total, 3) if draft_n_total else None
             )
-            for r in model_rows
-            if _telemetry_int(r, "ttft_ms") is not None
-        )
+            pred_n = int(p["pred_n"] or 0)
+            avg_predicted_tps = round(float(p["pred_sum"]) / pred_n, 2) if pred_n else None
+            prompt_n = int(p["prompt_n"] or 0)
+            avg_prompt_tps = round(float(p["prompt_sum"]) / prompt_n, 2) if prompt_n else None
+            tokens_for_rate = int(p["tokens_for_rate"])
+            ms_for_rate = int(p["ms_for_rate"])
+            tokens_ps = (tokens_for_rate / ms_for_rate * 1000) if ms_for_rate else 0.0
+            req_per_min = (n * 60000 / total_duration_ms) if total_duration_ms else 0.0
+            errors = int(p["errors"])
+            kinds_present = list(p["kinds_present"] or [])
+            # ``sorted({(r.request_kind or "other") ...})``: array_agg(DISTINCT)
+            # drops NULL request_kinds, so add "other" back when has_null_kind.
+            request_kinds = sorted(
+                set(kinds_present) | ({"other"} if p["has_null_kind"] else set())
+            )
+            ttft_n = int(p["ttft_n"] or 0)
+            engine_n = int(p["engine_n"] or 0)
+            queue_n = int(p["queue_n"] or 0)
+            load_n = int(p["load_n"] or 0)
+        else:
+            draft_acceptance_rate = None
+            avg_predicted_tps = None
+            avg_prompt_tps = None
+            tokens_ps = 0.0
+            req_per_min = 0.0
+            errors = 0
+            kinds_present = []
+            request_kinds = []
+            ttft_n = engine_n = queue_n = load_n = 0
 
-        # Self-speculative decoding (--spec-type draft-mtp) health, straight
-        # from the engine's own timings block — see RequestStat.draft_n's
-        # docstring. A dropping acceptance ratio is the most direct
-        # explanation for "this model feels slower than before" on a
-        # self-MTP load (gemma4:26b, qwen3.8:27b): it degrades generation
-        # speed roughly proportionally, and unlike generic contention this
-        # shows up even in an otherwise-uncontended request.
-        # getattr(..., None): rows from before this field existed (older
-        # DB rows pre-migration, or test fixtures) may not carry the
-        # attribute at all, not just None.
-        draft_n_total = sum(int(getattr(r, "draft_n", None) or 0) for r in model_rows)
-        draft_n_accepted_total = sum(
-            int(getattr(r, "draft_n_accepted", None) or 0) for r in model_rows
-        )
-        draft_acceptance_rate = (
-            round(draft_n_accepted_total / draft_n_total, 3) if draft_n_total else None
-        )
-        predicted_tps_samples = [
-            float(getattr(r, "predicted_tokens_per_second", None) or 0)
-            for r in model_rows
-            if getattr(r, "predicted_tokens_per_second", None)
-        ]
-        prompt_tps_samples = [
-            float(getattr(r, "prompt_tokens_per_second", None) or 0)
-            for r in model_rows
-            if getattr(r, "prompt_tokens_per_second", None)
-        ]
-        avg_predicted_tps = (
-            round(sum(predicted_tps_samples) / len(predicted_tps_samples), 2)
-            if predicted_tps_samples
-            else None
-        )
-        avg_prompt_tps = (
-            round(sum(prompt_tps_samples) / len(prompt_tps_samples), 2)
-            if prompt_tps_samples
-            else None
-        )
+        kinds_set = set(kinds_present)
+        work_speeds_out = _work_speeds_from_groups(ws_by_model.get(mid, {}), kinds_set)
 
-        request_kinds = sorted({(r.request_kind or "other") for r in model_rows})
-        backend_type = next(
-            (r.backend_type for r in model_rows if r.backend_type),
-            next((r.backend_type for r in model_load_rows if r.backend_type), "unknown"),
+        if lr:
+            load_count = int(lr["load_count"])
+            avg_load_ms = int(int(lr["load_dur_sum"]) / load_count) if load_count else 0
+            p95_load_ms = int(lr["load_p95"] or 0) if load_count else 0
+            last_load_ms = int(lr["last_load"] or 0)
+        else:
+            load_count = 0
+            avg_load_ms = 0
+            p95_load_ms = 0
+            last_load_ms = 0
+
+        backend_type = (
+            (p["backend_type"] if p and p["backend_type"] else None)
+            or (lr["load_backend"] if lr and lr["load_backend"] else None)
+            or "unknown"
         )
-        load_durations = sorted(max(0, int(r.duration_ms or 0)) for r in model_load_rows)
-        avg_load_ms = int(sum(load_durations) / len(load_durations)) if load_durations else 0
-        p95_load_ms = _percentile(load_durations, 95) if load_durations else 0
-        last_load_ms = max(load_durations) if load_durations else 0
 
         summaries.append(
             {
@@ -650,47 +982,33 @@ async def get_performance_stats(
                 "requestKinds": request_kinds,
                 "totalRequests": n,
                 "avgLatencyMs": int(total_duration_ms / n) if n else 0,
-                "p95LatencyMs": _percentile(sorted(durations), 95),
+                "p95LatencyMs": int(p["p95_dur"] or 0) if p else 0,
                 "requestsPerMinute": round(req_per_min, 2),
                 "tokensPerSecond": round(tokens_ps, 2),
                 "draftAcceptanceRate": draft_acceptance_rate,
-                "workSpeeds": work_speeds(model_rows),
+                "workSpeeds": work_speeds_out,
                 "avgPredictedTokensPerSecond": avg_predicted_tps,
                 "avgPromptTokensPerSecond": avg_prompt_tps,
-                "totalInputTokens": int(sum(in_tokens)),
-                "totalOutputTokens": int(sum(out_tokens)),
-                "tokenizedRequests": int(tokenized_requests),
+                "totalInputTokens": int(p["sum_in"]) if p else 0,
+                "totalOutputTokens": int(p["sum_out"]) if p else 0,
+                "tokenizedRequests": int(p["tokenized"]) if p else 0,
                 "errorCount": errors,
                 "uptimePct": round((n - errors) / n * 100, 1) if n else 0.0,
-                "loadCount": len(load_durations),
+                "loadCount": load_count,
                 "avgLoadMs": avg_load_ms,
                 "p95LoadMs": p95_load_ms,
                 "lastLoadMs": last_load_ms,
-                "ttftSamples": len(ttft_values),
-                # None rather than 0 on an empty sample: a model with no
-                # streaming requests has no TTFT, which is not the same as a
-                # TTFT of zero. (_percentile takes a percentage and returns 0
-                # when empty, hence the explicit guard.)
-                "ttftP50Ms": _percentile(ttft_values, 50) if ttft_values else None,
-                "ttftP95Ms": _percentile(ttft_values, 95) if ttft_values else None,
-                # Queue wait is the part of the latency the user paid for
-                # contention rather than for their own request.
-                # Engine-only: what the model took once it had a slot and was
-                # resident. Compare this across models, not ttftP*.
-                "ttftEngineP50Ms": (
-                    _percentile(engine_ttft_values, 50) if engine_ttft_values else None
-                ),
-                "ttftEngineP95Ms": (
-                    _percentile(engine_ttft_values, 95) if engine_ttft_values else None
-                ),
-                "queuedRequests": sum(1 for v in queue_values if v > 1000),
-                "maxQueueMs": max(queue_values) if queue_values else 0,
-                "queueP95Ms": _percentile(sorted(queue_values), 95) if queue_values else None,
-                # Cold starts, the other half of the gap between the raw TTFT
-                # and the engine figure.
-                "coldStartRequests": len(load_values),
-                "loadP50Ms": _percentile(sorted(load_values), 50) if load_values else None,
-                "maxLoadMs": max(load_values) if load_values else 0,
+                "ttftSamples": ttft_n,
+                "ttftP50Ms": int(p["ttft_p50"]) if p and ttft_n else None,
+                "ttftP95Ms": int(p["ttft_p95"]) if p and ttft_n else None,
+                "ttftEngineP50Ms": int(p["engine_p50"]) if p and engine_n else None,
+                "ttftEngineP95Ms": int(p["engine_p95"]) if p and engine_n else None,
+                "queuedRequests": int(p["queued_requests"]) if p else 0,
+                "maxQueueMs": int(p["max_queue"]) if p else 0,
+                "queueP95Ms": int(p["queue_p95"]) if p and queue_n else None,
+                "coldStartRequests": load_n,
+                "loadP50Ms": int(p["load_p50"]) if p and load_n else None,
+                "maxLoadMs": int(p["max_load"]) if p else 0,
             }
         )
 
@@ -705,45 +1023,52 @@ async def get_stats_by_user(
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
     from ocabra.db.auth import User
 
+    window = [
+        RequestStat.started_at >= from_dt,
+        RequestStat.started_at <= to_dt,
+        RequestStat.user_id.isnot(None),
+    ]
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
-            RequestStat.user_id.isnot(None),
-        )
-        result = await session.execute(q)
-        rows = result.scalars().all()
+        agg_rows = (
+            await session.execute(
+                sa.select(
+                    RequestStat.user_id,
+                    sa.func.count(),
+                    sa.func.count().filter(_is_error_sql()),
+                    sa.func.coalesce(sa.func.sum(_dur()), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.input_tokens)), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.output_tokens)), 0),
+                    sa.func.sum(RequestStat.energy_wh),
+                )
+                .where(*window)
+                .group_by(RequestStat.user_id)
+            )
+        ).all()
+        cost_by_uid = await _cost_by_entity(session, RequestStat.user_id, window)
 
-        # Load usernames for all user_ids found
-        user_ids = {r.user_id for r in rows if r.user_id}
+        user_ids = {r[0] for r in agg_rows}
         username_map: dict = {}
         if user_ids:
             u_result = await session.execute(sa.select(User).where(User.id.in_(user_ids)))
             for u in u_result.scalars().all():
                 username_map[u.id] = u.username
 
-    by_user: dict = defaultdict(list)
-    for row in rows:
-        by_user[row.user_id].append(row)
-
     summaries = []
-    for uid, urows in sorted(by_user.items(), key=lambda x: -len(x[1])):
-        n = len(urows)
-        durations = [max(0, int(r.duration_ms or 0)) for r in urows]
-        errors = sum(
-            1 for r in urows if r.error or (r.status_code is not None and r.status_code >= 400)
-        )
+    for uid, n, errors, total_dur, sum_in, sum_out, energy in sorted(
+        agg_rows, key=lambda r: (-int(r[1]), str(r[0]))
+    ):
+        n = int(n)
         summaries.append(
             {
                 "userId": str(uid),
                 "username": username_map.get(uid, str(uid)),
                 "totalRequests": n,
-                "totalErrors": errors,
-                "avgDurationMs": int(sum(durations) / n) if n else 0,
-                "totalInputTokens": sum(max(0, int(r.input_tokens or 0)) for r in urows),
-                "totalOutputTokens": sum(max(0, int(r.output_tokens or 0)) for r in urows),
-                "totalEnergyWh": round(sum(r.energy_wh or 0 for r in urows), 2),
-                "estimatedCostUsd": round(estimate_cost_for_rows(urows), 4),
+                "totalErrors": int(errors),
+                "avgDurationMs": int(int(total_dur) / n) if n else 0,
+                "totalInputTokens": int(sum_in),
+                "totalOutputTokens": int(sum_out),
+                "totalEnergyWh": round(float(energy or 0), 2),
+                "estimatedCostUsd": round(cost_by_uid.get(uid, 0.0), 4),
             }
         )
     return {"byUser": summaries}
@@ -757,44 +1082,52 @@ async def get_stats_by_group(
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
     from ocabra.db.auth import Group
 
+    window = [
+        RequestStat.started_at >= from_dt,
+        RequestStat.started_at <= to_dt,
+        RequestStat.group_id.isnot(None),
+    ]
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
-            RequestStat.group_id.isnot(None),
-        )
-        result = await session.execute(q)
-        rows = result.scalars().all()
+        agg_rows = (
+            await session.execute(
+                sa.select(
+                    RequestStat.group_id,
+                    sa.func.count(),
+                    sa.func.count().filter(_is_error_sql()),
+                    sa.func.coalesce(sa.func.sum(_dur()), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.input_tokens)), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.output_tokens)), 0),
+                    sa.func.sum(RequestStat.energy_wh),
+                )
+                .where(*window)
+                .group_by(RequestStat.group_id)
+            )
+        ).all()
+        cost_by_gid = await _cost_by_entity(session, RequestStat.group_id, window)
 
-        group_ids = {r.group_id for r in rows if r.group_id}
+        group_ids = {r[0] for r in agg_rows}
         group_name_map: dict = {}
         if group_ids:
             g_result = await session.execute(sa.select(Group).where(Group.id.in_(group_ids)))
             for g in g_result.scalars().all():
                 group_name_map[g.id] = g.name
 
-    by_group: dict = defaultdict(list)
-    for row in rows:
-        by_group[row.group_id].append(row)
-
     summaries = []
-    for gid, grows in sorted(by_group.items(), key=lambda x: -len(x[1])):
-        n = len(grows)
-        durations = [max(0, int(r.duration_ms or 0)) for r in grows]
-        errors = sum(
-            1 for r in grows if r.error or (r.status_code is not None and r.status_code >= 400)
-        )
+    for gid, n, errors, total_dur, sum_in, sum_out, energy in sorted(
+        agg_rows, key=lambda r: (-int(r[1]), str(r[0]))
+    ):
+        n = int(n)
         summaries.append(
             {
                 "groupId": str(gid),
                 "groupName": group_name_map.get(gid, str(gid)),
                 "totalRequests": n,
-                "totalErrors": errors,
-                "avgDurationMs": int(sum(durations) / n) if n else 0,
-                "totalInputTokens": sum(max(0, int(r.input_tokens or 0)) for r in grows),
-                "totalOutputTokens": sum(max(0, int(r.output_tokens or 0)) for r in grows),
-                "totalEnergyWh": round(sum(r.energy_wh or 0 for r in grows), 2),
-                "estimatedCostUsd": round(estimate_cost_for_rows(grows), 4),
+                "totalErrors": int(errors),
+                "avgDurationMs": int(int(total_dur) / n) if n else 0,
+                "totalInputTokens": int(sum_in),
+                "totalOutputTokens": int(sum_out),
+                "totalEnergyWh": round(float(energy or 0), 2),
+                "estimatedCostUsd": round(cost_by_gid.get(gid, 0.0), 4),
             }
         )
     return {"byGroup": summaries}
@@ -812,52 +1145,77 @@ async def get_batch_vs_interactive_stats(
     """
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
 
+    window = [RequestStat.started_at >= from_dt, RequestStat.started_at <= to_dt]
+    # UTC calendar day, independent of the DB session timezone, to match the
+    # old ``started_at.date()`` on the UTC-aware column.
+    utc_day = sa.cast(sa.text("started_at AT TIME ZONE 'UTC'"), sa.Date)
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
-        )
-        rows = (await session.execute(q)).scalars().all()
+        agg_rows = (
+            await session.execute(
+                sa.select(
+                    RequestStat.is_batch,
+                    sa.func.count(),
+                    sa.func.count().filter(_is_error_sql()),
+                    sa.func.coalesce(sa.func.sum(_dur()), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.input_tokens)), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.output_tokens)), 0),
+                    sa.func.sum(RequestStat.energy_wh),
+                )
+                .where(*window)
+                .group_by(RequestStat.is_batch)
+            )
+        ).all()
+        cost_by_batch = await _cost_by_entity(session, RequestStat.is_batch, window)
+        daily_rows = (
+            await session.execute(
+                sa.select(utc_day.label("d"), RequestStat.is_batch, sa.func.count())
+                .where(*window)
+                .group_by(utc_day, RequestStat.is_batch)
+                .order_by(utc_day)
+            )
+        ).all()
 
-    def _summary(bucket_rows: list) -> dict:
-        n = len(bucket_rows)
-        durations = [max(0, int(r.duration_ms or 0)) for r in bucket_rows]
-        errors = sum(
-            1
-            for r in bucket_rows
-            if r.error or (r.status_code is not None and r.status_code >= 400)
-        )
-        total_input = sum(max(0, int(r.input_tokens or 0)) for r in bucket_rows)
-        total_output = sum(max(0, int(r.output_tokens or 0)) for r in bucket_rows)
+    agg_by_batch: dict[bool, tuple] = {bool(r[0]): r for r in agg_rows}
+
+    def _summary(is_batch: bool) -> dict:
+        row = agg_by_batch.get(is_batch)
+        if row is None:
+            return {
+                "totalRequests": 0,
+                "totalErrors": 0,
+                "avgDurationMs": 0,
+                "totalInputTokens": 0,
+                "totalOutputTokens": 0,
+                "totalTokens": 0,
+                "totalEnergyWh": 0.0,
+                "estimatedCostUsd": 0.0,
+            }
+        _b, n, errors, total_dur, sum_in, sum_out, energy = row
+        n = int(n)
+        total_input = int(sum_in)
+        total_output = int(sum_out)
         return {
             "totalRequests": n,
-            "totalErrors": errors,
-            "avgDurationMs": int(sum(durations) / n) if n else 0,
+            "totalErrors": int(errors),
+            "avgDurationMs": int(int(total_dur) / n) if n else 0,
             "totalInputTokens": total_input,
             "totalOutputTokens": total_output,
             "totalTokens": total_input + total_output,
-            "totalEnergyWh": round(sum(r.energy_wh or 0 for r in bucket_rows), 2),
-            "estimatedCostUsd": round(estimate_cost_for_rows(bucket_rows), 4),
+            "totalEnergyWh": round(float(energy or 0), 2),
+            "estimatedCostUsd": round(cost_by_batch.get(is_batch, 0.0), 4),
         }
 
-    batch_rows = [r for r in rows if r.is_batch]
-    interactive_rows = [r for r in rows if not r.is_batch]
-
-    # Daily series (UTC day bucket) for a stacked/line chart — raw counts
-    # are enough to show adoption trend over time, not trying to also
-    # break out tokens/cost per day here.
     daily: dict[str, dict[str, int]] = defaultdict(lambda: {"batch": 0, "interactive": 0})
-    for row in rows:
-        day_key = row.started_at.date().isoformat()
-        daily[day_key]["batch" if row.is_batch else "interactive"] += 1
+    for day, is_batch, count in daily_rows:
+        daily[day.isoformat()]["batch" if is_batch else "interactive"] += int(count)
     series = [
         {"date": day, "batch": counts["batch"], "interactive": counts["interactive"]}
         for day, counts in sorted(daily.items())
     ]
 
     return {
-        "batch": _summary(batch_rows),
-        "interactive": _summary(interactive_rows),
+        "batch": _summary(True),
+        "interactive": _summary(False),
         "dailySeries": series,
     }
 
@@ -1031,68 +1389,55 @@ async def get_my_stats(
             "byRequestKind": [],
         }
 
+    window = [
+        RequestStat.started_at >= from_dt,
+        RequestStat.started_at <= to_dt,
+        RequestStat.user_id == uid,
+    ]
+    if model_id:
+        window.append(RequestStat.model_id == model_id)
+
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
-            RequestStat.user_id == uid,
+        total_requests, total_errors, tokenized_requests, total_dur, sum_in, sum_out = (
+            await session.execute(
+                sa.select(
+                    sa.func.count(),
+                    sa.func.count().filter(_is_error_sql()),
+                    sa.func.count().filter(_tokenized_sql()),
+                    sa.func.coalesce(sa.func.sum(_dur()), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.input_tokens)), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.output_tokens)), 0),
+                ).where(*window)
+            )
+        ).one()
+        total_requests = int(total_requests or 0)
+        if total_requests == 0:
+            return {
+                "totalRequests": 0,
+                "totalErrors": 0,
+                "avgDurationMs": 0,
+                "tokenizedRequests": 0,
+                "totalInputTokens": 0,
+                "totalOutputTokens": 0,
+                "byBackend": [],
+                "byRequestKind": [],
+            }
+        by_backend = await _summary_by(
+            session, window, RequestStat.backend_type, "backendType", "unknown"
         )
-        if model_id:
-            q = q.where(RequestStat.model_id == model_id)
-        result = await session.execute(q)
-        rows = result.scalars().all()
-
-    # Re-use overview logic
-    total_requests = len(rows)
-    if total_requests == 0:
-        return {
-            "totalRequests": 0,
-            "totalErrors": 0,
-            "avgDurationMs": 0,
-            "tokenizedRequests": 0,
-            "totalInputTokens": 0,
-            "totalOutputTokens": 0,
-            "byBackend": [],
-            "byRequestKind": [],
-        }
-
-    durations = [max(0, int(r.duration_ms or 0)) for r in rows]
-    total_errors = sum(
-        1 for r in rows if r.error or (r.status_code is not None and r.status_code >= 400)
-    )
-    tokenized_requests = sum(
-        1 for r in rows if (r.input_tokens or 0) > 0 or (r.output_tokens or 0) > 0
-    )
-
-    by_backend: dict = defaultdict(list)
-    by_kind: dict = defaultdict(list)
-    for row in rows:
-        by_backend[row.backend_type or "unknown"].append(row)
-        by_kind[row.request_kind or "other"].append(row)
-
-    def _summarize(group_rows, key_name, key_value):
-        g_n = len(group_rows)
-        g_durations = [max(0, int(r.duration_ms or 0)) for r in group_rows]
-        g_errors = sum(
-            1 for r in group_rows if r.error or (r.status_code is not None and r.status_code >= 400)
+        by_kind = await _summary_by(
+            session, window, RequestStat.request_kind, "requestKind", "other"
         )
-        return {
-            key_name: key_value,
-            "totalRequests": g_n,
-            "errorRate": round(g_errors / g_n, 4) if g_n else 0.0,
-            "avgLatencyMs": int(sum(g_durations) / g_n) if g_n else 0,
-            "p95LatencyMs": _percentile(sorted(g_durations), 95),
-        }
 
     return {
         "totalRequests": total_requests,
-        "totalErrors": total_errors,
-        "avgDurationMs": int(sum(durations) / total_requests) if total_requests else 0,
-        "tokenizedRequests": tokenized_requests,
-        "totalInputTokens": int(sum(max(0, int(r.input_tokens or 0)) for r in rows)),
-        "totalOutputTokens": int(sum(max(0, int(r.output_tokens or 0)) for r in rows)),
-        "byBackend": [_summarize(g, "backendType", b) for b, g in sorted(by_backend.items())],
-        "byRequestKind": [_summarize(g, "requestKind", k) for k, g in sorted(by_kind.items())],
+        "totalErrors": int(total_errors),
+        "avgDurationMs": int(int(total_dur) / total_requests),
+        "tokenizedRequests": int(tokenized_requests),
+        "totalInputTokens": int(sum_in),
+        "totalOutputTokens": int(sum_out),
+        "byBackend": by_backend,
+        "byRequestKind": by_kind,
     }
 
 
@@ -1131,13 +1476,22 @@ async def get_my_group_stats(
             pass
 
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
-            RequestStat.group_id.in_(parsed_ids),
-        )
-        result = await session.execute(q)
-        rows = result.scalars().all()
+        total, errors, tokenized, total_dur, sum_in, sum_out = (
+            await session.execute(
+                sa.select(
+                    sa.func.count(),
+                    sa.func.count().filter(_is_error_sql()),
+                    sa.func.count().filter(_tokenized_sql()),
+                    sa.func.coalesce(sa.func.sum(_dur()), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.input_tokens)), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.output_tokens)), 0),
+                ).where(
+                    RequestStat.started_at >= from_dt,
+                    RequestStat.started_at <= to_dt,
+                    RequestStat.group_id.in_(parsed_ids),
+                )
+            )
+        ).one()
 
         group_name = None
         group_id_out = group_ids[0] if group_ids else None
@@ -1148,7 +1502,7 @@ async def get_my_group_stats(
                 group_name = grp.name
                 group_id_out = str(grp.id)
 
-    total = len(rows)
+    total = int(total or 0)
     if total == 0:
         return {
             "groupId": group_id_out,
@@ -1165,17 +1519,13 @@ async def get_my_group_stats(
             },
         }
 
-    durations = [max(0, int(r.duration_ms or 0)) for r in rows]
-    errors = sum(1 for r in rows if r.error or (r.status_code is not None and r.status_code >= 400))
     stats = {
         "totalRequests": total,
-        "totalErrors": errors,
-        "avgDurationMs": int(sum(durations) / total),
-        "tokenizedRequests": sum(
-            1 for r in rows if (r.input_tokens or 0) > 0 or (r.output_tokens or 0) > 0
-        ),
-        "totalInputTokens": int(sum(max(0, int(r.input_tokens or 0)) for r in rows)),
-        "totalOutputTokens": int(sum(max(0, int(r.output_tokens or 0)) for r in rows)),
+        "totalErrors": int(errors),
+        "avgDurationMs": int(int(total_dur) / total),
+        "tokenizedRequests": int(tokenized),
+        "totalInputTokens": int(sum_in),
+        "totalOutputTokens": int(sum_out),
         "byBackend": [],
         "byRequestKind": [],
     }
@@ -1245,25 +1595,22 @@ async def get_token_stats(
 
         series = []
         if include_series:
-            result = await session.execute(
-                sa.select(
-                    RequestStat.started_at,
-                    RequestStat.input_tokens,
-                    RequestStat.output_tokens,
+            minute = sa.func.date_trunc("minute", RequestStat.started_at)
+            series_rows = (
+                await session.execute(
+                    sa.select(
+                        minute.label("t"),
+                        sa.func.coalesce(sa.func.sum(_pos(RequestStat.input_tokens)), 0),
+                        sa.func.coalesce(sa.func.sum(_pos(RequestStat.output_tokens)), 0),
+                    )
+                    .where(*filters)
+                    .group_by(minute)
+                    .order_by(minute)
                 )
-                .where(*filters)
-                .order_by(RequestStat.started_at.asc())
-            )
-            per_minute: dict[datetime, dict[str, int]] = defaultdict(
-                lambda: {"inputTokens": 0, "outputTokens": 0}
-            )
-            for started_at, input_tokens, output_tokens in result.all():
-                if started_at:
-                    bucket = _truncate_minute(started_at)
-                    per_minute[bucket]["inputTokens"] += max(0, int(input_tokens or 0))
-                    per_minute[bucket]["outputTokens"] += max(0, int(output_tokens or 0))
+            ).all()
             series = [
-                {"timestamp": ts.isoformat(), **counts} for ts, counts in sorted(per_minute.items())
+                {"timestamp": ts.isoformat(), "inputTokens": int(i), "outputTokens": int(o)}
+                for ts, i, o in series_rows
             ]
 
     by_gpu.sort(
@@ -1292,78 +1639,57 @@ async def get_overview_stats(
     """
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
 
+    window = [RequestStat.started_at >= from_dt, RequestStat.started_at <= to_dt]
+    if model_id:
+        window.append(RequestStat.model_id == model_id)
+
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
+        total_requests, total_errors, tokenized, total_dur, sum_in, sum_out, energy = (
+            await session.execute(
+                sa.select(
+                    sa.func.count(),
+                    sa.func.count().filter(_is_error_sql()),
+                    sa.func.count().filter(_tokenized_sql()),
+                    sa.func.coalesce(sa.func.sum(_dur()), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.input_tokens)), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.output_tokens)), 0),
+                    sa.func.sum(RequestStat.energy_wh),
+                ).where(*window)
+            )
+        ).one()
+        total_requests = int(total_requests or 0)
+        if total_requests == 0:
+            return {
+                "totalRequests": 0,
+                "totalErrors": 0,
+                "avgDurationMs": 0,
+                "tokenizedRequests": 0,
+                "totalInputTokens": 0,
+                "totalOutputTokens": 0,
+                "totalEnergyWh": 0.0,
+                "estimatedCostUsd": 0.0,
+                "byBackend": [],
+                "byRequestKind": [],
+            }
+        cost = await _cost_total(session, window)
+        by_backend = await _summary_by(
+            session, window, RequestStat.backend_type, "backendType", "unknown"
         )
-        if model_id:
-            q = q.where(RequestStat.model_id == model_id)
-        result = await session.execute(q)
-        rows = result.scalars().all()
-
-    total_requests = len(rows)
-    if total_requests == 0:
-        return {
-            "totalRequests": 0,
-            "totalErrors": 0,
-            "avgDurationMs": 0,
-            "tokenizedRequests": 0,
-            "totalInputTokens": 0,
-            "totalOutputTokens": 0,
-            "totalEnergyWh": 0.0,
-            "estimatedCostUsd": 0.0,
-            "byBackend": [],
-            "byRequestKind": [],
-        }
-
-    durations = [max(0, int(r.duration_ms or 0)) for r in rows]
-    total_errors = sum(
-        1 for r in rows if r.error or (r.status_code is not None and r.status_code >= 400)
-    )
-    tokenized_requests = sum(
-        1 for r in rows if (r.input_tokens or 0) > 0 or (r.output_tokens or 0) > 0
-    )
-    total_input_tokens = sum(max(0, int(r.input_tokens or 0)) for r in rows)
-    total_output_tokens = sum(max(0, int(r.output_tokens or 0)) for r in rows)
-
-    by_backend: dict[str, list[RequestStat]] = defaultdict(list)
-    by_kind: dict[str, list[RequestStat]] = defaultdict(list)
-    for row in rows:
-        by_backend[row.backend_type or "unknown"].append(row)
-        by_kind[row.request_kind or "other"].append(row)
-
-    def _summarize(group_rows: list[RequestStat], key_name: str, key_value: str) -> dict:
-        g_n = len(group_rows)
-        g_durations = [max(0, int(r.duration_ms or 0)) for r in group_rows]
-        g_errors = sum(
-            1 for r in group_rows if r.error or (r.status_code is not None and r.status_code >= 400)
+        by_kind = await _summary_by(
+            session, window, RequestStat.request_kind, "requestKind", "other"
         )
-        return {
-            key_name: key_value,
-            "totalRequests": g_n,
-            "errorRate": round(g_errors / g_n, 4) if g_n else 0.0,
-            "avgLatencyMs": int(sum(g_durations) / g_n) if g_n else 0,
-            "p95LatencyMs": _percentile(sorted(g_durations), 95),
-        }
 
     return {
         "totalRequests": total_requests,
-        "totalErrors": total_errors,
-        "avgDurationMs": int(sum(durations) / total_requests) if total_requests else 0,
-        "tokenizedRequests": tokenized_requests,
-        "totalInputTokens": int(total_input_tokens),
-        "totalOutputTokens": int(total_output_tokens),
-        "totalEnergyWh": round(sum(r.energy_wh or 0 for r in rows), 2),
-        "estimatedCostUsd": round(estimate_cost_for_rows(rows), 4),
-        "byBackend": [
-            _summarize(group_rows, "backendType", backend)
-            for backend, group_rows in sorted(by_backend.items(), key=lambda item: item[0])
-        ],
-        "byRequestKind": [
-            _summarize(group_rows, "requestKind", kind)
-            for kind, group_rows in sorted(by_kind.items(), key=lambda item: item[0])
-        ],
+        "totalErrors": int(total_errors),
+        "avgDurationMs": int(int(total_dur) / total_requests),
+        "tokenizedRequests": int(tokenized),
+        "totalInputTokens": int(sum_in),
+        "totalOutputTokens": int(sum_out),
+        "totalEnergyWh": round(float(energy or 0), 2),
+        "estimatedCostUsd": round(cost, 4),
+        "byBackend": by_backend,
+        "byRequestKind": by_kind,
     }
 
 
@@ -1375,47 +1701,56 @@ async def get_stats_by_api_key(
     from_dt, to_dt = _normalize_window(from_dt, to_dt)
     from ocabra.db.auth import User
 
+    window = [
+        RequestStat.started_at >= from_dt,
+        RequestStat.started_at <= to_dt,
+        RequestStat.api_key_name.isnot(None),
+    ]
     async with AsyncSessionLocal() as session:
-        q = sa.select(RequestStat).where(
-            RequestStat.started_at >= from_dt,
-            RequestStat.started_at <= to_dt,
-            RequestStat.api_key_name.isnot(None),
-        )
-        result = await session.execute(q)
-        rows = result.scalars().all()
+        # One representative user per key (a key belongs to a single user); the
+        # old code took the first row's non-null user_id, MIN is deterministic.
+        agg_rows = (
+            await session.execute(
+                sa.select(
+                    RequestStat.api_key_name,
+                    sa.func.count(),
+                    sa.func.count().filter(_is_error_sql()),
+                    sa.func.coalesce(sa.func.sum(_dur()), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.input_tokens)), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.output_tokens)), 0),
+                    sa.func.sum(RequestStat.energy_wh),
+                    sa.func.min(RequestStat.user_id).filter(RequestStat.user_id.isnot(None)),
+                )
+                .where(*window)
+                .group_by(RequestStat.api_key_name)
+            )
+        ).all()
+        cost_by_key = await _cost_by_entity(session, RequestStat.api_key_name, window)
 
-        user_ids = {r.user_id for r in rows if r.user_id}
+        user_ids = {r[7] for r in agg_rows if r[7]}
         username_map: dict = {}
         if user_ids:
             u_result = await session.execute(sa.select(User).where(User.id.in_(user_ids)))
             for u in u_result.scalars().all():
                 username_map[u.id] = u.username
 
-    by_key: dict[str, list] = defaultdict(list)
-    for row in rows:
-        by_key[row.api_key_name].append(row)
-
     summaries = []
-    for key_name, krows in sorted(by_key.items(), key=lambda x: -len(x[1])):
-        n = len(krows)
-        durations = [max(0, int(r.duration_ms or 0)) for r in krows]
-        errors = sum(
-            1 for r in krows if r.error or (r.status_code is not None and r.status_code >= 400)
-        )
-        # Pick the first user_id found for this key
-        uid = next((r.user_id for r in krows if r.user_id), None)
+    for key_name, n, errors, total_dur, sum_in, sum_out, energy, uid in sorted(
+        agg_rows, key=lambda r: (-int(r[1]), str(r[0]))
+    ):
+        n = int(n)
         summaries.append(
             {
                 "apiKeyName": key_name,
                 "userId": str(uid) if uid else None,
                 "username": username_map.get(uid, str(uid)) if uid else None,
                 "totalRequests": n,
-                "totalErrors": errors,
-                "avgDurationMs": int(sum(durations) / n) if n else 0,
-                "totalInputTokens": sum(max(0, int(r.input_tokens or 0)) for r in krows),
-                "totalOutputTokens": sum(max(0, int(r.output_tokens or 0)) for r in krows),
-                "totalEnergyWh": round(sum(r.energy_wh or 0 for r in krows), 2),
-                "estimatedCostUsd": round(estimate_cost_for_rows(krows), 4),
+                "totalErrors": int(errors),
+                "avgDurationMs": int(int(total_dur) / n) if n else 0,
+                "totalInputTokens": int(sum_in),
+                "totalOutputTokens": int(sum_out),
+                "totalEnergyWh": round(float(energy or 0), 2),
+                "estimatedCostUsd": round(cost_by_key.get(key_name, 0.0), 4),
             }
         )
     return {"byApiKey": summaries}
@@ -1475,78 +1810,104 @@ async def get_user_detail(
                 "tokenSeries": [],
             }
 
-        q = sa.select(RequestStat).where(
+        username = u_obj.username
+
+        window = [
             RequestStat.started_at >= from_dt,
             RequestStat.started_at <= to_dt,
             RequestStat.user_id == uid,
-        )
-        result = await session.execute(q)
-        rows = result.scalars().all()
+        ]
+        n, errors, total_input, total_output, energy = (
+            await session.execute(
+                sa.select(
+                    sa.func.count(),
+                    sa.func.count().filter(_is_error_sql()),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.input_tokens)), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.output_tokens)), 0),
+                    sa.func.sum(RequestStat.energy_wh),
+                ).where(*window)
+            )
+        ).one()
+        n = int(n or 0)
+        if n == 0:
+            return {
+                "userId": str(uid),
+                "username": username,
+                "totalRequests": 0,
+                "totalErrors": 0,
+                "totalInputTokens": 0,
+                "totalOutputTokens": 0,
+                "totalEnergyWh": 0.0,
+                "estimatedCostUsd": 0.0,
+                "topModels": [],
+                "byRequestKind": [],
+                "tokenSeries": [],
+            }
 
-        username = u_obj.username
+        cost = await _cost_total(session, window)
 
-    n = len(rows)
-    if n == 0:
-        return {
-            "userId": str(uid),
-            "username": username,
-            "totalRequests": 0,
-            "totalErrors": 0,
-            "totalInputTokens": 0,
-            "totalOutputTokens": 0,
-            "totalEnergyWh": 0.0,
-            "estimatedCostUsd": 0.0,
-            "topModels": [],
-            "byRequestKind": [],
-            "tokenSeries": [],
-        }
+        model_rows = (
+            await session.execute(
+                sa.select(
+                    RequestStat.model_id,
+                    sa.func.count().label("requests"),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.input_tokens)), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.output_tokens)), 0),
+                )
+                .where(*window)
+                .group_by(RequestStat.model_id)
+                .order_by(sa.func.count().desc(), RequestStat.model_id.asc())
+                .limit(10)
+            )
+        ).all()
+        top_models = [
+            {
+                "modelId": mid,
+                "requests": int(reqs),
+                "inputTokens": int(sum_in),
+                "outputTokens": int(sum_out),
+            }
+            for mid, reqs, sum_in, sum_out in model_rows
+        ]
 
-    errors = sum(1 for r in rows if r.error or (r.status_code is not None and r.status_code >= 400))
-    total_input = sum(max(0, int(r.input_tokens or 0)) for r in rows)
-    total_output = sum(max(0, int(r.output_tokens or 0)) for r in rows)
+        kind_label = sa.func.coalesce(RequestStat.request_kind, "other")
+        kind_rows = (
+            await session.execute(
+                sa.select(kind_label, sa.func.count()).where(*window).group_by(kind_label)
+            )
+        ).all()
+        # Sort in Python (codepoint) like the old ``sorted(by_kind.items())``.
+        by_request_kind = [
+            {"requestKind": k, "count": int(c)} for k, c in sorted(kind_rows, key=lambda r: r[0])
+        ]
 
-    # Top models
-    by_model: dict[str, dict] = defaultdict(
-        lambda: {"requests": 0, "inputTokens": 0, "outputTokens": 0}
-    )
-    for r in rows:
-        m = by_model[r.model_id]
-        m["requests"] += 1
-        m["inputTokens"] += max(0, int(r.input_tokens or 0))
-        m["outputTokens"] += max(0, int(r.output_tokens or 0))
-    top_models = sorted(
-        [{"modelId": mid, **vals} for mid, vals in by_model.items()],
-        key=lambda x: -x["requests"],
-    )[:10]
-
-    # By request kind
-    by_kind: dict[str, int] = defaultdict(int)
-    for r in rows:
-        by_kind[r.request_kind or "other"] += 1
-    by_request_kind = [{"requestKind": k, "count": c} for k, c in sorted(by_kind.items())]
-
-    # Token time series (per-minute)
-    per_minute: dict[datetime, dict[str, int]] = defaultdict(
-        lambda: {"inputTokens": 0, "outputTokens": 0}
-    )
-    for r in rows:
-        if r.started_at:
-            bucket = _truncate_minute(r.started_at)
-            per_minute[bucket]["inputTokens"] += max(0, int(r.input_tokens or 0))
-            per_minute[bucket]["outputTokens"] += max(0, int(r.output_tokens or 0))
-    token_series = [
-        {"timestamp": ts.isoformat(), **counts} for ts, counts in sorted(per_minute.items())
-    ]
+        minute = sa.func.date_trunc("minute", RequestStat.started_at)
+        series_rows = (
+            await session.execute(
+                sa.select(
+                    minute.label("t"),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.input_tokens)), 0),
+                    sa.func.coalesce(sa.func.sum(_pos(RequestStat.output_tokens)), 0),
+                )
+                .where(*window)
+                .group_by(minute)
+                .order_by(minute)
+            )
+        ).all()
+        token_series = [
+            {"timestamp": ts.isoformat(), "inputTokens": int(i), "outputTokens": int(o)}
+            for ts, i, o in series_rows
+        ]
 
     return {
         "userId": str(uid),
         "username": username,
         "totalRequests": n,
-        "totalErrors": errors,
+        "totalErrors": int(errors),
         "totalInputTokens": int(total_input),
         "totalOutputTokens": int(total_output),
-        "totalEnergyWh": round(sum(r.energy_wh or 0 for r in rows), 2),
-        "estimatedCostUsd": round(estimate_cost_for_rows(rows), 4),
+        "totalEnergyWh": round(float(energy or 0), 2),
+        "estimatedCostUsd": round(cost, 4),
         "topModels": top_models,
         "byRequestKind": by_request_kind,
         "tokenSeries": token_series,

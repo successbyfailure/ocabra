@@ -866,6 +866,13 @@ async def _startup(app: FastAPI, teardown: _Teardown) -> None:
     teardown.loop(
         "files-retention-loop", lambda stop: _files_retention_loop(stop, _files_session_factory)
     )
+    # Stats tables: prune old rows once their retention passes (stats/retention.py).
+    # Off by default (settings.stats_retention_enabled); see that module.
+    from ocabra.stats.retention import retention_loop as _stats_retention_loop
+
+    teardown.loop(
+        "stats-retention-loop", lambda stop: _stats_retention_loop(stop, _files_session_factory)
+    )
     # /v1/videos: cola de trabajos de vídeo, un trabajo a la vez (core/video_jobs.py).
     from ocabra.core.video_jobs import VideoJobManager
 

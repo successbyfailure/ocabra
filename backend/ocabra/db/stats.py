@@ -152,6 +152,10 @@ class RequestStat(Base):
                 "remote_node_id IS NOT NULL OR federation_inbound_from IS NOT NULL"
             ),
         ),
+        # Stats aggregations that filter by model and time window (migration
+        # 0054, REF-12): get_performance_stats, get_overview_stats and
+        # get_request_stats with a model_id.
+        Index("ix_request_stats_model_started", "model_id", "started_at"),
     )
 
 

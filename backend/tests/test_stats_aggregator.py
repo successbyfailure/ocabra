@@ -1,5 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
@@ -118,303 +117,262 @@ async def test_gpu_usage_coverage_still_caps_a_genuine_outage(
 
 
 @pytest.mark.asyncio
+@requires_db
 async def test_energy_stats_use_sample_intervals(monkeypatch: pytest.MonkeyPatch) -> None:
-    t0 = datetime(2026, 4, 2, 12, 0, tzinfo=UTC)
-    rows = [
-        SimpleNamespace(
-            gpu_index=0,
-            recorded_at=t0 + timedelta(minutes=20),
-            power_draw_w=200.0,
-        ),
-        SimpleNamespace(
-            gpu_index=0,
-            recorded_at=t0,
-            power_draw_w=100.0,
-        ),
-        SimpleNamespace(
-            gpu_index=0,
-            recorded_at=t0 + timedelta(minutes=60),
-            power_draw_w=300.0,
-        ),
-    ]
+    """Energy integrates power over each sample's interval (now in SQL via a
+    LEAD window, no per-sample gap cap). Three GPU samples 100/200/300 W at
+    0/20/60 min over a 1 h window: 100 W * 20 min + 200 W * 40 min = 166.67 Wh
+    (the last sample sits on the window end, so its tail interval is zero)."""
+    from ocabra.db.stats import GpuStat
 
-    class _FakeResult:
-        def __init__(self, rows: list[SimpleNamespace]) -> None:
-            self._rows = rows
-
-        def scalars(self) -> "_FakeResult":
-            return self
-
-        def all(self) -> list[SimpleNamespace]:
-            return self._rows
-
-    class _FakeSession:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def execute(self, _query):
-            self.calls += 1
-            return _FakeResult(rows if self.calls == 1 else [])
-
-    fake_session = _FakeSession()
-
-    class _FakeSessionFactory:
-        async def __aenter__(self) -> _FakeSession:
-            return fake_session
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
-            return None
-
-    monkeypatch.setattr(aggregator, "AsyncSessionLocal", lambda: _FakeSessionFactory())
     monkeypatch.setattr(settings, "energy_cost_eur_kwh", 0.2)
+    gpu_index = 991
+    t0 = datetime(2026, 4, 2, 12, 0, tzinfo=UTC)
+    samples = [
+        GpuStat(recorded_at=t0, gpu_index=gpu_index, power_draw_w=100.0),
+        GpuStat(recorded_at=t0 + timedelta(minutes=20), gpu_index=gpu_index, power_draw_w=200.0),
+        GpuStat(recorded_at=t0 + timedelta(minutes=60), gpu_index=gpu_index, power_draw_w=300.0),
+    ]
+    try:
+        async with AsyncSessionLocal() as session:
+            for row in samples:
+                session.add(row)
+            await session.commit()
 
-    payload = await aggregator.get_energy_stats(t0, t0 + timedelta(hours=1))
+        payload = await aggregator.get_energy_stats(t0, t0 + timedelta(hours=1))
+        by_gpu = {row["gpuIndex"]: row for row in payload["byGpu"]}
 
-    assert payload["totalKwh"] == pytest.approx(0.1667, rel=1e-4)
-    assert payload["estimatedCostEur"] == pytest.approx(0.0333, rel=1e-4)
-    assert payload["byGpu"][0]["powerDrawW"] == pytest.approx(166.7, rel=1e-3)
+        assert by_gpu[gpu_index]["totalKwh"] == pytest.approx(0.1667, rel=1e-4)
+        assert by_gpu[gpu_index]["powerDrawW"] == pytest.approx(166.7, rel=1e-3)
+        assert payload["totalKwh"] == pytest.approx(0.1667, rel=1e-4)
+        assert payload["estimatedCostEur"] == pytest.approx(0.0333, rel=1e-4)
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(sa.delete(GpuStat).where(GpuStat.gpu_index == gpu_index))
+            await session.commit()
+
+
+async def _seed_requests(rows: list) -> None:
+    from ocabra.db.stats import RequestStat
+
+    async with AsyncSessionLocal() as session:
+        for kw in rows:
+            session.add(RequestStat(**kw))
+        await session.commit()
+
+
+async def _clear_model(model_id: str) -> None:
+    from ocabra.db.stats import RequestStat
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(sa.delete(RequestStat).where(RequestStat.model_id == model_id))
+        await session.commit()
 
 
 @pytest.mark.asyncio
-async def test_token_stats_all_time_can_skip_series(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _FakeResult:
-        def __init__(self, rows: list[tuple]) -> None:
-            self._rows = rows
-
-        def one(self) -> tuple:
-            return self._rows[0]
-
-        def all(self) -> list[tuple]:
-            return self._rows
-
-    class _FakeSession:
-        def __init__(self) -> None:
-            self.calls = 0
-            self.results = [
-                [(1500, 2500)],
-                [("llama_cpp", 500, 700), ("vllm", 1000, 1800)],
-                [(1, 1000, 1800), (None, 500, 700)],
+@requires_db
+async def test_performance_stats_tokens_per_second_prefers_generation_ms() -> None:
+    """duration_ms is wall clock (queue + cold start included); tokensPerSecond
+    must use generation_ms when present and fall back to duration_ms only when
+    it is missing. (60+20) tokens / (1000+2000) ms * 1000 = 26.67 tok/s, not
+    the 6.67 you get dividing by the 10s+2s wall clock."""
+    mid = "llama_cpp/qwen3.8-27b-testperf-tps"
+    t0 = datetime(2026, 4, 3, 9, 0, tzinfo=UTC)
+    try:
+        await _seed_requests(
+            [
+                dict(
+                    model_id=mid, backend_type="llama_cpp", request_kind="chat",
+                    started_at=t0, status_code=200, duration_ms=10000, generation_ms=1000,
+                    input_tokens=10, output_tokens=60,
+                ),
+                dict(
+                    model_id=mid, backend_type="llama_cpp", request_kind="chat",
+                    started_at=t0, status_code=200, duration_ms=2000, generation_ms=None,
+                    input_tokens=5, output_tokens=20,
+                ),
             ]
-
-        async def execute(self, _query):
-            result = _FakeResult(self.results[self.calls])
-            self.calls += 1
-            return result
-
-    fake_session = _FakeSession()
-
-    class _FakeSessionFactory:
-        async def __aenter__(self) -> _FakeSession:
-            return fake_session
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
-            return None
-
-    monkeypatch.setattr(aggregator, "AsyncSessionLocal", lambda: _FakeSessionFactory())
-
-    payload = await aggregator.get_token_stats(all_time=True, include_series=False)
-
-    assert payload == {
-        "totalInputTokens": 1500,
-        "totalOutputTokens": 2500,
-        "byBackend": [
-            {"backendType": "llama_cpp", "inputTokens": 500, "outputTokens": 700},
-            {"backendType": "vllm", "inputTokens": 1000, "outputTokens": 1800},
-        ],
-        "byGpu": [
-            {"gpuIndex": 1, "inputTokens": 1000, "outputTokens": 1800},
-            {"gpuIndex": None, "inputTokens": 500, "outputTokens": 700},
-        ],
-        "series": [],
-    }
-    assert fake_session.calls == 3
+        )
+        payload = await aggregator.get_performance_stats(
+            model_id=mid, from_dt=t0 - timedelta(hours=1), to_dt=t0 + timedelta(hours=1)
+        )
+        summary = payload["byModel"][0]
+        assert summary["tokensPerSecond"] == pytest.approx(26.67, abs=0.01)
+    finally:
+        await _clear_model(mid)
 
 
 @pytest.mark.asyncio
-async def test_performance_stats_tokens_per_second_prefers_generation_ms(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """2026-10-27 bug: duration_ms is wall clock from HTTP arrival, so a
-    request that waited behind a full queue shows a misleadingly low
-    tok/s (reported: ~5 tok/s during real contention for an engine that
-    does 50-80+ in isolation). generation_ms is the engine's own pure
-    decode time; tokensPerSecond must use it when present instead of
-    duration_ms, and only fall back to duration_ms for rows that lack it
-    (older data, or backends that don't report it)."""
-    # Request A: 10s wall clock (mostly queue wait) but only 1s of real
-    # generation for 60 tokens -> true rate is 60 tok/s, not 6.
-    row_with_generation_ms = SimpleNamespace(
-        model_id="llama_cpp/qwen3.8-27b", backend_type="llama_cpp",
-        request_kind="chat", duration_ms=10000, generation_ms=1000,
-        input_tokens=10, output_tokens=60, error=None, status_code=200,
-    )
-    # Request B: no generation_ms (older row / non-reporting backend) ->
-    # falls back to duration_ms, as before this fix.
-    row_without_generation_ms = SimpleNamespace(
-        model_id="llama_cpp/qwen3.8-27b", backend_type="llama_cpp",
-        request_kind="chat", duration_ms=2000, generation_ms=None,
-        input_tokens=5, output_tokens=20, error=None, status_code=200,
-    )
-
-    class _FakeResult:
-        def __init__(self, rows: list) -> None:
-            self._rows = rows
-
-        def scalars(self) -> "_FakeResult":
-            return self
-
-        def all(self) -> list:
-            return self._rows
-
-    class _FakeSession:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def execute(self, _query):
-            self.calls += 1
-            rows = [row_with_generation_ms, row_without_generation_ms] if self.calls == 1 else []
-            return _FakeResult(rows)
-
-    fake_session = _FakeSession()
-
-    class _FakeSessionFactory:
-        async def __aenter__(self) -> _FakeSession:
-            return fake_session
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
-            return None
-
-    monkeypatch.setattr(aggregator, "AsyncSessionLocal", lambda: _FakeSessionFactory())
-
-    payload = await aggregator.get_performance_stats(model_id="llama_cpp/qwen3.8-27b")
-
-    summary = payload["byModel"][0]
-    # (60 + 20) tokens / (1000 + 2000) ms * 1000 = 26.67 tok/s — NOT
-    # (60 + 20) / (10000 + 2000) * 1000 = 6.67 tok/s, the old (wrong) number.
-    assert summary["tokensPerSecond"] == pytest.approx(26.67, abs=0.01)
+@requires_db
+async def test_performance_stats_exposes_draft_acceptance_and_engine_speed() -> None:
+    """draftAcceptanceRate = sum(accepted)/sum(drafted) across rows; a
+    non-speculative row (no draft_n) must not pollute the denominator with a
+    phantom 0/0, and the tok/s averages ignore rows that don't report them."""
+    mid = "llama_cpp/qwen3.8-27b-testperf-draft"
+    t0 = datetime(2026, 4, 3, 10, 0, tzinfo=UTC)
+    try:
+        await _seed_requests(
+            [
+                dict(
+                    model_id=mid, backend_type="llama_cpp", request_kind="chat",
+                    started_at=t0, status_code=200, duration_ms=1000, generation_ms=1000,
+                    input_tokens=10, output_tokens=60, draft_n=16, draft_n_accepted=13,
+                    predicted_tokens_per_second=80.0, prompt_tokens_per_second=400.0,
+                ),
+                dict(
+                    model_id=mid, backend_type="llama_cpp", request_kind="chat",
+                    started_at=t0, status_code=200, duration_ms=1000, generation_ms=1000,
+                    input_tokens=10, output_tokens=40, draft_n=20, draft_n_accepted=7,
+                    predicted_tokens_per_second=34.0, prompt_tokens_per_second=380.0,
+                ),
+                dict(
+                    model_id=mid, backend_type="llama_cpp", request_kind="chat",
+                    started_at=t0, status_code=200, duration_ms=1000, generation_ms=1000,
+                    input_tokens=10, output_tokens=20, draft_n=None, draft_n_accepted=None,
+                    predicted_tokens_per_second=None, prompt_tokens_per_second=None,
+                ),
+            ]
+        )
+        payload = await aggregator.get_performance_stats(
+            model_id=mid, from_dt=t0 - timedelta(hours=1), to_dt=t0 + timedelta(hours=1)
+        )
+        summary = payload["byModel"][0]
+        assert summary["draftAcceptanceRate"] == pytest.approx(0.556, abs=0.001)
+        assert summary["avgPredictedTokensPerSecond"] == pytest.approx(57.0, abs=0.01)
+        assert summary["avgPromptTokensPerSecond"] == pytest.approx(390.0, abs=0.01)
+    finally:
+        await _clear_model(mid)
 
 
 @pytest.mark.asyncio
-async def test_performance_stats_exposes_draft_acceptance_and_engine_speed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """2026-10-29 — added after being unable to confirm live whether
-    qwen3.8:27b's self-MTP acceptance rate had regressed from an earlier
-    ~80 tok/s baseline (measured ~33-35 tok/s that day, but real GPU1
-    contention made it impossible to catch a clean, uncontended moment to
-    verify why). draftAcceptanceRate = sum(draft_n_accepted)/sum(draft_n)
-    across all rows — the single number that most directly explains a
-    self-MTP model's real-world tok/s."""
-    row_a = SimpleNamespace(
-        model_id="llama_cpp/qwen3.8-27b", backend_type="llama_cpp",
-        request_kind="chat", duration_ms=1000, generation_ms=1000,
-        input_tokens=10, output_tokens=60, error=None, status_code=200,
-        draft_n=16, draft_n_accepted=13,
-        predicted_tokens_per_second=80.0, prompt_tokens_per_second=400.0,
-    )
-    row_b = SimpleNamespace(
-        model_id="llama_cpp/qwen3.8-27b", backend_type="llama_cpp",
-        request_kind="chat", duration_ms=1000, generation_ms=1000,
-        input_tokens=10, output_tokens=40, error=None, status_code=200,
-        draft_n=20, draft_n_accepted=7,
-        predicted_tokens_per_second=34.0, prompt_tokens_per_second=380.0,
-    )
-    # Non-speculative row (plain llama.cpp load, no draft_n at all) — must
-    # not pollute the acceptance-rate denominator with a phantom 0/0.
-    row_c = SimpleNamespace(
-        model_id="llama_cpp/qwen3.8-27b", backend_type="llama_cpp",
-        request_kind="chat", duration_ms=1000, generation_ms=1000,
-        input_tokens=10, output_tokens=20, error=None, status_code=200,
-        draft_n=None, draft_n_accepted=None,
-        predicted_tokens_per_second=None, prompt_tokens_per_second=None,
-    )
-
-    class _FakeResult:
-        def __init__(self, rows: list) -> None:
-            self._rows = rows
-
-        def scalars(self) -> "_FakeResult":
-            return self
-
-        def all(self) -> list:
-            return self._rows
-
-    class _FakeSession:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def execute(self, _query):
-            self.calls += 1
-            rows = [row_a, row_b, row_c] if self.calls == 1 else []
-            return _FakeResult(rows)
-
-    fake_session = _FakeSession()
-
-    class _FakeSessionFactory:
-        async def __aenter__(self) -> _FakeSession:
-            return fake_session
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
-            return None
-
-    monkeypatch.setattr(aggregator, "AsyncSessionLocal", lambda: _FakeSessionFactory())
-
-    payload = await aggregator.get_performance_stats(model_id="llama_cpp/qwen3.8-27b")
-
-    summary = payload["byModel"][0]
-    # (13 + 7) accepted / (16 + 20) drafted = 0.556
-    assert summary["draftAcceptanceRate"] == pytest.approx(0.556, abs=0.001)
-    assert summary["avgPredictedTokensPerSecond"] == pytest.approx(57.0, abs=0.01)
-    assert summary["avgPromptTokensPerSecond"] == pytest.approx(390.0, abs=0.01)
+@requires_db
+async def test_performance_stats_speculative_fields_are_none_without_data() -> None:
+    """A non-llama.cpp model (no draft/tps data) shows None, not 0 — 0 would
+    misleadingly read as '0% acceptance'."""
+    mid = "ollama/mistral-7b-testperf-none"
+    t0 = datetime(2026, 4, 3, 11, 0, tzinfo=UTC)
+    try:
+        await _seed_requests(
+            [
+                dict(
+                    model_id=mid, backend_type="ollama", request_kind="chat",
+                    started_at=t0, status_code=200, duration_ms=1000, generation_ms=None,
+                    input_tokens=10, output_tokens=20,
+                ),
+            ]
+        )
+        payload = await aggregator.get_performance_stats(
+            model_id=mid, from_dt=t0 - timedelta(hours=1), to_dt=t0 + timedelta(hours=1)
+        )
+        summary = payload["byModel"][0]
+        assert summary["draftAcceptanceRate"] is None
+        assert summary["avgPredictedTokensPerSecond"] is None
+        assert summary["avgPromptTokensPerSecond"] is None
+    finally:
+        await _clear_model(mid)
 
 
 @pytest.mark.asyncio
-async def test_performance_stats_speculative_fields_are_none_without_data(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A non-llama.cpp model (or rows predating this field) must show None,
-    not 0 or a crash — 0 would misleadingly read as '0% acceptance'."""
-    row = SimpleNamespace(
-        model_id="ollama/mistral:7b", backend_type="ollama",
-        request_kind="chat", duration_ms=1000, generation_ms=None,
-        input_tokens=10, output_tokens=20, error=None, status_code=200,
-        draft_n=None, draft_n_accepted=None,
-        predicted_tokens_per_second=None, prompt_tokens_per_second=None,
-    )
+@requires_db
+async def test_performance_stats_work_speeds_in_sql() -> None:
+    """workSpeeds (x_realtime for transcription) is now computed in SQL from
+    work_size_meta. Two 10s-audio transcriptions at 5s wall clock each:
+    20 s audio / 10 s wall = 2.0x realtime over 2 samples."""
+    mid = "whisper/large-v3-testperf-ws"
+    t0 = datetime(2026, 4, 3, 12, 0, tzinfo=UTC)
+    try:
+        await _seed_requests(
+            [
+                dict(
+                    model_id=mid, backend_type="whisper",
+                    request_kind="audio_transcription", started_at=t0, status_code=200,
+                    duration_ms=5000, work_size_meta={"audio_seconds": 10.0},
+                ),
+                dict(
+                    model_id=mid, backend_type="whisper",
+                    request_kind="audio_transcription", started_at=t0, status_code=200,
+                    duration_ms=5000, work_size_meta={"audio_seconds": 10.0},
+                ),
+            ]
+        )
+        payload = await aggregator.get_performance_stats(
+            model_id=mid, from_dt=t0 - timedelta(hours=1), to_dt=t0 + timedelta(hours=1)
+        )
+        summary = payload["byModel"][0]
+        speeds = {(tuple(s["kinds"]), s["unit"]): s for s in summary["workSpeeds"]}
+        key = (("audio_transcription",), "x_realtime")
+        assert key in speeds
+        assert speeds[key]["value"] == pytest.approx(2.0, abs=0.01)
+        assert speeds[key]["samples"] == 2
+    finally:
+        await _clear_model(mid)
 
-    class _FakeResult:
-        def __init__(self, rows: list) -> None:
-            self._rows = rows
 
-        def scalars(self) -> "_FakeResult":
-            return self
+@pytest.mark.asyncio
+@requires_db
+async def test_request_stats_aggregated_in_sql() -> None:
+    """get_request_stats counts, error rate (429 excluded as rejections),
+    percentiles and the per-minute series, all in SQL."""
+    mid = "llama_cpp/testreq"
+    t0 = datetime(2026, 4, 4, 8, 0, tzinfo=UTC)
+    try:
+        await _seed_requests(
+            [
+                dict(model_id=mid, started_at=t0, status_code=200, duration_ms=100),
+                dict(model_id=mid, started_at=t0, status_code=200, duration_ms=200),
+                dict(model_id=mid, started_at=t0, status_code=500, duration_ms=300),
+                dict(model_id=mid, started_at=t0, status_code=429, duration_ms=50),
+            ]
+        )
+        payload = await aggregator.get_request_stats(
+            t0 - timedelta(hours=1), t0 + timedelta(hours=1), mid
+        )
+        assert payload["totalRequests"] == 4
+        assert payload["rejections"] == 1
+        assert payload["errorRate"] == pytest.approx(round(1 / 4, 4))
+        assert payload["p95DurationMs"] == 300
+        # Nearest-rank p50 of [50, 100, 200, 300] is the 2nd value (ceil(0.5*4)=2).
+        assert payload["p50DurationMs"] == 100
+        assert sum(pt["count"] for pt in payload["series"]) == 4
+    finally:
+        await _clear_model(mid)
 
-        def all(self) -> list:
-            return self._rows
 
-    class _FakeSession:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def execute(self, _query):
-            self.calls += 1
-            rows = [row] if self.calls == 1 else []
-            return _FakeResult(rows)
-
-    fake_session = _FakeSession()
-
-    class _FakeSessionFactory:
-        async def __aenter__(self) -> _FakeSession:
-            return fake_session
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
-            return None
-
-    monkeypatch.setattr(aggregator, "AsyncSessionLocal", lambda: _FakeSessionFactory())
-
-    payload = await aggregator.get_performance_stats(model_id="ollama/mistral:7b")
-
-    summary = payload["byModel"][0]
-    assert summary["draftAcceptanceRate"] is None
-    assert summary["avgPredictedTokensPerSecond"] is None
-    assert summary["avgPromptTokensPerSecond"] is None
+@pytest.mark.asyncio
+@requires_db
+async def test_overview_stats_aggregated_in_sql() -> None:
+    """get_overview_stats totals, by-backend summaries and the reference cost
+    are computed in SQL; cost groups by the tier triple."""
+    mid = "llama_cpp/testoverview-7b"
+    t0 = datetime(2026, 4, 4, 9, 0, tzinfo=UTC)
+    try:
+        await _seed_requests(
+            [
+                dict(
+                    model_id=mid, backend_type="llama_cpp", request_kind="chat",
+                    started_at=t0, status_code=200, duration_ms=100,
+                    input_tokens=1000, output_tokens=2000,
+                ),
+                dict(
+                    model_id=mid, backend_type="llama_cpp", request_kind="chat",
+                    started_at=t0, status_code=500, duration_ms=300,
+                    input_tokens=0, output_tokens=0,
+                ),
+            ]
+        )
+        payload = await aggregator.get_overview_stats(
+            t0 - timedelta(hours=1), t0 + timedelta(hours=1), mid
+        )
+        assert payload["totalRequests"] == 2
+        assert payload["totalErrors"] == 1
+        assert payload["totalInputTokens"] == 1000
+        assert payload["totalOutputTokens"] == 2000
+        assert payload["tokenizedRequests"] == 1
+        assert payload["byBackend"][0]["backendType"] == "llama_cpp"
+        assert payload["byBackend"][0]["totalRequests"] == 2
+        # small tier (7b): input 1000 * small_input/1M + output 2000 * small_output/1M
+        from ocabra.stats.cost_calculator import estimate_request_cost
+        expected = round(estimate_request_cost(1000, 2000, "small"), 4)
+        assert payload["estimatedCostUsd"] == pytest.approx(expected)
+    finally:
+        await _clear_model(mid)
