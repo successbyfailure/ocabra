@@ -30,9 +30,10 @@ from __future__ import annotations
 import functools
 import os
 import re
-import struct
 from dataclasses import dataclass
 from pathlib import Path
+
+from ocabra.core.gguf_reader import read_gguf_header
 
 _MB = 1024 * 1024
 
@@ -437,127 +438,13 @@ def arch_from_ollama_model_info(model_info: dict, arch_family: str) -> ModelArch
 # Architecture extraction — GGUF header (llama.cpp files)
 # ---------------------------------------------------------------------------
 
-_GGUF_MAGIC = b"GGUF"
-# scalar type id -> struct format
-_GGUF_SCALAR_FMT = {
-    0: "<B",
-    1: "<b",
-    2: "<H",
-    3: "<h",
-    4: "<I",
-    5: "<i",
-    6: "<f",
-    7: "<B",
-    10: "<Q",
-    11: "<q",
-    12: "<d",
-}
-_GGUF_SCALAR_SIZE = {t: struct.calcsize(f) for t, f in _GGUF_SCALAR_FMT.items()}
-_GGUF_TYPE_STRING = 8
-_GGUF_TYPE_ARRAY = 9
-
-
-def _gguf_read(f, fmt: str):
-    return struct.unpack(fmt, f.read(struct.calcsize(fmt)))[0]
-
-
-def _gguf_read_string(f) -> str:
-    n = _gguf_read(f, "<Q")
-    return f.read(n).decode("utf-8", "replace")
-
-
-#: Small per-layer arrays (e.g. attention.sliding_window_pattern, one bool
-#: per block_count) are worth capturing for hybrid-architecture KV sizing;
-#: huge arrays (tokenizer vocab, merges — tens of thousands of entries) are
-#: not, both for parse speed and because nothing reads them. This caps what
-#: gets materialized into a Python list rather than seek-skipped.
-_GGUF_MAX_ARRAY_CAPTURE = 4096
-
-
-def _gguf_consume_value(f, vtype: int):
-    """Read a scalar/string value, or a small scalar array (see
-    ``_GGUF_MAX_ARRAY_CAPTURE``); seek past large/string arrays (never
-    needed). Returns the scalar/string/list, or None for skipped arrays."""
-    if vtype == _GGUF_TYPE_STRING:
-        return _gguf_read_string(f)
-    if vtype == _GGUF_TYPE_ARRAY:
-        elem_type = _gguf_read(f, "<I")
-        count = _gguf_read(f, "<Q")
-        if elem_type in _GGUF_SCALAR_SIZE:
-            if count <= _GGUF_MAX_ARRAY_CAPTURE:
-                fmt = _GGUF_SCALAR_FMT[elem_type]
-                return [_gguf_read(f, fmt) for _ in range(count)]
-            f.seek(_GGUF_SCALAR_SIZE[elem_type] * count, 1)
-        elif elem_type == _GGUF_TYPE_STRING:
-            for _ in range(count):
-                f.seek(_gguf_read(f, "<Q"), 1)
-        else:
-            raise ValueError(f"unsupported nested GGUF array type {elem_type}")
-        return None
-    fmt = _GGUF_SCALAR_FMT.get(vtype)
-    if fmt is None:
-        raise ValueError(f"unknown GGUF value type {vtype}")
-    return _gguf_read(f, fmt)
-
-
 def read_gguf_metadata(path: str | Path) -> dict:
-    """Parse the GGUF metadata key/value section. Arrays (tokenizer vocab, etc.)
-    are seek-skipped, so this reads only the small header regardless of file size.
-    """
-    return _read_gguf_header(path, with_experts=False)[0]
-
-
-# Expert tensors as llama.cpp itself matches them for --n-cpu-moe/--cpu-moe
-# (LLM_FFN_EXPS_REGEX, ``\.ffn_(up|down|gate|gate_up)_(ch|)exps``). The shared
-# expert (``ffn_*_shexp``) is not one of them and stays on the GPU.
-_EXPERT_TENSOR = re.compile(r"^blk\.(\d+)\.ffn_(?:up|down|gate|gate_up)_(?:ch|)exps")
-
-
-def _read_gguf_header(path: str | Path, *, with_experts: bool) -> tuple[dict, dict[int, float]]:
-    """Metadata and, if asked, MiB of expert tensors per layer.
-
-    The tensor table follows the metadata and holds each tensor's name and data
-    offset; a tensor's size is the gap to the next offset (the last one runs to
-    the end of the file). Still header-only reading. A table that cannot be
-    read (truncated or synthetic file) gives no expert data, not an error.
-    """
-    out: dict = {}
-    experts: dict[int, float] = {}
-    with open(path, "rb") as f:
-        if f.read(4) != _GGUF_MAGIC:
-            raise ValueError("not a GGUF file")
-        _version = _gguf_read(f, "<I")
-        tensor_count = _gguf_read(f, "<Q")
-        kv_count = _gguf_read(f, "<Q")
-        for _ in range(kv_count):
-            key = _gguf_read_string(f)
-            vtype = _gguf_read(f, "<I")
-            value = _gguf_consume_value(f, vtype)
-            if value is not None:
-                out[key] = value
-        if not with_experts or tensor_count <= 0:
-            return out, experts
-        try:
-            entries: list[tuple[int, str]] = []
-            for _ in range(tensor_count):
-                name = _gguf_read_string(f)
-                n_dims = _gguf_read(f, "<I")
-                f.seek(8 * n_dims + 4, 1)  # dims (u64 each) + ggml type (u32)
-                entries.append((_gguf_read(f, "<Q"), name))
-            alignment = int(out.get("general.alignment") or 32)
-            data_start = -(-f.tell() // alignment) * alignment
-            data_size = os.fstat(f.fileno()).st_size - data_start
-        except (struct.error, ValueError, OSError):
-            return out, {}
-    entries.sort()
-    for i, (offset, name) in enumerate(entries):
-        match = _EXPERT_TENSOR.match(name)
-        if not match:
-            continue
-        end = entries[i + 1][0] if i + 1 < len(entries) else data_size
-        layer = int(match.group(1))
-        experts[layer] = experts.get(layer, 0.0) + max(0, end - offset) / (1024 * 1024)
-    return out, experts
+    """Parse the GGUF metadata key/value section (DUP-03: the one parser now
+    lives in :mod:`ocabra.core.gguf_reader`). Arrays are seek-skipped, so this
+    reads only the small header regardless of file size. ``{}`` when the file is
+    missing or not a GGUF."""
+    header = read_gguf_header(path)
+    return dict(header.metadata) if header is not None else {}
 
 
 def arch_from_gguf(path: str | Path) -> ModelArch | None:
@@ -597,10 +484,10 @@ async def warm_arch_cache(paths) -> int:
 
 @functools.lru_cache(maxsize=256)
 def _arch_from_gguf_cached(path: str, _mtime_ns: int, _size: int) -> ModelArch | None:
-    try:
-        md, experts = _read_gguf_header(path, with_experts=True)
-    except (OSError, ValueError, struct.error):
+    header = read_gguf_header(path)
+    if header is None:
         return None
+    md, experts = header.metadata, header.expert_mb_by_layer
     arch = md.get("general.architecture")
     if not arch:
         return None

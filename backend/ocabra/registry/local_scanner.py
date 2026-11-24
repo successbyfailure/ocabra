@@ -1,103 +1,15 @@
 import asyncio
 import json
-import struct
 from pathlib import Path
 
+from ocabra.core.gguf_reader import read_gguf_header
 from ocabra.schemas.registry import LocalModel
 
-# --- GGUF binary header parsing (Sprint 17.4) ---
+# --- GGUF header extraction (DUP-03) ---
 # Reference: https://github.com/ggml-org/ggml/blob/master/docs/gguf.md
-# We only extract the tokenizer fingerprint (vocab_size, bos_id, eos_id) so we
-# can decide whether two GGUFs are speculative-compatible. A best-effort parse
-# that returns ``(None, None, None)`` on any error is acceptable.
-
-_GGUF_MAGIC = b"GGUF"
-
-# GGUF metadata value types (subset we care about).
-_GGUF_TYPE_UINT8 = 0
-_GGUF_TYPE_INT8 = 1
-_GGUF_TYPE_UINT16 = 2
-_GGUF_TYPE_INT16 = 3
-_GGUF_TYPE_UINT32 = 4
-_GGUF_TYPE_INT32 = 5
-_GGUF_TYPE_FLOAT32 = 6
-_GGUF_TYPE_BOOL = 7
-_GGUF_TYPE_STRING = 8
-_GGUF_TYPE_ARRAY = 9
-_GGUF_TYPE_UINT64 = 10
-_GGUF_TYPE_INT64 = 11
-_GGUF_TYPE_FLOAT64 = 12
-
-_GGUF_SCALAR_FORMATS: dict[int, str] = {
-    _GGUF_TYPE_UINT8: "<B",
-    _GGUF_TYPE_INT8: "<b",
-    _GGUF_TYPE_UINT16: "<H",
-    _GGUF_TYPE_INT16: "<h",
-    _GGUF_TYPE_UINT32: "<I",
-    _GGUF_TYPE_INT32: "<i",
-    _GGUF_TYPE_FLOAT32: "<f",
-    _GGUF_TYPE_BOOL: "<B",
-    _GGUF_TYPE_UINT64: "<Q",
-    _GGUF_TYPE_INT64: "<q",
-    _GGUF_TYPE_FLOAT64: "<d",
-}
-
-_TOKENIZER_KEYS = {
-    "tokenizer.ggml.tokens",
-    "tokenizer.ggml.bos_token_id",
-    "tokenizer.ggml.eos_token_id",
-}
-
-# Cap the bytes we read from each GGUF — kv_data lives at the top of the file
-# but huge tokenizer arrays (e.g. 256k vocab) can push it past 32 MiB. 64 MiB
-# is a safe upper bound that avoids slurping multi-GB model files.
-_GGUF_HEADER_MAX_BYTES = 64 * 1024 * 1024
-
-
-class _GGUFParseError(Exception):
-    """Raised when a GGUF header cannot be parsed."""
-
-
-def _read_scalar(buf: memoryview, offset: int, value_type: int) -> tuple[object, int]:
-    fmt = _GGUF_SCALAR_FORMATS[value_type]
-    size = struct.calcsize(fmt)
-    (value,) = struct.unpack_from(fmt, buf, offset)
-    if value_type == _GGUF_TYPE_BOOL:
-        value = bool(value)
-    return value, offset + size
-
-
-def _read_string(buf: memoryview, offset: int) -> tuple[str, int]:
-    (length,) = struct.unpack_from("<Q", buf, offset)
-    offset += 8
-    raw = bytes(buf[offset : offset + length])
-    return raw.decode("utf-8", errors="replace"), offset + length
-
-
-def _skip_value(buf: memoryview, offset: int, value_type: int) -> int:
-    if value_type in _GGUF_SCALAR_FORMATS:
-        _, offset = _read_scalar(buf, offset, value_type)
-        return offset
-    if value_type == _GGUF_TYPE_STRING:
-        _, offset = _read_string(buf, offset)
-        return offset
-    if value_type == _GGUF_TYPE_ARRAY:
-        (item_type,) = struct.unpack_from("<I", buf, offset)
-        offset += 4
-        (count,) = struct.unpack_from("<Q", buf, offset)
-        offset += 8
-        for _ in range(count):
-            offset = _skip_value(buf, offset, int(item_type))
-        return offset
-    raise _GGUFParseError(f"unknown gguf type {value_type}")
-
-
-def _read_array_count(buf: memoryview, offset: int) -> tuple[int, int, int]:
-    (item_type,) = struct.unpack_from("<I", buf, offset)
-    offset += 4
-    (count,) = struct.unpack_from("<Q", buf, offset)
-    offset += 8
-    return int(item_type), int(count), offset
+# The single header parser lives in ``ocabra.core.gguf_reader``; the readers
+# below are thin extractors over its cached result. Each is best-effort: a
+# missing/unreadable file yields the same "unknown" it did before.
 
 
 def parse_gguf_tokenizer_fingerprint(
@@ -109,67 +21,15 @@ def parse_gguf_tokenizer_fingerprint(
     the metadata is missing or unparseable. Errors are swallowed and result
     in an all-``None`` tuple.
     """
-    try:
-        with path.open("rb") as fh:
-            data = fh.read(_GGUF_HEADER_MAX_BYTES)
-    except OSError:
+    header = read_gguf_header(path)
+    if header is None:
         return (None, None, None)
-
-    if len(data) < 24 or data[:4] != _GGUF_MAGIC:
-        return (None, None, None)
-
-    buf = memoryview(data)
-    try:
-        (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
-            # v1 used 32-bit lengths; we only support v2+.
-            return (None, None, None)
-        (_tensor_count,) = struct.unpack_from("<Q", buf, 8)
-        (kv_count,) = struct.unpack_from("<Q", buf, 16)
-        offset = 24
-
-        vocab_size: int | None = None
-        bos_id: int | None = None
-        eos_id: int | None = None
-
-        for _ in range(int(kv_count)):
-            key, offset = _read_string(buf, offset)
-            (value_type,) = struct.unpack_from("<I", buf, offset)
-            offset += 4
-            value_type = int(value_type)
-
-            if key not in _TOKENIZER_KEYS:
-                offset = _skip_value(buf, offset, value_type)
-                continue
-
-            if key == "tokenizer.ggml.tokens":
-                if value_type != _GGUF_TYPE_ARRAY:
-                    offset = _skip_value(buf, offset, value_type)
-                    continue
-                item_type, count, offset = _read_array_count(buf, offset)
-                vocab_size = count
-                # Skip the actual token strings/IDs — we only need the count.
-                for _ in range(count):
-                    offset = _skip_value(buf, offset, item_type)
-            elif key == "tokenizer.ggml.bos_token_id":
-                if value_type in _GGUF_SCALAR_FORMATS:
-                    value, offset = _read_scalar(buf, offset, value_type)
-                    bos_id = int(value) if value is not None else None
-                else:
-                    offset = _skip_value(buf, offset, value_type)
-            elif key == "tokenizer.ggml.eos_token_id":
-                if value_type in _GGUF_SCALAR_FORMATS:
-                    value, offset = _read_scalar(buf, offset, value_type)
-                    eos_id = int(value) if value is not None else None
-                else:
-                    offset = _skip_value(buf, offset, value_type)
-
-            if vocab_size is not None and bos_id is not None and eos_id is not None:
-                break
-
-        return (vocab_size, bos_id, eos_id)
-    except (struct.error, _GGUFParseError, IndexError, ValueError):
-        return (None, None, None)
+    vocab_size = header.array_lengths.get("tokenizer.ggml.tokens")
+    bos = header.metadata.get("tokenizer.ggml.bos_token_id")
+    eos = header.metadata.get("tokenizer.ggml.eos_token_id")
+    bos_id = int(bos) if isinstance(bos, (int, float)) else None
+    eos_id = int(eos) if isinstance(eos, (int, float)) else None
+    return (vocab_size, bos_id, eos_id)
 
 
 def parse_gguf_file_type(path: Path) -> int | None:
@@ -180,35 +40,11 @@ def parse_gguf_file_type(path: Path) -> int | None:
     in the PrismML fork, for instance. The name cannot be trusted for this —
     an Ollama blob is called after its sha256.
     """
-
-    try:
-        with path.open("rb") as fh:
-            data = fh.read(_GGUF_HEADER_MAX_BYTES)
-    except OSError:
+    header = read_gguf_header(path)
+    if header is None:
         return None
-
-    if len(data) < 24 or data[:4] != _GGUF_MAGIC:
-        return None
-
-    buf = memoryview(data)
-    try:
-        (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
-            return None
-        (kv_count,) = struct.unpack_from("<Q", buf, 16)
-        offset = 24
-        for _ in range(int(kv_count)):
-            key, offset = _read_string(buf, offset)
-            (value_type,) = struct.unpack_from("<I", buf, offset)
-            offset += 4
-            value_type = int(value_type)
-            if key == "general.file_type" and value_type in _GGUF_SCALAR_FORMATS:
-                valor, offset = _read_scalar(buf, offset, value_type)
-                return int(valor)  # type: ignore[arg-type]
-            offset = _skip_value(buf, offset, value_type)
-    except (struct.error, _GGUFParseError, IndexError, ValueError):
-        return None
-    return None
+    valor = header.metadata.get("general.file_type")
+    return int(valor) if isinstance(valor, (int, float)) else None
 
 
 def parse_gguf_context_length(path: Path) -> int | None:
@@ -219,42 +55,16 @@ def parse_gguf_context_length(path: Path) -> int | None:
     first. Used when registering a model to pick a context the model actually
     supports instead of llama.cpp's 4096 fallback.
     """
-
-    try:
-        with path.open("rb") as fh:
-            data = fh.read(_GGUF_HEADER_MAX_BYTES)
-    except OSError:
+    header = read_gguf_header(path)
+    if header is None:
         return None
-
-    if len(data) < 24 or data[:4] != _GGUF_MAGIC:
-        return None
-
-    buf = memoryview(data)
-    try:
-        (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
-            return None
-        (kv_count,) = struct.unpack_from("<Q", buf, 16)
-        offset = 24
-
-        arch: str | None = None
-        contextos: dict[str, int] = {}
-        for _ in range(int(kv_count)):
-            key, offset = _read_string(buf, offset)
-            (value_type,) = struct.unpack_from("<I", buf, offset)
-            offset += 4
-            value_type = int(value_type)
-            if key == "general.architecture" and value_type == _GGUF_TYPE_STRING:
-                arch, offset = _read_string(buf, offset)
-                continue
-            if key.endswith(".context_length") and value_type in _GGUF_SCALAR_FORMATS:
-                valor, offset = _read_scalar(buf, offset, value_type)
-                contextos[key] = int(valor)  # type: ignore[arg-type]
-                continue
-            offset = _skip_value(buf, offset, value_type)
-    except (struct.error, _GGUFParseError, IndexError, ValueError):
-        return None
-
+    arch = header.metadata.get("general.architecture")
+    arch = arch if isinstance(arch, str) else None
+    contextos = {
+        key: int(value)
+        for key, value in header.metadata.items()
+        if key.endswith(".context_length") and isinstance(value, (int, float))
+    }
     if arch and f"{arch}.context_length" in contextos:
         return contextos[f"{arch}.context_length"]
     # Un solo candidato es inequivoco aunque no se haya leido la arquitectura.
@@ -271,35 +81,11 @@ def parse_gguf_chat_template(path: Path) -> str | None:
     heuristic: flint:40b showed ``tools: false, reasoning: false`` although its
     template has ``<tool_call>`` and ``<think>`` (2026-11-11).
     """
-
-    try:
-        with path.open("rb") as fh:
-            data = fh.read(_GGUF_HEADER_MAX_BYTES)
-    except OSError:
+    header = read_gguf_header(path)
+    if header is None:
         return None
-
-    if len(data) < 24 or data[:4] != _GGUF_MAGIC:
-        return None
-
-    buf = memoryview(data)
-    try:
-        (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
-            return None
-        (kv_count,) = struct.unpack_from("<Q", buf, 16)
-        offset = 24
-        for _ in range(int(kv_count)):
-            key, offset = _read_string(buf, offset)
-            (value_type,) = struct.unpack_from("<I", buf, offset)
-            offset += 4
-            value_type = int(value_type)
-            if key == "tokenizer.chat_template" and value_type == _GGUF_TYPE_STRING:
-                template, offset = _read_string(buf, offset)
-                return template
-            offset = _skip_value(buf, offset, value_type)
-    except (struct.error, _GGUFParseError, IndexError, ValueError):
-        return None
-    return None
+    template = header.metadata.get("tokenizer.chat_template")
+    return template if isinstance(template, str) else None
 
 
 def gguf_template_capabilities(path: Path) -> dict[str, bool] | None:
@@ -360,49 +146,13 @@ def parse_gguf_speculative_type(path: Path) -> str | None:
     kills the worker on startup.
     """
 
-    try:
-        with path.open("rb") as fh:
-            data = fh.read(_GGUF_HEADER_MAX_BYTES)
-    except OSError:
+    header = read_gguf_header(path)
+    if header is None:
         return None
-
-    if len(data) < 24 or data[:4] != _GGUF_MAGIC:
-        return None
-
-    buf = memoryview(data)
-    try:
-        (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
-            return None
-        (tensor_count,) = struct.unpack_from("<Q", buf, 8)
-        (kv_count,) = struct.unpack_from("<Q", buf, 16)
-        offset = 24
-
-        arch: str | None = None
-        for _ in range(int(kv_count)):
-            key, offset = _read_string(buf, offset)
-            (value_type,) = struct.unpack_from("<I", buf, offset)
-            offset += 4
-            value_type = int(value_type)
-            if key == "general.architecture" and value_type == _GGUF_TYPE_STRING:
-                arch, offset = _read_string(buf, offset)
-                continue
-            offset = _skip_value(buf, offset, value_type)
-
-        # The tensor table follows the metadata: name, n_dims, dims[n_dims],
-        # ggml type, offset.
-        tiene_nextn = False
-        tiene_markov = False
-        for _ in range(int(tensor_count)):
-            name, offset = _read_string(buf, offset)
-            (n_dims,) = struct.unpack_from("<I", buf, offset)
-            offset += 4 + 8 * int(n_dims) + 4 + 8
-            if _NEXTN_TENSOR_MARK in name:
-                tiene_nextn = True
-            elif name == _DSPARK_TENSOR:
-                tiene_markov = True
-    except (struct.error, _GGUFParseError, IndexError, ValueError):
-        return None
+    arch = header.metadata.get("general.architecture")
+    arch = arch if isinstance(arch, str) else None
+    tiene_nextn = any(_NEXTN_TENSOR_MARK in name for name in header.tensor_names)
+    tiene_markov = any(name == _DSPARK_TENSOR for name in header.tensor_names)
 
     if arch == _DFLASH_ARCH:
         # The Markov head is what tells DSpark apart from DFlash.
