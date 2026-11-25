@@ -35,6 +35,7 @@ const FALLBACK_SECONDS: Record<string, number> = {
   "bfcl/core": 90 * 60,
   "ifeval/quick": 15 * 60,
   "ifeval/full": 100 * 60,
+  "fulcrum/orchestration": 15 * 60,
   "escriba/llm": 3 * 60,
   "escriba/stt": 12 * 60,
   "escriba/stt_diarization": 40 * 60,

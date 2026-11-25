@@ -120,6 +120,28 @@ APPS: dict[str, AppSpec] = {
             ),
         },
     ),
+    "fulcrum": AppSpec(
+        name="fulcrum",
+        description=(
+            "Orquestación de Fulcrum: llevar varias sesiones de agentes en paralelo "
+            "durante muchos turnos sobre un mundo simulado, con el prompt y las tools reales."
+        ),
+        repository="https://github.com/successbyfailure/project-assistant.git",
+        default_revision="main",
+        dataset_root="benchmarks/orchestration",
+        suites={
+            "orchestration": SuiteSpec(
+                name="orchestration",
+                description=(
+                    "Ronda por fases (5 runs, 3 fases, máx. 3 a la vez): despacho, textos fijos, "
+                    "máximo, orden, cola, honestidad. Sin juez LLM; 5 repeticiones."
+                ),
+                script="ocabra_suite.py",
+                result_glob="results_*/results.json",
+                models_flag="--models",
+            )
+        },
+    ),
     "ifeval": AppSpec(
         name="ifeval",
         description="IFEval oficial de Google: cumplimiento verificable de instrucciones.",

@@ -40,6 +40,7 @@ const FACTOR_LABELS: Record<RankingFactor, string> = {
   escriba: "Escriba",
   bfcl: "BFCL",
   ifeval: "IFEval",
+  fulcrum: "Fulcrum",
   reliability: "Fiabilidad",
   performance: "Rendimiento",
   efficiency: "Eficiencia GPU",
@@ -50,6 +51,7 @@ const DIMENSION_LABELS = {
   escriba: "Escriba",
   bfcl: "BFCL",
   ifeval: "IFEval",
+  fulcrum: "Fulcrum",
 }
 
 export function paretoIds(rows: ModelRankingRow[]): Set<string> {

@@ -20,7 +20,9 @@ function run(
       ? { [profile]: { status: "OK", transcript_size: "M", speed: { tok_s: options.speed ?? 50 }, quality: { default: { coverage: quality, precision: quality } } } }
       : app === "bfcl"
         ? { benchmark: "bfcl_v4", model: profile, status: "completed", metrics: { non_live_accuracy: quality, latency_s_p50: options.speed ?? 2 } }
-        : { benchmark: "ifeval", model: profile, status: "completed", metrics: { strict_prompt_accuracy: quality, latency_s_p50: options.speed ?? 2 } }
+        : app === "fulcrum"
+          ? { benchmark: "fulcrum_orchestration", model: profile, status: "completed", cases: 5, metrics: { capability_rate: quality, perfect_rate: quality / 2, latency_s_p50: options.speed ?? 2 } }
+          : { benchmark: "ifeval", model: profile, status: "completed", metrics: { strict_prompt_accuracy: quality, latency_s_p50: options.speed ?? 2 } }
   return {
     id: `${app}-${suite}-${profile}-${options.backend ?? "llama_cpp"}`,
     app,
@@ -68,12 +70,13 @@ function run(
 const balanced = RANKING_PROFILES[0].weights
 
 describe("global benchmark ranking", () => {
-  it("combines the four quality dimensions and keeps model plus backend as identity", () => {
+  it("combines the five quality dimensions and keeps model plus backend as identity", () => {
     const runs = [
       run("corrala", "llm", "qwen", 0.8),
       run("escriba", "llm", "qwen", 0.8),
       run("bfcl", "core", "qwen", 0.8),
       run("ifeval", "full", "qwen", 0.8),
+      run("fulcrum", "orchestration", "qwen", 0.8),
       run("bfcl", "core", "qwen-ollama", 0.9, { backend: "ollama" }),
       run("ifeval", "full", "qwen-ollama", 0.9, { backend: "ollama" }),
     ]
@@ -83,8 +86,18 @@ describe("global benchmark ranking", () => {
     expect(ranking).toHaveLength(2)
     expect(ranking[0]).toMatchObject({ model: "qwen", backend: "llama_cpp", coverage: 1, eligible: true })
     expect(ranking[0].score).toBeCloseTo(85)
-    expect(ranking[1]).toMatchObject({ model: "qwen-ollama", backend: "ollama", coverage: 0.5, eligible: true })
+    expect(ranking[1]).toMatchObject({ model: "qwen-ollama", backend: "ollama", coverage: 0.4, eligible: true })
     expect(ranking[1].score).toBeLessThan(ranking[0].score)
+  })
+
+  it("scores Fulcrum orchestration by its capability rate", () => {
+    const ranking = buildModelRanking([
+      run("fulcrum", "orchestration", "gestor", 0.9),
+      run("ifeval", "full", "gestor", 0.9),
+    ], balanced)
+
+    expect(ranking[0].dimensions).toEqual(expect.arrayContaining(["fulcrum", "ifeval"]))
+    expect(ranking[0].sources.find((source) => source.dimension === "fulcrum")?.quality).toBeCloseTo(90)
   })
 
   it("does not let a model with only one public benchmark enter the ranking", () => {
@@ -94,7 +107,7 @@ describe("global benchmark ranking", () => {
       run("ifeval", "full", "covered", 0.6),
     ], balanced)
 
-    expect(ranking.find((row) => row.model === "partial")).toMatchObject({ eligible: false, coverage: 0.25 })
+    expect(ranking.find((row) => row.model === "partial")).toMatchObject({ eligible: false, coverage: 0.2 })
     expect(ranking[0].model).toBe("covered")
   })
 
@@ -131,7 +144,7 @@ describe("global benchmark ranking", () => {
       id, model: id, profile: id, backend: "test", score: 0, quality, reliability: 100,
       performance, efficiency: 100, coverage: 1, dimensions: ["bfcl", "ifeval"], eligible: true,
       versions: [], hardware: [], sources: [],
-      contributions: { corrala: 0, escriba: 0, bfcl: 0, ifeval: 0, reliability: 0, performance: 0, efficiency: 0 },
+      contributions: { corrala: 0, escriba: 0, bfcl: 0, ifeval: 0, fulcrum: 0, reliability: 0, performance: 0, efficiency: 0 },
     })
     expect([...paretoIds([row("balanced", 80, 80), row("slow", 90, 60), row("dominated", 70, 70)])].sort()).toEqual(["balanced", "slow"])
   })

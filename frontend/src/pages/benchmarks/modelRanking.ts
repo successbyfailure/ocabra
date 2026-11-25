@@ -1,7 +1,7 @@
 import type { BenchmarkAttempt, BenchmarkRun } from "@/types"
 import { parseBenchmarkResults, type BenchmarkMetric } from "./resultAdapters"
 
-export type RankingDimension = "corrala" | "escriba" | "bfcl" | "ifeval"
+export type RankingDimension = "corrala" | "escriba" | "bfcl" | "ifeval" | "fulcrum"
 export type RankingFactor = RankingDimension | "reliability" | "performance" | "efficiency"
 export type RankingProfileId = "balanced" | "quality" | "latency" | "efficiency" | "custom"
 
@@ -68,7 +68,7 @@ interface Observation {
   efficiency: number
 }
 
-const QUALITY_DIMENSIONS: RankingDimension[] = ["corrala", "escriba", "bfcl", "ifeval"]
+const QUALITY_DIMENSIONS: RankingDimension[] = ["corrala", "escriba", "bfcl", "ifeval", "fulcrum"]
 const UNKNOWN_BACKEND = "backend no informado"
 
 export const RANKING_PROFILES: RankingProfile[] = [
@@ -76,33 +76,34 @@ export const RANKING_PROFILES: RankingProfile[] = [
     id: "balanced",
     label: "Producción equilibrada",
     description: "Calidad real y pública, fiabilidad, rendimiento y coste de GPU.",
-    weights: { corrala: 20, escriba: 20, bfcl: 20, ifeval: 15, reliability: 10, performance: 10, efficiency: 5 },
+    weights: { corrala: 18, escriba: 18, bfcl: 17, ifeval: 12, fulcrum: 10, reliability: 10, performance: 10, efficiency: 5 },
   },
   {
     id: "quality",
     label: "Calidad máxima",
     description: "Prioriza las tareas reales y las evaluaciones de calidad.",
-    weights: { corrala: 25, escriba: 25, bfcl: 20, ifeval: 15, reliability: 5, performance: 3, efficiency: 2 },
+    weights: { corrala: 22, escriba: 22, bfcl: 18, ifeval: 13, fulcrum: 15, reliability: 5, performance: 3, efficiency: 2 },
   },
   {
     id: "latency",
     label: "Baja latencia",
     description: "Da más peso al tiempo de respuesta sin ignorar la calidad.",
-    weights: { corrala: 13, escriba: 12, bfcl: 10, ifeval: 10, reliability: 15, performance: 35, efficiency: 5 },
+    weights: { corrala: 11, escriba: 10, bfcl: 9, ifeval: 8, fulcrum: 7, reliability: 15, performance: 35, efficiency: 5 },
   },
   {
     id: "efficiency",
     label: "Infra eficiente",
     description: "Premia el resultado obtenido por GPU utilizada.",
-    weights: { corrala: 15, escriba: 15, bfcl: 10, ifeval: 10, reliability: 15, performance: 10, efficiency: 25 },
+    weights: { corrala: 13, escriba: 13, bfcl: 9, ifeval: 8, fulcrum: 7, reliability: 15, performance: 10, efficiency: 25 },
   },
 ]
 
 export const DEFAULT_CUSTOM_WEIGHTS: RankingWeights = {
-  corrala: 18,
-  escriba: 18,
-  bfcl: 17,
-  ifeval: 17,
+  corrala: 15,
+  escriba: 15,
+  bfcl: 14,
+  ifeval: 14,
+  fulcrum: 12,
   reliability: 10,
   performance: 10,
   efficiency: 10,
@@ -117,6 +118,7 @@ function dimensionFor(run: BenchmarkRun): RankingDimension | null {
   if (run.app === "escriba" && run.suite === "llm") return "escriba"
   if (run.app === "bfcl") return "bfcl"
   if (run.app === "ifeval") return "ifeval"
+  if (run.app === "fulcrum" && run.suite === "orchestration") return "fulcrum"
   return null
 }
 
@@ -180,7 +182,9 @@ function observationQuality(run: BenchmarkRun, profile: string, dimension: Ranki
   }
   const keys = dimension === "bfcl"
     ? ["non_live_accuracy", "simple_accuracy", "multiple_accuracy"]
-    : ["strict_prompt_accuracy", "strict_instruction_accuracy", "loose_prompt_accuracy"]
+    : dimension === "fulcrum"
+      ? ["capability_rate", "perfect_rate"]
+      : ["strict_prompt_accuracy", "strict_instruction_accuracy", "loose_prompt_accuracy"]
   const value = numericMetric(rows.flatMap((row) => row.metrics), keys)?.value
   return typeof value === "number" ? clamp(value) : null
 }
@@ -328,6 +332,7 @@ export function buildModelRanking(
       escriba: (items.find((item) => item.dimension === "escriba")?.quality ?? 0) * normalized.escriba,
       bfcl: (items.find((item) => item.dimension === "bfcl")?.quality ?? 0) * normalized.bfcl,
       ifeval: (items.find((item) => item.dimension === "ifeval")?.quality ?? 0) * normalized.ifeval,
+      fulcrum: (items.find((item) => item.dimension === "fulcrum")?.quality ?? 0) * normalized.fulcrum,
       reliability: reliability * normalized.reliability,
       performance: performance * normalized.performance,
       efficiency: efficiency * normalized.efficiency,
