@@ -76,7 +76,7 @@ describe("global benchmark ranking", () => {
       run("escriba", "llm", "qwen", 0.8),
       run("bfcl", "core", "qwen", 0.8),
       run("ifeval", "full", "qwen", 0.8),
-      run("fulcrum", "orchestration", "qwen", 0.8),
+      run("fulcrum", "orquestacion", "qwen", 0.8),
       run("bfcl", "core", "qwen-ollama", 0.9, { backend: "ollama" }),
       run("ifeval", "full", "qwen-ollama", 0.9, { backend: "ollama" }),
     ]
@@ -92,7 +92,7 @@ describe("global benchmark ranking", () => {
 
   it("scores Fulcrum orchestration by its capability rate", () => {
     const ranking = buildModelRanking([
-      run("fulcrum", "orchestration", "gestor", 0.9),
+      run("fulcrum", "orquestacion", "gestor", 0.9),
       run("ifeval", "full", "gestor", 0.9),
     ], balanced)
 

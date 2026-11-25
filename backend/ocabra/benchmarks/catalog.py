@@ -130,11 +130,11 @@ APPS: dict[str, AppSpec] = {
         default_revision="main",
         dataset_root="benchmarks/orchestration",
         suites={
-            "orchestration": SuiteSpec(
-                name="orchestration",
+            "orquestacion": SuiteSpec(
+                name="orquestacion",
                 description=(
                     "Ronda por fases (5 runs, 3 fases, máx. 3 a la vez): despacho, textos fijos, "
-                    "máximo, orden, cola, honestidad. Sin juez LLM; 5 repeticiones."
+                    "máximo, orden, cola, honestidad. Sin juez LLM; 5 repeticiones (~12 min cada una con un 27B MoE)."
                 ),
                 script="ocabra_suite.py",
                 result_glob="results_*/results.json",

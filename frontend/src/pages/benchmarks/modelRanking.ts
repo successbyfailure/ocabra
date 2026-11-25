@@ -118,7 +118,7 @@ function dimensionFor(run: BenchmarkRun): RankingDimension | null {
   if (run.app === "escriba" && run.suite === "llm") return "escriba"
   if (run.app === "bfcl") return "bfcl"
   if (run.app === "ifeval") return "ifeval"
-  if (run.app === "fulcrum" && run.suite === "orchestration") return "fulcrum"
+  if (run.app === "fulcrum" && run.suite === "orquestacion") return "fulcrum"
   return null
 }
 
