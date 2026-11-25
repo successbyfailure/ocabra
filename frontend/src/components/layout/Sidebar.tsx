@@ -174,11 +174,12 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapse }: SidebarP
           "flex items-center border-b border-border",
           collapsed ? "justify-center px-2 py-5" : "gap-2 px-5 py-5",
         )}>
-          <span className="text-xl font-bold tracking-tight text-foreground">
-            {collapsed ? "oC" : "oCabra"}
-          </span>
+          <img src="/ocabra-borg.png" alt={collapsed ? "oCabra" : ""} width={32} height={32} />
           {!collapsed && (
-            <span className="text-xs text-muted-foreground mt-0.5">AI Server</span>
+            <>
+              <span className="text-xl font-bold tracking-tight text-foreground">oCabra</span>
+              <span className="text-xs text-muted-foreground mt-0.5">AI Server</span>
+            </>
           )}
         </div>
 

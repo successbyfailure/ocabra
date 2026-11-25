@@ -50,9 +50,7 @@ export function Login() {
       <div className="w-full max-w-sm rounded-xl border border-border bg-card p-8 shadow-lg transition-all duration-200">
         {/* Logo / Title */}
         <div className="mb-6 text-center">
-          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/20">
-            <span className="text-xl font-bold text-primary">oC</span>
-          </div>
+          <img src="/ocabra-borg.png" alt="" width={64} height={64} className="mx-auto mb-3" />
           <span className="text-2xl font-bold tracking-tight text-foreground">oCabra</span>
           <p className="mt-1 text-sm text-muted-foreground">AI Server — Inicia sesion para continuar</p>
         </div>
