@@ -16,6 +16,30 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.140.0 — 2026-11-26
+
+### Nuevo (administración)
+
+- **Baterías de benchmarks.** `POST /ocabra/benchmarks/runs` (y los planes)
+  aceptan `battery`: más pruebas `{app, suite, suite_args}` con los mismos
+  modelos y el mismo nodo o pod. Se crea una ejecución por prueba (comparten
+  `batchId`) y la respuesta lleva `batchRuns`. Con pod propio se pide una sola
+  máquina para todas, que se apaga al terminar la última.
+- **Cuánto tarda un pod en estar listo.** Cada nodo de la nube guarda su línea
+  de tiempo y `GET /ocabra/cloud/nodes` devuelve `durations`: espera de
+  máquina, arranque, conexión con oCabra, preparación (backends y modelos) y
+  total, más lo que tardó cada elemento de la precarga. Los intentos de
+  benchmark en un pod lo guardan en `environment.node.cloud.readiness`.
+
+### Arreglos
+
+- **Los pods de benchmark no se pedían mientras otra ejecución medía.** El
+  aprovisionamiento corre ahora en su propio bucle.
+
+**Acción:** ninguna en la API de inferencia.
+
+---
+
 ## 0.139.1 — 2026-11-26
 
 ### Arreglos

@@ -52,6 +52,8 @@ class CloudNode(Base):
         UUID(as_uuid=True), ForeignKey("federation_peers.id", ondelete="SET NULL"), nullable=True
     )
     preload_models: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Marcas de cada etapa hasta estar listo (core/cloud/timeline.py).
+    timeline: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     # Network volume (model/backend cache) and the data center it pins the pod to.
     network_volume_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     data_center_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

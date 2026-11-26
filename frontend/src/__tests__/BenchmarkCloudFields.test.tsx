@@ -8,12 +8,14 @@ vi.mock("@/api/client", () => ({
     federation: {
       cloud: {
         gpuTypes: vi.fn().mockResolvedValue([
-          { id: "NVIDIA RTX 4090", name: "RTX 4090", memory_gb: 24, availability: "NONE" },
-          { id: "NVIDIA RTX 3090", name: "RTX 3090", memory_gb: 24, availability: "HIGH" },
+          { id: "4090", name: "RTX 4090", memory_gb: 24, availability: "HIGH", community: true, secure: true, price_community: 0.34, price_secure: 0.69 },
+          { id: "3090", name: "RTX 3090", memory_gb: 24, availability: "LOW", community: true, secure: false, price_community: 0.22, price_secure: null },
+          { id: "A100", name: "A100", memory_gb: 80, availability: "NONE", community: true, secure: true, price_community: 1.2, price_secure: 1.6 },
         ]),
+        getRunpod: vi.fn().mockResolvedValue({ settings: { cloud_type: "COMMUNITY" } }),
       },
     },
-    backends: { list: vi.fn().mockResolvedValue([{ backendType: "vllm" }, { backendType: "llamacpp_mks" }]) },
+    backends: { list: vi.fn().mockResolvedValue([{ backendType: "vllm" }]) },
   },
 }))
 
@@ -29,17 +31,28 @@ function Harness() {
 }
 
 describe("BenchmarkCloudFields", () => {
-  it("guarda las GPUs por orden de preferencia, los backends y el apagado", async () => {
+  it("solo ofrece lo que RunPod tiene ahora y respeta el orden de preferencia", async () => {
+    render(<Harness />)
+    await waitFor(() => expect(screen.getByText(/RTX 3090/)).toBeTruthy())
+    expect(screen.queryByText(/A100/)).toBeNull() // agotada
+    fireEvent.click(screen.getByText(/RTX 3090/))
+    fireEvent.click(screen.getByText(/RTX 4090/))
+    expect(latest.gpu_type_ids).toEqual(["3090", "4090"])
+    expect(screen.getByText(/^1\. RTX 3090/)).toBeTruthy()
+    fireEvent.click(await screen.findByText("vllm"))
+    expect(latest.backends).toEqual(["vllm"])
+    fireEvent.click(screen.getByRole("checkbox"))
+    expect(latest.terminate_after).toBe(false)
+  })
+
+  it("al pasar a Secure se caen las GPUs que esa nube no ofrece", async () => {
     render(<Harness />)
     await waitFor(() => expect(screen.getByText(/RTX 3090/)).toBeTruthy())
     fireEvent.click(screen.getByText(/RTX 3090/))
     fireEvent.click(screen.getByText(/RTX 4090/))
-    expect(latest.gpu_type_ids).toEqual(["NVIDIA RTX 3090", "NVIDIA RTX 4090"])
-    expect(screen.getByText(/^1\. RTX 3090/)).toBeTruthy()
-    fireEvent.click(await screen.findByText("vllm"))
-    expect(latest.backends).toEqual(["vllm"])
-    expect(latest.terminate_after).toBe(true)
-    fireEvent.click(screen.getByRole("checkbox"))
-    expect(latest.terminate_after).toBe(false)
+    fireEvent.change(screen.getByDisplayValue(/La de los ajustes/), { target: { value: "SECURE" } })
+    await waitFor(() => expect(latest.gpu_type_ids).toEqual(["4090"]))
+    expect(screen.queryByText(/RTX 3090/)).toBeNull()
+    expect(screen.getByText(/0\.69 \$\/h/)).toBeTruthy()
   })
 })

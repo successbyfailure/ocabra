@@ -890,3 +890,17 @@ async def test_caduca_y_se_cancela(hub):
     )
     assert (await fm.cloud.requests.cancel(other["id"]))["status"] == "cancelled"
     assert [item["id"] for item in await fm.cloud.requests.list(include_finished=False)] == []
+
+
+@requires_db
+async def test_el_pod_guarda_cuando_se_pidio_y_cuando_se_lanzo(hub):
+    fm, fake = hub
+    node = await fm.cloud.launch(gpu_type_id="3090")
+    assert node["timeline"]["launched_at"]
+    assert node["durations"]["boot_s"] is None  # aún no está running
+    req = await fm.cloud.requests.create(
+        gpu_type_ids=["3090"], launch={}, wait_minutes=60, retry_interval_s=120
+    )
+    launched = await _node(fm, req["cloudNodeId"])
+    assert launched["timeline"]["requested_at"] and launched["timeline"]["request_attempts"] == 1
+    assert launched["durations"]["wait_s"] is not None

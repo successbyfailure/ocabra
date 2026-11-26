@@ -5,6 +5,7 @@ import { request } from "@/api/http"
 import { buildQuery } from "@/api/_helpers"
 import type {
   BenchmarkAppCatalog,
+  BenchmarkBatteryItem,
   BenchmarkCloudSpec,
   BenchmarkDiagnosis,
   BenchmarkRun,
@@ -36,8 +37,9 @@ export const benchmarksApiModule = {
       node?: string | null;
       sampling?: "benchmark" | "recommended";
       cloud?: BenchmarkCloudSpec | null;
+      battery?: BenchmarkBatteryItem[];
     }) =>
-      request<BenchmarkRun>("POST", "/ocabra/benchmarks/runs", {
+      request<BenchmarkRun & { batchRuns?: string[] }>("POST", "/ocabra/benchmarks/runs", {
         app: payload.app,
         suite: payload.suite,
         models: payload.models,
@@ -47,6 +49,7 @@ export const benchmarksApiModule = {
         node: payload.node || null,
         sampling: payload.sampling ?? "benchmark",
         cloud: payload.cloud ?? null,
+        battery: payload.battery ?? [],
       }),
     pause: (runId: string) =>
       request<BenchmarkRun>(
@@ -123,6 +126,7 @@ export const benchmarksApiModule = {
           node: payload.node || null,
           sampling: payload.sampling ?? "benchmark",
           cloud: payload.cloud ?? null,
+          battery: payload.battery ?? [],
           enabled: payload.enabled ?? false, weekdays: payload.weekdays,
           time_of_day: payload.timeOfDay, timezone: payload.timezone,
         }),
@@ -135,6 +139,7 @@ export const benchmarksApiModule = {
             node: payload.node || null,
             sampling: payload.sampling ?? "benchmark",
             cloud: payload.cloud ?? null,
+            battery: payload.battery ?? [],
             enabled: payload.enabled ?? false, weekdays: payload.weekdays,
             time_of_day: payload.timeOfDay, timezone: payload.timezone,
           },

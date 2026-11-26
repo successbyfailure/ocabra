@@ -100,3 +100,29 @@ export function formatBytes(bytes: number | null | undefined): string {
   if (mb >= 1) return `${mb.toFixed(0)} MB`
   return `${(bytes / 1024).toFixed(0)} KB`
 }
+
+
+/** 75 → "1 min 15 s", 3700 → "1 h 2 min". */
+export function formatSeconds(seconds: number | null | undefined): string {
+  if (seconds == null) return "—"
+  const total = Math.round(seconds)
+  if (total < 60) return `${total} s`
+  const minutes = Math.floor(total / 60)
+  if (minutes < 60) return `${minutes} min${total % 60 ? ` ${total % 60} s` : ""}`
+  return `${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60} min` : ""}`
+}
+
+/** Las etapas de un pod que ya tienen duración, en orden. */
+export function podReadinessParts(d: {
+  wait_s?: number | null; boot_s?: number | null; connect_s?: number | null;
+  prepare_s?: number | null; total_s?: number | null; ready_with_errors?: boolean
+} | null | undefined): string[] {
+  if (!d) return []
+  const parts: string[] = []
+  if (d.wait_s != null && d.wait_s >= 1) parts.push(`esperando máquina ${formatSeconds(d.wait_s)}`)
+  if (d.boot_s != null) parts.push(`arranque ${formatSeconds(d.boot_s)}`)
+  if (d.connect_s != null) parts.push(`conexión ${formatSeconds(d.connect_s)}`)
+  if (d.prepare_s != null) parts.push(`preparación ${formatSeconds(d.prepare_s)}${d.ready_with_errors ? " (con errores)" : ""}`)
+  if (d.total_s != null) parts.push(`listo en ${formatSeconds(d.total_s)}`)
+  return parts
+}

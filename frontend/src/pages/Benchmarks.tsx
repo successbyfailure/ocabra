@@ -6,9 +6,9 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
-import { formatDateTime, formatDurationBetween } from "@/lib/format"
+import { formatDateTime, formatDurationBetween, podReadinessParts } from "@/lib/format"
 import type {
-  BenchmarkAppCatalog, BenchmarkAttempt, BenchmarkCloudSpec, BenchmarkRun, BenchmarkRunStatus, BenchmarkSchedule,
+  BenchmarkAppCatalog, BenchmarkAttempt, BenchmarkBatteryItem, BenchmarkCloudSpec, BenchmarkRun, BenchmarkRunStatus, BenchmarkSchedule,
   BenchmarkScheduleInput, FederationPeer,
   ModelProfile,
 } from "@/types"
@@ -175,6 +175,17 @@ export function Benchmarks() {
   const [node, setNode] = useState("")
   const [sampling, setSampling] = useState<"benchmark" | "recommended">("benchmark")
   const [cloudSpec, setCloudSpec] = useState<BenchmarkCloudSpec>(DEFAULT_CLOUD_SPEC)
+  // Batería: varias pruebas en un solo pedido (con pod propio comparten máquina).
+  const [battery, setBattery] = useState<BenchmarkBatteryItem[]>([])
+  const currentItem = (): BenchmarkBatteryItem => ({ app: appName, suite: suiteName, suite_args: suiteProfileArgs(appName, profile) })
+  const sameItem = (a: BenchmarkBatteryItem, b: BenchmarkBatteryItem) =>
+    a.app === b.app && a.suite === b.suite && JSON.stringify(a.suite_args ?? []) === JSON.stringify(b.suite_args ?? [])
+  // Lo que se encarga: la batería si hay, si no la prueba elegida.
+  const orderItems = (): BenchmarkBatteryItem[] => (battery.length > 0 ? battery : [currentItem()])
+  const orderFields = () => {
+    const [first, ...rest] = orderItems()
+    return { app: first.app, suite: first.suite, suiteArgs: first.suite_args ?? [], battery: rest }
+  }
   const [cloudReady, setCloudReady] = useState(false)
   useEffect(() => {
     api.federation.cloud.getRunpod().then((info) => setCloudReady(Boolean(info.has_api_key))).catch(() => setCloudReady(false))
@@ -275,11 +286,11 @@ export function Benchmarks() {
     setCreating(true)
     try {
       await api.benchmarks.create({
-        app: appName, suite: suiteName, models, revision,
-        suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node && node !== CLOUD_NODE ? node : null, sampling: node ? "benchmark" : sampling, cloud: node === CLOUD_NODE ? cloudSpec : null,
+        ...orderFields(), models, revision: battery.length > 1 ? undefined : revision, autoPause, node: node && node !== CLOUD_NODE ? node : null, sampling: node ? "benchmark" : sampling, cloud: node === CLOUD_NODE ? cloudSpec : null,
       })
-      toast.success("Benchmark añadido a la cola")
+      toast.success(battery.length > 1 ? `Batería de ${battery.length} pruebas añadida a la cola` : "Benchmark añadido a la cola")
       setModels([])
+      setBattery([])
       await refresh()
       setView("runs")
     } catch (error) {
@@ -290,8 +301,7 @@ export function Benchmarks() {
   }
 
   const schedulePayload = (overrides: Partial<BenchmarkScheduleInput> = {}): BenchmarkScheduleInput => ({
-    name: scheduleName.trim(), app: appName, suite: suiteName, models, revision,
-    suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node && node !== CLOUD_NODE ? node : null, sampling: node ? "benchmark" : sampling, cloud: node === CLOUD_NODE ? cloudSpec : null,
+    name: scheduleName.trim(), ...orderFields(), models, revision: battery.length > 1 ? undefined : revision, autoPause, node: node && node !== CLOUD_NODE ? node : null, sampling: node ? "benchmark" : sampling, cloud: node === CLOUD_NODE ? cloudSpec : null,
     enabled: scheduleEnabled,
     weekdays: scheduleDays, timeOfDay: scheduleTime, timezone: scheduleTimezone,
     ...overrides,
@@ -326,6 +336,7 @@ export function Benchmarks() {
     setScheduleName(schedule.name)
     setAppName(schedule.app)
     setSuiteName(schedule.suite)
+    setBattery(schedule.battery?.length ? [{ app: schedule.app, suite: schedule.suite, suite_args: schedule.suiteArgs }, ...schedule.battery] : [])
     setModels(schedule.models)
     setRevision(schedule.revision)
     setAutoPause(schedule.autoPause)
@@ -651,9 +662,33 @@ export function Benchmarks() {
                 </div>
               </details>
 
+              <div className="rounded-lg border border-border p-3 text-sm" data-testid="benchmark-battery">
+                <div className="flex items-center justify-between gap-2">
+                  <span><span className="font-medium">Batería</span><span className="block text-xs text-muted-foreground">Varias pruebas con los mismos modelos{node === CLOUD_NODE ? " y el mismo pod (se apaga al terminar la última)" : ""}.</span></span>
+                  <button
+                    type="button"
+                    disabled={!appName || !suiteName || battery.some((item) => sameItem(item, currentItem()))}
+                    onClick={() => setBattery((current) => [...current, currentItem()])}
+                    className={ACTION_BUTTON}
+                  >
+                    <Plus size={13} /> Añadir {appName}/{suiteName}
+                  </button>
+                </div>
+                {battery.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {battery.map((item, index) => (
+                      <span key={`${item.app}/${item.suite}/${index}`} className="inline-flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 font-mono text-xs text-primary">
+                        {index + 1}. {item.app}/{item.suite}{item.suite_args?.length ? ` ${item.suite_args.join(" ")}` : ""}
+                        <button type="button" aria-label={`Quitar ${item.app}/${item.suite}`} onClick={() => setBattery((current) => current.filter((_, i) => i !== index))} className="text-primary/70 hover:text-primary">×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <button type="button" onClick={() => void createRun()} disabled={creating || loading || models.length === 0} className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground disabled:opacity-50">
                 {creating ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />}
-                {models.length > 0 ? `Encolar ${models.length} modelo${models.length === 1 ? "" : "s"}` : "Selecciona modelos"}
+                {models.length === 0 ? "Selecciona modelos" : battery.length > 1 ? `Encolar batería: ${battery.length} pruebas × ${models.length} modelo${models.length === 1 ? "" : "s"}` : `Encolar ${models.length} modelo${models.length === 1 ? "" : "s"}`}
               </button>
             </div>
           </div>
@@ -731,6 +766,7 @@ function RunCard({ run, history, busy, log, logOpen, onPause, onResume, onCancel
               <span className={`rounded border px-2 py-0.5 text-xs ${statusClass(run.status)}`}>{STATUS_LABEL[run.status]}</span>
               {run.node && <span className="inline-flex items-center gap-1 rounded border border-violet-500/40 bg-violet-500/10 px-2 py-0.5 text-xs text-violet-300" title="Medido en este nodo de la federación"><Server size={11} /> {run.node}</span>}
               {run.isBaseline && <span className="inline-flex items-center gap-1 text-xs text-amber-400"><Star size={12} className="fill-current" /> Referencia</span>}
+              {run.batchId && <span className="inline-flex items-center gap-1 rounded border border-border px-2 py-0.5 text-xs text-muted-foreground" title={`Batería ${run.batchId}: pedida junto a otras pruebas`}><ListChecks size={11} /> Batería</span>}
               {run.cloud && <span className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-300" title={`GPUs: ${run.cloud.gpu_type_ids.join(" → ")}${run.cloud.terminate_after ? " · se apaga al terminar" : ""}`}><Server size={11} /> Pod propio{run.cloud.terminate_after ? " · se apaga al terminar" : ""}</span>}
               {run.sampling === "recommended" && <span className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-300" title="Medido con el muestreo de la ficha del fabricante">Muestreo del fabricante</span>}
               {run.scoringIssue && <span className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-xs text-destructive" title={run.scoringIssue.reason}><AlertTriangle size={11} /> Nota no válida (antes de {run.scoringIssue.fixedIn})</span>}
@@ -833,6 +869,7 @@ function ExecutionEnvironment({ attempt }: { attempt?: BenchmarkAttempt }) {
           environment.node?.cuda?.driver_cuda ? `CUDA del driver ${environment.node.cuda.driver_cuda}${environment.node.cuda.ok === false ? " (con errores)" : ""}` : null,
           environment.node?.cloud ? `Pod ${environment.node.cloud.provider ?? ""} ${environment.node.cloud.gpuCount ?? 1}× ${environment.node.cloud.gpuTypeId ?? "?"} · ${environment.node.cloud.cloudType ?? ""}${environment.node.cloud.costPerHr ? ` · ${environment.node.cloud.costPerHr.toFixed(2)} $/h` : ""}` : null,
           environment.node?.cloud?.image ? `Imagen ${environment.node.cloud.image}` : null,
+          podReadinessParts(environment.node?.cloud?.readiness).length ? `Pod: ${podReadinessParts(environment.node?.cloud?.readiness).join(" · ")}` : null,
           hardware.source === "hub" ? "Backend y GPU sin confirmar por el nodo" : null,
           hardware.nodeTrafficVerified === false ? "Tráfico propio del nodo sin comprobar" : null,
           hardware.auxiliaryNodes?.length ? `Auxiliares de la suite en ${hardware.auxiliaryNodes.join(", ")}` : null,

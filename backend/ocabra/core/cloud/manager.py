@@ -31,6 +31,8 @@ import structlog
 if TYPE_CHECKING:
     from ocabra.core.federation import FederationManager
 
+from ocabra.core.cloud import timeline as cloud_timeline  # noqa: E402
+
 logger = structlog.get_logger(__name__)
 
 RECONCILE_INTERVAL_S = 30
@@ -457,6 +459,8 @@ class CloudNodeManager:
             "created_at": row.created_at,
             "started_at": row.started_at,
             "last_active_at": row.last_active_at,
+            "timeline": row.timeline,
+            "durations": cloud_timeline.summary(row.timeline) if row.timeline else None,
             "terminated_at": row.terminated_at,
             "terminate_reason": row.terminate_reason,
             "privacy_mode": row.privacy_mode,
@@ -603,6 +607,7 @@ class CloudNodeManager:
                 idle_shutdown_minutes=idle or None,
                 invite_id=uuid.UUID(invite["id"]),
                 started_at=_now(),
+                timeline={"launched_at": _now().isoformat()},
                 preload_models=preload_items or None,
                 network_volume_id=volume_id,
                 data_center_id=data_center,
@@ -948,6 +953,8 @@ class CloudNodeManager:
                         row.terminate_reason = row.terminate_reason or "provider"
                     elif pod.status in LIVE_STATUSES:
                         row.status = pod.status
+                        if pod.status == "running":
+                            row.timeline = cloud_timeline.stamp(row.timeline, "running_at", now)
                     elif pod.status in ("exited", "error"):
                         # We never stop pods on purpose, and a stopped one still
                         # bills its disk: an exited/errored node is finished.
@@ -971,6 +978,7 @@ class CloudNodeManager:
                         ).scalar_one_or_none()
                         if req is not None:
                             row.peer_id = req.peer_id
+                            row.timeline = cloud_timeline.stamp(row.timeline, "joined_at", now)
                     peer = None
                     if row.peer_id is not None:
                         peer = next(
@@ -995,6 +1003,13 @@ class CloudNodeManager:
                         # copy (backend install + tens of GB) outlasts the
                         # idle timeout.
                         row.last_active_at = now
+                    if peer is not None and peer.online and row.timeline is not None:
+                        if row.preload_models:
+                            row.timeline = cloud_timeline.track_items(
+                                row.timeline, row.preload_models, now
+                            )
+                        elif row.timeline.get("joined_at"):
+                            row.timeline = cloud_timeline.stamp(row.timeline, "ready_at", now)
                     if (
                         peer is not None
                         and peer.online

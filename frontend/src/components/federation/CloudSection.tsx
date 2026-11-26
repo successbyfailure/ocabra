@@ -3,6 +3,7 @@ import * as Dialog from "@radix-ui/react-dialog"
 import { AlertTriangle, ArrowUpCircle, Ban, Clock, Cloud, Cpu, KeyRound, Loader2, PackagePlus, Power, RefreshCw, Rocket, Settings2, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api, request } from "@/api/client"
+import { formatSeconds, podReadinessParts } from "@/lib/format"
 import { VolumesPanel } from "./VolumesPanel"
 import { EMPTY_PICK, ModelPicker, pickCount } from "./ModelPicker"
 import type {
@@ -652,8 +653,9 @@ function LaunchDialog({
   )
 }
 
-function PreloadChip({ item }: { item: CloudPreloadItem }) {
+function PreloadChip({ item, seconds }: { item: CloudPreloadItem; seconds?: number | null }) {
   const pct = item.progress != null ? ` ${Math.round(item.progress)} %` : ""
+  const took = seconds != null && (item.status === "loaded" || item.status === "ready" || item.status === "error") ? ` en ${formatSeconds(seconds)}` : ""
   const steps = item.steps?.length ? ` (paso ${(item.step ?? 0) + 1}/${item.steps.length})` : ""
   const label = {
     pending: "en cola",
@@ -661,9 +663,9 @@ function PreloadChip({ item }: { item: CloudPreloadItem }) {
     registering: "registrando",
     downloading: `descargando${pct}${steps}`,
     loading: "cargando",
-    loaded: "listo",
-    ready: item.kind === "backend" ? "instalado" : "descargado",
-    error: "error",
+    loaded: `listo${took}`,
+    ready: `${item.kind === "backend" ? "instalado" : "descargado"}${took}`,
+    error: `error${took}`,
   }[item.status]
   const cls = {
     pending: "border-border text-muted-foreground",
@@ -720,10 +722,15 @@ function NodeRow({
         {node.requests_proxied ? ` · ${node.requests_proxied} peticiones` : ""}
         {!live && node.terminate_reason ? ` · terminado por ${REASONS[node.terminate_reason] ?? node.terminate_reason}` : ""}
       </span>
+      {podReadinessParts(node.durations).length > 0 && (
+        <span className="w-full text-xs text-muted-foreground" title="Tiempos medidos cada ~30 s">
+          ⏱ {podReadinessParts(node.durations).join(" · ")}
+        </span>
+      )}
       {node.preload_models.length > 0 && (
         <div className="flex w-full flex-wrap gap-1.5">
           {node.preload_models.map((p) => (
-            <PreloadChip key={p.model_id} item={p} />
+            <PreloadChip key={p.model_id} item={p} seconds={node.durations?.items?.[p.model_id]} />
           ))}
         </div>
       )}

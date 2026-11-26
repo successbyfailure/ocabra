@@ -39,6 +39,10 @@ class BenchmarkRun(Base):
     cloud: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     cloud_request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     cloud_node_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # Ejecuciones pedidas juntas (batería): con pod propio comparten máquina.
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
     pause_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_model_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     current_model: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -133,6 +137,8 @@ class BenchmarkSchedule(Base):
     node: Mapped[str | None] = mapped_column(Text, nullable=True)
     sampling: Mapped[str | None] = mapped_column(Text, nullable=True)
     cloud: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # Más pruebas del plan: [{app, suite, suite_args}].
+    battery: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     weekdays: Mapped[list[int]] = mapped_column(JSONB, nullable=False, default=list)
     time_of_day: Mapped[str] = mapped_column(Text, nullable=False, default="02:00")

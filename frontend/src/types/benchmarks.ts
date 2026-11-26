@@ -46,6 +46,8 @@ export interface BenchmarkAttempt {
   sampling?: "benchmark" | "recommended";
   /** Pod propio: se pide, se prepara, se mide y se apaga si se quiere. */
   cloud?: BenchmarkCloudSpec | null;
+  /** Más pruebas del mismo pedido (mismos modelos y nodo/pod). */
+  battery?: BenchmarkBatteryItem[];
       }>;
     };
     benchmark?: {
@@ -83,6 +85,10 @@ export interface BenchmarkAttempt {
       cloud?: {
         provider?: string; podId?: string | null; gpuTypeId?: string | null; gpuCount?: number | null;
         cloudType?: string | null; image?: string | null; costPerHr?: number | null; dataCenterId?: string | null;
+        readiness?: {
+          wait_s?: number | null; boot_s?: number | null; connect_s?: number | null; prepare_s?: number | null;
+          total_s?: number | null; ready_with_errors?: boolean; items?: Record<string, number | null>;
+        } | null;
       } | null;
     };
     requests?: {
@@ -114,6 +120,7 @@ export interface BenchmarkRun {
   /** Fallo conocido del arnés que invalida la nota (se mide con la versión de oCabra). */
   scoringIssue?: { reason: string; fixedIn: string } | null;
   cloudRequestId?: string | null;
+  batchId?: string | null;
   cloudNodeId?: string | null;
   autoPause: boolean;
   /** Nodo de la federación donde se midió (null = este nodo). */
@@ -121,6 +128,8 @@ export interface BenchmarkRun {
   sampling?: "benchmark" | "recommended";
   /** Pod propio: se pide, se prepara, se mide y se apaga si se quiere. */
   cloud?: BenchmarkCloudSpec | null;
+  /** Más pruebas del mismo pedido (mismos modelos y nodo/pod). */
+  battery?: BenchmarkBatteryItem[];
   pauseReason: "manual" | "external_traffic" | null;
   currentModelIndex: number;
   currentModel: string | null;
@@ -154,6 +163,8 @@ export interface BenchmarkSchedule {
   sampling?: "benchmark" | "recommended";
   /** Pod propio: se pide, se prepara, se mide y se apaga si se quiere. */
   cloud?: BenchmarkCloudSpec | null;
+  /** Más pruebas del mismo pedido (mismos modelos y nodo/pod). */
+  battery?: BenchmarkBatteryItem[];
   enabled: boolean;
   weekdays: number[];
   timeOfDay: string;
@@ -177,6 +188,8 @@ export interface BenchmarkScheduleInput {
   sampling?: "benchmark" | "recommended";
   /** Pod propio: se pide, se prepara, se mide y se apaga si se quiere. */
   cloud?: BenchmarkCloudSpec | null;
+  /** Más pruebas del mismo pedido (mismos modelos y nodo/pod). */
+  battery?: BenchmarkBatteryItem[];
   enabled?: boolean;
   weekdays: number[];
   timeOfDay: string;
@@ -250,4 +263,11 @@ export interface BenchmarkCloudSpec {
   ready_timeout_minutes: number;
   max_runtime_minutes: number;
   terminate_after: boolean;
+}
+
+
+export interface BenchmarkBatteryItem {
+  app: string;
+  suite: string;
+  suite_args?: string[];
 }

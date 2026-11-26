@@ -137,6 +137,19 @@ class LaunchRequestQueue:
                 await session.commit()
             return request_out(row)
 
+    async def _stamp_requested(self, node_id: str, requested_at, attempts: int) -> None:
+        """El pod salió de una petición: su línea de tiempo empieza al pedirlo."""
+        from ocabra.db.cloud import CloudNode
+
+        async with self._sessions() as session:
+            node = await session.get(CloudNode, uuid.UUID(node_id))
+            if node is not None and requested_at is not None:
+                timeline = dict(node.timeline or {})
+                timeline["requested_at"] = requested_at.astimezone(UTC).isoformat()
+                timeline["request_attempts"] = attempts
+                node.timeline = timeline
+                await session.commit()
+
     async def drive(self) -> None:
         """Una pasada: caduca las vencidas y prueba las que toca."""
         from ocabra.db.cloud import CloudLaunchRequest
@@ -213,6 +226,7 @@ class LaunchRequestQueue:
                     await self._cloud.terminate(result["id"], reason="request_cancelled")
                 return
             if result is not None:
+                await self._stamp_requested(result["id"], row.created_at, row.attempts)
                 row.status = "launched"
                 row.cloud_node_id = uuid.UUID(result["id"])
                 row.launched_gpu_type_id = launched_gpu

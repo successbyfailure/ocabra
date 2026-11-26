@@ -99,3 +99,19 @@ describe("MB / bytes helpers", () => {
     expect(formatBytes(2048)).toBe("2 KB")
   })
 })
+
+import { formatSeconds, podReadinessParts } from "@/lib/format"
+
+describe("tiempos del pod", () => {
+  it("formatea segundos y lista las etapas que ya tienen duración", () => {
+    expect(formatSeconds(45)).toBe("45 s")
+    expect(formatSeconds(75)).toBe("1 min 15 s")
+    expect(formatSeconds(3720)).toBe("1 h 2 min")
+    expect(podReadinessParts({ boot_s: 120, connect_s: 60, prepare_s: null, total_s: null })).toEqual([
+      "arranque 2 min", "conexión 1 min",
+    ])
+    expect(podReadinessParts({ wait_s: 600, boot_s: 30, connect_s: 30, prepare_s: 300, total_s: 960, ready_with_errors: true })).toEqual([
+      "esperando máquina 10 min", "arranque 30 s", "conexión 30 s", "preparación 5 min (con errores)", "listo en 16 min",
+    ])
+  })
+})

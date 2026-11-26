@@ -56,6 +56,28 @@ class BenchmarkCloudSpec(BaseModel):
     terminate_after: bool = True
 
 
+def _check_suite_args(value: list[str]) -> list[str]:
+    for item in value:
+        if not item or "\x00" in item or len(item) > 500:
+            raise ValueError("Argumento de suite no válido")
+        if item.split("=", 1)[0] in _RESERVED_SUITE_ARGS:
+            raise ValueError(f"oCabra controla el argumento {item.split('=', 1)[0]}")
+    return value
+
+
+class BenchmarkBatteryItem(BaseModel):
+    """Otra prueba de la misma batería (mismos modelos, nodo o pod)."""
+
+    app: str
+    suite: str
+    suite_args: list[str] = Field(default_factory=list, max_length=32)
+
+    @field_validator("suite_args")
+    @classmethod
+    def validate_suite_args(cls, value: list[str]) -> list[str]:
+        return _check_suite_args(value)
+
+
 class BenchmarkRunCreate(BaseModel):
     app: str
     suite: str
@@ -70,6 +92,9 @@ class BenchmarkRunCreate(BaseModel):
     sampling: Literal["benchmark", "recommended"] = "benchmark"
     # Lanzar un pod propio para medir (en vez de un nodo que ya existe).
     cloud: BenchmarkCloudSpec | None = None
+    # Más pruebas en el mismo pedido: se crea una ejecución por prueba y, con
+    # pod propio, comparten la máquina.
+    battery: list[BenchmarkBatteryItem] = Field(default_factory=list, max_length=12)
 
     @model_validator(mode="after")
     def validate_sampling_node(self):
@@ -117,12 +142,16 @@ class BenchmarkRunCreate(BaseModel):
     @field_validator("suite_args")
     @classmethod
     def validate_suite_args(cls, value: list[str]) -> list[str]:
-        for item in value:
-            if not item or "\x00" in item or len(item) > 500:
-                raise ValueError("Argumento de suite no válido")
-            if item.split("=", 1)[0] in _RESERVED_SUITE_ARGS:
-                raise ValueError(f"oCabra controla el argumento {item.split('=', 1)[0]}")
-        return value
+        return _check_suite_args(value)
+
+    def battery_items(self) -> list[tuple[str, str, list[str]]]:
+        """La prueba principal y las de la batería, sin repetir."""
+        items = [(self.app, self.suite, list(self.suite_args))]
+        for extra in self.battery:
+            entry = (extra.app, extra.suite, list(extra.suite_args))
+            if entry not in items:
+                items.append(entry)
+        return items
 
 
 class BenchmarkScheduleCreate(BenchmarkRunCreate):
@@ -250,6 +279,7 @@ def _run_payload(run: BenchmarkRun, *, include_attempts: bool = True) -> dict[st
         "node": getattr(run, "node", None),
         "sampling": getattr(run, "sampling", None) or "benchmark",
         "cloud": getattr(run, "cloud", None),
+        "batchId": str(run.batch_id) if getattr(run, "batch_id", None) else None,
         "cloudRequestId": str(run.cloud_request_id)
         if getattr(run, "cloud_request_id", None)
         else None,
@@ -295,6 +325,7 @@ def _schedule_payload(schedule: BenchmarkSchedule) -> dict[str, object]:
         "node": getattr(schedule, "node", None),
         "sampling": getattr(schedule, "sampling", None) or "benchmark",
         "cloud": getattr(schedule, "cloud", None),
+        "battery": getattr(schedule, "battery", None) or [],
         "enabled": schedule.enabled,
         "weekdays": schedule.weekdays,
         "timeOfDay": schedule.time_of_day,
@@ -377,31 +408,43 @@ async def create_benchmark_run(
     Returns:
         Persisted run state. Models execute sequentially and can be resumed.
     """
-    _validate_catalog(body.app, body.suite)
-    run_id = uuid.uuid4()
+    items = body.battery_items()
+    for app_name, suite_name, _args in items:
+        _validate_catalog(app_name, suite_name)
+    node = _canonical_node(request, body.node)
+    batch_id = uuid.uuid4() if len(items) > 1 else None
     root = Path(settings.benchmark_dir).resolve()  # noqa: ASYNC240 — cálculo local de ruta
-    workspace = str(root / "runs" / str(run_id))
-    run = BenchmarkRun(
-        id=run_id,
-        app=body.app,
-        suite=body.suite,
-        revision=body.revision,
-        models=body.models,
-        suite_args=body.suite_args,
-        auto_pause=body.auto_pause,
-        node=_canonical_node(request, body.node),
-        sampling=None if body.sampling == "benchmark" else body.sampling,
-        cloud=body.cloud.model_dump() if body.cloud else None,
-        phase="queued",
-        workspace_path=workspace,
-        created_by=_user_uuid(user),
-    )
+    runs = []
+    for app_name, suite_name, suite_args in items:
+        run_id = uuid.uuid4()
+        runs.append(
+            BenchmarkRun(
+                id=run_id,
+                app=app_name,
+                suite=suite_name,
+                # La revisión fijada solo vale para la app principal.
+                revision=body.revision if app_name == body.app else None,
+                models=body.models,
+                suite_args=suite_args,
+                auto_pause=body.auto_pause,
+                node=node,
+                sampling=None if body.sampling == "benchmark" else body.sampling,
+                cloud=body.cloud.model_dump() if body.cloud else None,
+                batch_id=batch_id,
+                phase="queued",
+                workspace_path=str(root / "runs" / str(run_id)),
+                created_by=_user_uuid(user),
+            )
+        )
     async with AsyncSessionLocal() as session:
-        session.add(run)
+        session.add_all(runs)
         await session.commit()
-        await session.refresh(run)
+        for run in runs:
+            await session.refresh(run)
     _manager(request).notify()
-    return _run_payload(run, include_attempts=False)
+    payload = _run_payload(runs[0], include_attempts=False)
+    payload["batchRuns"] = [str(run.id) for run in runs]
+    return payload
 
 
 @router.get("/schedules", summary="List reusable benchmark plans")
@@ -429,7 +472,8 @@ async def create_benchmark_schedule(
     user: UserContext = Depends(require_role("model_manager")),
 ) -> dict[str, object]:
     """Create a reusable template and optionally enable its weekly schedule."""
-    _validate_catalog(body.app, body.suite)
+    for app_name, suite_name, _args in body.battery_items():
+        _validate_catalog(app_name, suite_name)
     now = datetime.now(UTC)
     schedule = BenchmarkSchedule(
         name=body.name,
@@ -442,6 +486,7 @@ async def create_benchmark_schedule(
         node=_canonical_node(request, body.node),
         sampling=None if body.sampling == "benchmark" else body.sampling,
         cloud=body.cloud.model_dump() if body.cloud else None,
+        battery=[item.model_dump() for item in body.battery] or None,
         enabled=body.enabled,
         weekdays=body.weekdays,
         time_of_day=body.time_of_day,
@@ -469,7 +514,8 @@ async def update_benchmark_schedule(
     _user: UserContext = Depends(require_role("model_manager")),
 ) -> dict[str, object]:
     """Replace a plan definition and recalculate its next occurrence."""
-    _validate_catalog(body.app, body.suite)
+    for app_name, suite_name, _args in body.battery_items():
+        _validate_catalog(app_name, suite_name)
     node = _canonical_node(request, body.node)
     async with AsyncSessionLocal() as session:
         schedule = await session.get(BenchmarkSchedule, schedule_id)
@@ -492,6 +538,7 @@ async def update_benchmark_schedule(
         schedule.node = node
         schedule.sampling = None if body.sampling == "benchmark" else body.sampling
         schedule.cloud = body.cloud.model_dump() if body.cloud else None
+        schedule.battery = [item.model_dump() for item in body.battery] or None
         schedule.next_run_at = (
             next_schedule_occurrence(
                 body.weekdays, body.time_of_day, body.timezone, datetime.now(UTC)

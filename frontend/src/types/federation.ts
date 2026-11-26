@@ -159,7 +159,19 @@ export interface CloudGpuType {
   availability: "NONE" | "LOW" | "MEDIUM" | "HIGH";
 }
 
+/** Cuánto tardó un pod en cada etapa hasta estar listo (segundos; null = aún no). */
+export interface CloudNodeDurations {
+  wait_s: number | null;
+  boot_s: number | null;
+  connect_s: number | null;
+  prepare_s: number | null;
+  total_s: number | null;
+  ready_with_errors: boolean;
+  items: Record<string, number | null>;
+}
+
 export interface CloudNode {
+  durations?: CloudNodeDurations | null;
   id: string;
   provider: string;
   provider_pod_id: string | null;

@@ -213,3 +213,89 @@ async def test_sin_capacidad_en_plazo_la_ejecucion_falla(tmp_path: Path) -> None
         assert cloud.terminated == []
     finally:
         await _delete(run.id)
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_dos_pasadas_a_la_vez_no_piden_dos_pods(tmp_path: Path) -> None:
+    import asyncio
+
+    cloud = FakeCloud()
+    manager = _manager(cloud)
+    run = await _new_run(tmp_path)
+    try:
+        await asyncio.gather(manager._advance_provisioning(), manager._advance_provisioning())
+        assert len(cloud.requests.created) == 1
+    finally:
+        await _delete(run.id)
+
+
+# ── Baterías ─────────────────────────────────────────────────────────────
+
+
+def test_la_bateria_no_repite_pruebas_y_valida_argumentos() -> None:
+    run = BenchmarkRunCreate(
+        app="escriba",
+        suite="llm",
+        models=["m"],
+        battery=[{"app": "corrala", "suite": "llm"}, {"app": "escriba", "suite": "llm"}],
+    )
+    assert run.battery_items() == [("escriba", "llm", []), ("corrala", "llm", [])]
+    with pytest.raises(ValidationError):
+        BenchmarkRunCreate(
+            app="escriba", suite="llm", models=["m"],
+            battery=[{"app": "corrala", "suite": "llm", "suite_args": ["--models=x"]}],
+        )  # fmt: skip
+
+
+def test_un_plan_con_bateria_crea_todas_sus_ejecuciones() -> None:
+    from ocabra.benchmarks.manager import runs_from_schedule
+    from ocabra.db.benchmarks import BenchmarkSchedule
+
+    schedule = BenchmarkSchedule(
+        id=uuid.uuid4(), name="noche", app="escriba", suite="llm", revision="abc",
+        models=["gemma4:12b"], suite_args=[], auto_pause=True, node=None, sampling=None,
+        cloud=dict(SPEC), battery=[{"app": "corrala", "suite": "llm", "suite_args": ["--profile", "quick"]}],
+        weekdays=[0], time_of_day="02:00", timezone="Europe/Madrid",
+    )  # fmt: skip
+    runs = runs_from_schedule(schedule)
+    assert [(r.app, r.suite) for r in runs] == [("escriba", "llm"), ("corrala", "llm")]
+    assert runs[0].batch_id is not None and runs[0].batch_id == runs[1].batch_id
+    assert runs[1].suite_args == ["--profile", "quick"] and runs[1].revision is None
+    assert runs[1].cloud == SPEC
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_una_bateria_con_pod_comparte_maquina_y_se_apaga_con_la_ultima(
+    tmp_path: Path,
+) -> None:
+    cloud = FakeCloud()
+    manager = _manager(cloud)
+    batch = uuid.uuid4()
+    first = await _new_run(tmp_path, batch_id=batch)
+    second = await _new_run(tmp_path, batch_id=batch)
+    try:
+        await manager._advance_provisioning()
+        await manager._advance_provisioning()
+        assert len(cloud.requests.created) == 1
+        a, b = await _load(first.id), await _load(second.id)
+        assert a.cloud_request_id == b.cloud_request_id
+        rid = str(a.cloud_request_id)
+        node_id = str(uuid.uuid4())
+        cloud.requests.rows[rid].update(
+            status="launched", cloudNodeId=node_id, finishedAt=datetime.now(UTC).isoformat()
+        )
+        cloud.nodes.append(
+            {"id": node_id, "status": "running", "peer_online": True, "peer_name": "pod",
+             "preload_models": [{"model_id": "x", "status": "loaded"}]}
+        )  # fmt: skip
+        await manager._advance_provisioning()
+        assert (await _load(first.id)).node == "pod" and (await _load(second.id)).node == "pod"
+        await manager._advance_run(first.id, "gemma4:12b", {"metrics": {}})
+        assert cloud.terminated == []  # queda la otra prueba
+        await manager._advance_run(second.id, "gemma4:12b", {"metrics": {}})
+        assert cloud.terminated == [(node_id, "benchmark_done")]
+    finally:
+        await _delete(first.id)
+        await _delete(second.id)

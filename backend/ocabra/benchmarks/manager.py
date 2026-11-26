@@ -35,6 +35,7 @@ from sqlalchemy.orm import selectinload
 from ocabra.benchmarks.catalog import APPS, AppSpec, SuiteSpec
 from ocabra.benchmarks.diagnosis.jobs import DiagnosisRunner, DiagnosisStore
 from ocabra.config import APP_VERSION, settings
+from ocabra.core.cloud import timeline as cloud_timeline
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.auth import ApiKey, User, UserRole
 from ocabra.db.benchmarks import BenchmarkAttempt, BenchmarkRun, BenchmarkSchedule
@@ -94,6 +95,31 @@ def run_from_schedule(schedule: BenchmarkSchedule, *, now: datetime | None = Non
         created_by=schedule.created_by,
         created_at=now or datetime.now(UTC),
     )
+
+
+def runs_from_schedule(
+    schedule: BenchmarkSchedule, *, now: datetime | None = None
+) -> list[BenchmarkRun]:
+    """La ejecución principal del plan y una más por cada prueba de su batería."""
+    first = run_from_schedule(schedule, now=now)
+    extras = [
+        item
+        for item in (getattr(schedule, "battery", None) or [])
+        if isinstance(item, dict) and item.get("app") and item.get("suite")
+    ]
+    if not extras:
+        return [first]
+    first.batch_id = uuid.uuid4()
+    runs = [first]
+    for item in extras:
+        run = run_from_schedule(schedule, now=now)
+        run.app = str(item["app"])
+        run.suite = str(item["suite"])
+        run.suite_args = list(item.get("suite_args") or [])
+        run.revision = None
+        run.batch_id = first.batch_id
+        runs.append(run)
+    return runs
 
 
 def git_authorization_header(token: str) -> str:
@@ -231,6 +257,10 @@ class BenchmarkManager:
         self._process_lock = asyncio.Lock()
         self._diagnoses = DiagnosisStore(self._root)
         self._diagnosis_runner: DiagnosisRunner | None = None
+        self._provision_task: asyncio.Task[None] | None = None
+        # Una sola pasada de aprovisionamiento a la vez: dos a la vez pedirían
+        # dos pods para la misma ejecución.
+        self._provision_lock = asyncio.Lock()
         # Override de muestreo activo (perfil, parámetros y clave del runner).
         self.sampling_override: dict[str, object] | None = None
         self._last_diagnosis_purge = 0.0
@@ -246,17 +276,24 @@ class BenchmarkManager:
         await asyncio.to_thread(self._diagnoses.recover_interrupted)
         self._stop.clear()
         self._task = asyncio.create_task(self._worker_loop(), name="benchmark-manager")
+        # Aparte del worker: mientras una ejecución mide (puede durar horas),
+        # los pods de las siguientes se tienen que ir pidiendo y preparando.
+        self._provision_task = asyncio.create_task(
+            self._provision_loop(), name="benchmark-provisioning"
+        )
         logger.info("benchmark_manager_started", root=str(self._root))
 
     async def stop(self) -> None:
         self._stop.set()
         self._wake.set()
         await self._terminate_process()
-        if self._task is not None:
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
+        for task in (self._task, self._provision_task):
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        self._task = None
+        self._provision_task = None
         logger.info("benchmark_manager_stopped")
 
     def notify(self) -> None:
@@ -364,8 +401,9 @@ class BenchmarkManager:
             if active is not None:
                 raise ValueError("Este plan ya tiene una ejecución activa")
             now = datetime.now(UTC)
-            run = run_from_schedule(schedule, now=now)
-            session.add(run)
+            runs = runs_from_schedule(schedule, now=now)
+            run = runs[0]
+            session.add_all(runs)
             schedule.last_run_at = now
             schedule.last_run_id = run.id
             await session.commit()
@@ -450,7 +488,6 @@ class BenchmarkManager:
             try:
                 await self._enqueue_due_schedules()
                 await self._resume_after_quiet_period()
-                await self._advance_provisioning()
                 run_id = await self._next_queued_run()
                 if run_id is not None:
                     await self._execute_run(run_id)
@@ -512,10 +549,10 @@ class BenchmarkManager:
                 )
                 if active is not None:
                     continue
-                run = run_from_schedule(schedule, now=now)
-                session.add(run)
+                runs = runs_from_schedule(schedule, now=now)
+                session.add_all(runs)
                 schedule.last_run_at = now
-                schedule.last_run_id = run.id
+                schedule.last_run_id = runs[0].id
                 queued = True
             await session.commit()
         if queued:
@@ -1439,6 +1476,8 @@ class BenchmarkManager:
             "costPerHr": row.cost_per_hr,
             "dataCenterId": row.data_center_id,
             "cloudNodeId": str(row.id),
+            # Cuánto tardó en estar listo (espera, arranque, conexión, preparación).
+            "readiness": cloud_timeline.summary(row.timeline) if row.timeline else None,
         }
 
     async def _peer_json(self, peer, path: str) -> object | None:
@@ -1836,8 +1875,23 @@ class BenchmarkManager:
         federation = getattr(self._app.state, "federation_manager", None)
         return getattr(federation, "cloud", None)
 
+    async def _provision_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self._advance_provisioning()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — el bucle no se cae por una ejecución
+                logger.exception("benchmark_provision_loop_error", error=str(exc))
+            with suppress(TimeoutError):
+                await asyncio.wait_for(self._stop.wait(), timeout=15)
+
     async def _advance_provisioning(self) -> None:
         """Mueve las ejecuciones que esperan su pod: pedirlo, esperarlo, darlo por listo."""
+        async with self._provision_lock:
+            await self._advance_provisioning_locked()
+
+    async def _advance_provisioning_locked(self) -> None:
         async with AsyncSessionLocal() as session:
             run_ids = (
                 (
@@ -1870,8 +1924,16 @@ class BenchmarkManager:
             await self._fail_run(run_id, "La nube no está disponible (federación apagada)")
             return
         if request_id is None:
-            await self._request_pod(run_id, cloud, spec, models)
-            return
+            sibling = await self._batch_request(run_id)
+            if sibling is None:
+                await self._request_pod(run_id, cloud, spec, models)
+                return
+            # Otra prueba de la misma batería ya pidió la máquina: se comparte.
+            async with AsyncSessionLocal() as session:
+                run = await self._get_run(session, run_id)
+                run.cloud_request_id = sibling
+                await session.commit()
+            request_id = sibling
         request = await cloud.requests.get(str(request_id))
         if request["status"] == "waiting":
             await self._set_phase(run_id, "waiting_capacity")
@@ -1916,11 +1978,44 @@ class BenchmarkManager:
             return
         await self._set_phase(run_id, "preparing_pod")
 
+    async def _batch_request(self, run_id: uuid.UUID) -> uuid.UUID | None:
+        """La petición de máquina que ya hizo otra prueba de la misma batería."""
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            if run.batch_id is None:
+                return None
+            return await session.scalar(
+                select(BenchmarkRun.cloud_request_id)
+                .where(
+                    BenchmarkRun.batch_id == run.batch_id,
+                    BenchmarkRun.id != run.id,
+                    BenchmarkRun.cloud_request_id.is_not(None),
+                )
+                .limit(1)
+            )
+
+    async def _batch_models(self, run_id: uuid.UUID, models: list[str]) -> list[str]:
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            if run.batch_id is None:
+                return models
+            rows = (
+                await session.execute(
+                    select(BenchmarkRun.models).where(BenchmarkRun.batch_id == run.batch_id)
+                )
+            ).scalars()
+            merged = list(models)
+            for listed in rows:
+                for model in listed or []:
+                    if model not in merged:
+                        merged.append(model)
+            return merged
+
     async def _request_pod(self, run_id: uuid.UUID, cloud, spec: dict, models: list[str]) -> None:
-        """Pide la máquina: los modelos medidos se replican en el pod."""
+        """Pide la máquina: los modelos de toda la batería se replican en el pod."""
         registry = self._app.state.profile_registry
         base_ids: list[str] = []
-        for model in models:
+        for model in await self._batch_models(run_id, models):
             profile = await registry.get(model)
             if profile is None:
                 await self._fail_run(run_id, f"Perfil desconocido: {model}")
@@ -1971,6 +2066,18 @@ class BenchmarkManager:
                 spec = dict(run.cloud or {}) if run.cloud else None
                 request_id = run.cloud_request_id
                 node_id = run.cloud_node_id
+                if run.batch_id is not None:
+                    # Con batería, la máquina es de todas: se suelta con la última.
+                    pending = await session.scalar(
+                        select(BenchmarkRun.id)
+                        .where(
+                            BenchmarkRun.batch_id == run.batch_id,
+                            BenchmarkRun.status.not_in(_TERMINAL),
+                        )
+                        .limit(1)
+                    )
+                    if pending is not None:
+                        return
             cloud = self._cloud()
             if not spec or cloud is None:
                 return
