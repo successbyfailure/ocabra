@@ -23,6 +23,20 @@ normal de oCabra con la identidad de servicio de los benchmarks. Si el modelo
 no está cargado, el diagnóstico no lo carga (podría expulsar un PIN) salvo con
 `allow_load: true`; sin él hace solo las comprobaciones que no necesitan GPU.
 
+Un diagnóstico en cola o en curso se cancela con *Cancelar* (o
+`POST .../diagnoses/{id}/cancel`); los terminados se borran con *Borrar* (o
+`DELETE .../diagnoses/{id}`) y solos a los `BENCHMARK_DIAGNOSIS_RETENTION_DAYS`
+días (30).
+
+## Medir con el muestreo del fabricante
+
+Una ejecución de benchmark con `sampling: "recommended"` (selector *Muestreo* al
+lanzarla) mide con el muestreo de la ficha oficial: el servidor pisa el que mande
+el runner en las peticiones que llevan la clave de servicio de los benchmarks,
+solo para el perfil que se está midiendo y solo los campos de muestreo (el tope
+de salida es el del benchmark). Así se comparan las dos condiciones sin tocar los
+runners de cada app. Estas ejecuciones no entran en el ranking.
+
 ## Qué comprueba
 
 1. **Plantilla.** Prompt renderizado por el llama-server (`/apply-template`)

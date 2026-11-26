@@ -170,6 +170,7 @@ export function Benchmarks() {
   const [autoPause, setAutoPause] = useState(true)
   // Nodo de la federación donde medir ("" = este nodo).
   const [node, setNode] = useState("")
+  const [sampling, setSampling] = useState<"benchmark" | "recommended">("benchmark")
   const [peers, setPeers] = useState<FederationPeer[]>([])
   const [scheduleName, setScheduleName] = useState("")
   const [scheduleEnabled, setScheduleEnabled] = useState(false)
@@ -267,7 +268,7 @@ export function Benchmarks() {
     try {
       await api.benchmarks.create({
         app: appName, suite: suiteName, models, revision,
-        suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node || null,
+        suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node || null, sampling: node ? "benchmark" : sampling,
       })
       toast.success("Benchmark añadido a la cola")
       setModels([])
@@ -282,7 +283,7 @@ export function Benchmarks() {
 
   const schedulePayload = (overrides: Partial<BenchmarkScheduleInput> = {}): BenchmarkScheduleInput => ({
     name: scheduleName.trim(), app: appName, suite: suiteName, models, revision,
-    suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node || null,
+    suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node || null, sampling: node ? "benchmark" : sampling,
     enabled: scheduleEnabled,
     weekdays: scheduleDays, timeOfDay: scheduleTime, timezone: scheduleTimezone,
     ...overrides,
@@ -321,6 +322,7 @@ export function Benchmarks() {
     setRevision(schedule.revision)
     setAutoPause(schedule.autoPause)
     setNode(schedule.node ?? "")
+    setSampling(schedule.sampling ?? "benchmark")
     setScheduleEnabled(schedule.enabled)
     setScheduleDays(schedule.weekdays)
     setScheduleTime(schedule.timeOfDay)
@@ -336,7 +338,7 @@ export function Benchmarks() {
       await api.benchmarks.schedules.update(schedule.id, {
         name: schedule.name, app: schedule.app, suite: schedule.suite,
         revision: schedule.revision, models: schedule.models, suiteArgs: schedule.suiteArgs,
-        autoPause: schedule.autoPause, node: schedule.node ?? null, enabled: schedule.enabled,
+        autoPause: schedule.autoPause, node: schedule.node ?? null, sampling: schedule.sampling ?? "benchmark", enabled: schedule.enabled,
         weekdays: schedule.weekdays, timeOfDay: schedule.timeOfDay,
         timezone: schedule.timezone, ...changes,
       })
@@ -386,7 +388,7 @@ export function Benchmarks() {
     try {
       await api.benchmarks.create({
         app: run.app, suite: run.suite, models: run.models, revision: run.revision,
-        suiteArgs: run.suiteArgs, autoPause: run.autoPause, node: run.node ?? null,
+        suiteArgs: run.suiteArgs, autoPause: run.autoPause, node: run.node ?? null, sampling: run.sampling ?? "benchmark",
       })
       toast.success("Configuración añadida de nuevo a la cola")
       await refresh()
@@ -601,6 +603,15 @@ export function Benchmarks() {
                 </label>
               )}
 
+              <label className="block text-sm">
+                <span className="font-medium">Muestreo</span>
+                <select value={sampling} onChange={(event) => setSampling(event.target.value as "benchmark" | "recommended")} disabled={Boolean(node)} className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm">
+                  <option value="benchmark">El de cada benchmark</option>
+                  <option value="recommended">El del fabricante (ficha de Hugging Face)</option>
+                </select>
+                <span className="mt-1 block text-xs text-muted-foreground">{sampling === "recommended" ? "oCabra pisa en el servidor temperatura, top_p, top_k, min_p y penalizaciones de las peticiones del benchmark. No cuenta en el ranking." : node ? "En un nodo remoto solo se mide con el del benchmark." : "Lo que mande cada runner (IFEval temperatura 0, BFCL 0.001…)."}</span>
+              </label>
+
               <label className="flex items-start gap-2 rounded-lg border border-border p-3 text-sm">
                 <input type="checkbox" checked={autoPause} onChange={(event) => setAutoPause(event.target.checked)} className="mt-1" />
                 <span><span className="font-medium">Proteger el tráfico real</span><span className="block text-xs text-muted-foreground">Pausa, espera a que el servidor quede libre y repite el intento afectado.</span></span>
@@ -709,6 +720,8 @@ function RunCard({ run, history, busy, log, logOpen, onPause, onResume, onCancel
               <span className={`rounded border px-2 py-0.5 text-xs ${statusClass(run.status)}`}>{STATUS_LABEL[run.status]}</span>
               {run.node && <span className="inline-flex items-center gap-1 rounded border border-violet-500/40 bg-violet-500/10 px-2 py-0.5 text-xs text-violet-300" title="Medido en este nodo de la federación"><Server size={11} /> {run.node}</span>}
               {run.isBaseline && <span className="inline-flex items-center gap-1 text-xs text-amber-400"><Star size={12} className="fill-current" /> Referencia</span>}
+              {run.sampling === "recommended" && <span className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-300" title="Medido con el muestreo de la ficha del fabricante">Muestreo del fabricante</span>}
+              {run.scoringIssue && <span className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-xs text-destructive" title={run.scoringIssue.reason}><AlertTriangle size={11} /> Nota no válida (antes de {run.scoringIssue.fixedIn})</span>}
               {run.contaminatedAttempts > 0 && <span className="inline-flex items-center gap-1 text-xs text-amber-400"><AlertTriangle size={12} /> {run.contaminatedAttempts} descartado{run.contaminatedAttempts === 1 ? "" : "s"}</span>}
             </div>
             <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -748,6 +761,7 @@ function RunCard({ run, history, busy, log, logOpen, onPause, onResume, onCancel
         <ExecutionEnvironment attempt={[...run.attempts].reverse().find((attempt) => Object.keys(attempt.environment ?? {}).length > 0)} />
 
         {run.pauseReason && <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"><Activity size={14} className="mt-0.5 shrink-0" />{run.pauseReason === "external_traffic" ? "Pausado por tráfico externo. Se reanudará automáticamente cuando el servidor quede libre." : "Pausado manualmente. Usa Reanudar cuando quieras continuar."}</div>}
+        {run.scoringIssue && <div className="mt-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"><AlertTriangle size={14} className="mt-0.5 shrink-0" />{run.scoringIssue.reason} No cuenta en el ranking.</div>}
         {run.error && <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{run.error}</div>}
         {run.attempts.length > 0 && <Attempts attempts={run.attempts} />}
         {run.attempts.length > 0 && <BenchmarkDiagnoses run={run} />}

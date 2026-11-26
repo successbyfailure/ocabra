@@ -81,7 +81,7 @@ export function BenchmarkHistory({ runs }: { runs: BenchmarkRun[] }) {
           {eligible.map((run) => {
             const active = selected.includes(run.id)
             return <button key={run.id} type="button" onClick={() => setSelected((current) => active ? current.filter((id) => id !== run.id) : current.length < 4 ? [...current, run.id] : current)} className={`rounded-full border px-2.5 py-1 text-xs ${active ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>
-              {run.isBaseline && <Star size={11} className="mr-1 inline fill-current" />}{new Date(run.createdAt).toLocaleDateString()} · {run.id.slice(0, 6)}
+              {run.isBaseline && <Star size={11} className="mr-1 inline fill-current" />}{new Date(run.createdAt).toLocaleDateString()} · {run.id.slice(0, 6)}{run.scoringIssue && <span className="ml-1 text-destructive" title={run.scoringIssue.reason}>· nota no válida</span>}
             </button>
           })}
         </div>

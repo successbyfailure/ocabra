@@ -7,15 +7,15 @@ import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 
 from ocabra.api._deps_auth import UserContext, require_role
-from ocabra.benchmarks.catalog import APPS, catalog_payload
+from ocabra.benchmarks.catalog import APPS, catalog_payload, scoring_issue
 from ocabra.benchmarks.manager import list_runs, load_run, next_schedule_occurrence
 from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
@@ -45,6 +45,15 @@ class BenchmarkRunCreate(BaseModel):
     auto_pause: bool = True
     # Nodo de la federación donde medir (nombre del peer); None = este nodo.
     node: str | None = Field(default=None, max_length=64)
+    # "benchmark": el muestreo que mande cada runner; "recommended": el del
+    # fabricante (ficha de HF), aplicado en el servidor a las peticiones del runner.
+    sampling: Literal["benchmark", "recommended"] = "benchmark"
+
+    @model_validator(mode="after")
+    def validate_sampling_node(self):
+        if self.sampling == "recommended" and self.node:
+            raise ValueError("El muestreo del fabricante solo se aplica en este nodo")
+        return self
 
     @field_validator("node")
     @classmethod
@@ -215,6 +224,7 @@ def _run_payload(run: BenchmarkRun, *, include_attempts: bool = True) -> dict[st
         "isBaseline": run.is_baseline,
         "autoPause": run.auto_pause,
         "node": getattr(run, "node", None),
+        "sampling": getattr(run, "sampling", None) or "benchmark",
         "pauseReason": run.pause_reason,
         "currentModelIndex": run.current_model_index,
         "currentModel": run.current_model,
@@ -229,7 +239,18 @@ def _run_payload(run: BenchmarkRun, *, include_attempts: bool = True) -> dict[st
         "startedAt": run.started_at.isoformat() if run.started_at else None,
         "finishedAt": run.finished_at.isoformat() if run.finished_at else None,
         "attempts": [_attempt_payload(item) for item in run.attempts] if include_attempts else [],
+        "scoringIssue": _run_scoring_issue(run, include_attempts),
     }
+
+
+def _run_scoring_issue(run: BenchmarkRun, include_attempts: bool) -> dict[str, str] | None:
+    versions: list[str | None] = []
+    if include_attempts:
+        for attempt in run.attempts:
+            if attempt.status == "completed":
+                software = (attempt.environment or {}).get("software") or {}
+                versions.append(software.get("ocabra") if isinstance(software, dict) else None)
+    return scoring_issue(run.app, run.suite, versions, run.created_at)
 
 
 def _schedule_payload(schedule: BenchmarkSchedule) -> dict[str, object]:
@@ -243,6 +264,7 @@ def _schedule_payload(schedule: BenchmarkSchedule) -> dict[str, object]:
         "suiteArgs": schedule.suite_args,
         "autoPause": schedule.auto_pause,
         "node": getattr(schedule, "node", None),
+        "sampling": getattr(schedule, "sampling", None) or "benchmark",
         "enabled": schedule.enabled,
         "weekdays": schedule.weekdays,
         "timeOfDay": schedule.time_of_day,
@@ -338,6 +360,7 @@ async def create_benchmark_run(
         suite_args=body.suite_args,
         auto_pause=body.auto_pause,
         node=_canonical_node(request, body.node),
+        sampling=None if body.sampling == "benchmark" else body.sampling,
         phase="queued",
         workspace_path=workspace,
         created_by=_user_uuid(user),
@@ -386,6 +409,7 @@ async def create_benchmark_schedule(
         suite_args=body.suite_args,
         auto_pause=body.auto_pause,
         node=_canonical_node(request, body.node),
+        sampling=None if body.sampling == "benchmark" else body.sampling,
         enabled=body.enabled,
         weekdays=body.weekdays,
         time_of_day=body.time_of_day,
@@ -434,6 +458,7 @@ async def update_benchmark_schedule(
         ):
             setattr(schedule, field, getattr(body, field))
         schedule.node = node
+        schedule.sampling = None if body.sampling == "benchmark" else body.sampling
         schedule.next_run_at = (
             next_schedule_occurrence(
                 body.weekdays, body.time_of_day, body.timezone, datetime.now(UTC)
@@ -760,3 +785,57 @@ async def get_benchmark_diagnosis_file(
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{diagnosis_id}-{name}"'},
     )
+
+
+@router.post("/diagnoses/{diagnosis_id}/cancel", summary="Cancel a benchmark failure diagnosis")
+async def cancel_benchmark_diagnosis(
+    diagnosis_id: uuid.UUID,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict[str, object]:
+    """Cancela un diagnóstico en cola o en curso.
+
+    Si está repitiendo casos, se corta el script de repetición; lo hecho hasta
+    ese momento queda en disco pero no se genera informe.
+
+    Args:
+        diagnosis_id: id del diagnóstico.
+
+    Returns:
+        El diagnóstico (``cancelled`` si estaba en cola; en curso pasa a
+        ``cancelled`` en cuanto se detiene).
+    """
+    try:
+        job = await _manager(request).cancel_diagnosis(str(diagnosis_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _diagnosis_payload(job)
+
+
+@router.delete(
+    "/diagnoses/{diagnosis_id}", status_code=204, summary="Delete a benchmark failure diagnosis"
+)
+async def delete_benchmark_diagnosis(
+    diagnosis_id: uuid.UUID,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> None:
+    """Borra un diagnóstico terminado con su informe y candidatos.
+
+    Los terminados se borran también solos pasados
+    ``benchmark_diagnosis_retention_days`` días (30 por defecto).
+
+    Args:
+        diagnosis_id: id del diagnóstico.
+
+    Returns:
+        Nada (204). 409 si sigue en cola o en curso: cancélalo antes.
+    """
+    try:
+        await _manager(request).delete_diagnosis(str(diagnosis_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -80,10 +80,14 @@ def _request(prompt: str, model: str) -> tuple[str, float, dict[str, int]]:
     elapsed = time.monotonic() - started
     content = payload["choices"][0]["message"].get("content") or ""
     usage = payload.get("usage") or {}
-    return str(content), elapsed, {
-        "input_tokens": int(usage.get("prompt_tokens") or 0),
-        "output_tokens": int(usage.get("completion_tokens") or 0),
-    }
+    return (
+        str(content),
+        elapsed,
+        {
+            "input_tokens": int(usage.get("prompt_tokens") or 0),
+            "output_tokens": int(usage.get("completion_tokens") or 0),
+        },
+    )
 
 
 def _accuracy(path: Path) -> tuple[float, float, int, int]:
@@ -136,7 +140,9 @@ def main() -> int:
     if responses_path.is_file():
         completed = {
             row["prompt"]: row
-            for row in (json.loads(line) for line in responses_path.read_text().splitlines() if line)
+            for row in (
+                json.loads(line) for line in responses_path.read_text().splitlines() if line
+            )
         }
     _write_progress(len(completed), len(inputs), "generating")
     for index, item in enumerate(inputs, 1):
@@ -150,7 +156,10 @@ def main() -> int:
             "latency_s": latency,
             **usage,
         }
-        _write_jsonl(responses_path, [completed[row["prompt"]] for row in inputs if row["prompt"] in completed])
+        _write_jsonl(
+            responses_path,
+            [completed[row["prompt"]] for row in inputs if row["prompt"] in completed],
+        )
         _write_progress(len(completed), len(inputs), "generating")
         print(f"IFEval {index}/{len(inputs)}", flush=True)
 
@@ -179,9 +188,11 @@ def main() -> int:
     )
     subprocess.run(
         [
-            *_uv_python(uv), "-m",
+            *_uv_python(uv),
+            "-m",
             "instruction_following_eval.evaluation_main",
-            f"--input_data={selected_input}", f"--input_response_data={responses_path}",
+            f"--input_data={selected_input}",
+            f"--input_response_data={responses_path}",
             f"--output_dir={output}",
         ],
         cwd=args.source_root,

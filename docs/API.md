@@ -377,6 +377,8 @@ como resultado limpio.
 | GET | `/ocabra/benchmarks/diagnoses` | List benchmark failure diagnoses | `model_manager` |
 | GET | `/ocabra/benchmarks/diagnoses/{diagnosis_id}` | Read a benchmark failure diagnosis | `model_manager` |
 | GET | `/ocabra/benchmarks/diagnoses/{diagnosis_id}/files/{name}` | Download a diagnosis report or training candidates | `model_manager` |
+| POST | `/ocabra/benchmarks/diagnoses/{diagnosis_id}/cancel` | Cancel a benchmark failure diagnosis | `model_manager` |
+| DELETE | `/ocabra/benchmarks/diagnoses/{diagnosis_id}` | Delete a benchmark failure diagnosis | `model_manager` |
 
 ## Daemon Ollama
 

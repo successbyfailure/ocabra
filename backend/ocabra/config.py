@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.137.1"
+APP_VERSION = "0.138.0"
 
 
 class Settings(BaseSettings):
@@ -898,6 +898,8 @@ class Settings(BaseSettings):
     benchmark_base_url: str = "http://127.0.0.1:8000"
     benchmark_poll_interval_s: float = Field(default=1.0, ge=0.25)
     benchmark_quiet_period_s: float = Field(default=30.0, ge=0)
+    # Días que se guardan los diagnósticos de fallos terminados (0 = siempre).
+    benchmark_diagnosis_retention_days: int = Field(default=30, ge=0)
     # Optional read-only token for private benchmark repositories. It is
     # passed to git through environment-only config, never argv or logs.
     benchmark_git_token: str = Field(default="", repr=False)

@@ -512,6 +512,11 @@ def merge_profile_defaults(profile: ModelProfile, body: dict) -> dict:
     routed = _ROUTER_DEFAULTS.get()
     router_defaults = routed[1] if routed and routed[0] == profile.profile_id else {}
     merged: dict[str, Any] = {**defaults, **router_defaults, **body}
+    # Ejecución de benchmark con «muestreo del fabricante»: solo la clave de
+    # servicio de los benchmarks lo activa (ver benchmarks/sampling_override).
+    from ocabra.benchmarks.sampling_override import apply_override
+
+    merged = apply_override(profile.profile_id, merged)
 
     # Asset injection — controlled paths that clients cannot override
     assets = profile.assets or {}

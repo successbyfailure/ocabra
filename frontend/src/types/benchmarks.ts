@@ -43,6 +43,7 @@ export interface BenchmarkAttempt {
         gitRef?: string | null;
         sourceCommit?: string | null;
         node?: string | null;
+  sampling?: "benchmark" | "recommended";
       }>;
     };
     benchmark?: {
@@ -100,9 +101,12 @@ export interface BenchmarkRun {
   phase: string;
   scheduleId: string | null;
   isBaseline: boolean;
+  /** Fallo conocido del arnés que invalida la nota (se mide con la versión de oCabra). */
+  scoringIssue?: { reason: string; fixedIn: string } | null;
   autoPause: boolean;
   /** Nodo de la federación donde se midió (null = este nodo). */
   node?: string | null;
+  sampling?: "benchmark" | "recommended";
   pauseReason: "manual" | "external_traffic" | null;
   currentModelIndex: number;
   currentModel: string | null;
@@ -133,6 +137,7 @@ export interface BenchmarkSchedule {
   suiteArgs: string[];
   autoPause: boolean;
   node?: string | null;
+  sampling?: "benchmark" | "recommended";
   enabled: boolean;
   weekdays: number[];
   timeOfDay: string;
@@ -153,6 +158,7 @@ export interface BenchmarkScheduleInput {
   suiteArgs?: string[];
   autoPause?: boolean;
   node?: string | null;
+  sampling?: "benchmark" | "recommended";
   enabled?: boolean;
   weekdays: number[];
   timeOfDay: string;
@@ -198,7 +204,7 @@ export interface BenchmarkDiagnosisReport {
 
 export interface BenchmarkDiagnosis {
   id: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
   phase: string | null;
   progress: { completed: number; total: number; cases?: number } | null;
   error: string | null;

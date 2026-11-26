@@ -641,3 +641,16 @@ async def test_si_no_sale_ninguno_falla_y_reintentar_retoma_el_ultimo(tmp_path: 
     assert persisted.status == "failed"
     assert persisted.current_model_index == 1
     assert "a: primero" in (persisted.error or "") and "segundo" in (persisted.error or "")
+
+
+def test_las_notas_de_bfcl_anteriores_al_arreglo_se_marcan() -> None:
+    from ocabra.benchmarks.catalog import scoring_issue
+
+    before = datetime(2026, 11, 22, tzinfo=UTC)
+    after = datetime(2026, 11, 27, tzinfo=UTC)
+    assert scoring_issue("bfcl", "core", ["0.131.0"], after)["fixedIn"] == "0.137.0"
+    assert scoring_issue("bfcl", "core", ["0.137.0"], before) is None
+    # Sin versión registrada manda la fecha.
+    assert scoring_issue("bfcl", "simple_python", [None], before) is not None
+    assert scoring_issue("bfcl", "core", [], after) is None
+    assert scoring_issue("ifeval", "quick", ["0.120.0"], before) is None

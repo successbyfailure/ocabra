@@ -7,6 +7,7 @@ catalog contains only the checkout and invocation contract required by oCabra.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
@@ -191,3 +192,63 @@ def catalog_payload() -> list[dict[str, object]]:
         }
         for app in APPS.values()
     ]
+
+
+# ── Notas que se sabe que están mal ───────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ScoringIssue:
+    """Un fallo del arnés que invalida las notas medidas antes de su arreglo."""
+
+    app: str
+    fixed_in: str
+    fixed_at: datetime
+    reason: str
+    suites: tuple[str, ...] = ()
+
+
+SCORING_ISSUES: tuple[ScoringIssue, ...] = (
+    ScoringIssue(
+        app="bfcl",
+        fixed_in="0.137.0",
+        fixed_at=datetime(2026, 11, 26, 15, 17, tzinfo=UTC),
+        reason=(
+            "Medida sin underscore_to_dot: BFCL puntuaba como «nombre de función "
+            "incorrecto» respuestas correctas (≈70 % de los fallos de gemma4). La nota "
+            "está infravalorada; repite la ejecución para compararla."
+        ),
+    ),
+)
+
+
+def _version(value: str | None) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(part) for part in str(value).split(".")[:3])
+    except (TypeError, ValueError):
+        return None
+
+
+def scoring_issue(
+    app: str,
+    suite: str,
+    versions: list[str | None],
+    created_at: datetime | None,
+) -> dict[str, str] | None:
+    """El problema conocido que invalida una ejecución, si lo hay.
+
+    Manda la versión de oCabra con la que se midió cada intento; si no consta,
+    la fecha de creación frente a la del despliegue del arreglo.
+    """
+    for issue in SCORING_ISSUES:
+        if issue.app != app or (issue.suites and suite not in issue.suites):
+            continue
+        fixed = _version(issue.fixed_in)
+        measured = [parsed for parsed in map(_version, versions) if parsed is not None]
+        if measured:
+            broken = any(parsed < fixed for parsed in measured)  # type: ignore[operator]
+        else:
+            broken = created_at is not None and created_at < issue.fixed_at
+        if broken:
+            return {"reason": issue.reason, "fixedIn": issue.fixed_in}
+    return None

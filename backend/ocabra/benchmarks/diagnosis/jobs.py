@@ -43,7 +43,7 @@ from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
 
-_TERMINAL = frozenset({"completed", "failed"})
+TERMINAL = frozenset({"completed", "failed", "cancelled"})
 SCRIPTS = Path(__file__).resolve().parent / "scripts"
 _IFEVAL_DEPS = ("absl-py", "langdetect", "nltk", "immutabledict")
 
@@ -112,6 +112,39 @@ class DiagnosisStore:
         except (OSError, ValueError):
             return None
 
+    def delete(self, job_id: str) -> bool:
+        """Borra un diagnóstico terminado y todos sus ficheros."""
+        job = self.load(job_id)
+        if job is None:
+            return False
+        if job["status"] not in TERMINAL:
+            raise ValueError("Cancela el diagnóstico antes de borrarlo")
+        shutil.rmtree(self.path(job_id), ignore_errors=True)
+        return True
+
+    def cancel_queued(self, job_id: str) -> dict[str, Any] | None:
+        job = self.load(job_id)
+        if job is not None and job["status"] == "queued":
+            job.update(status="cancelled", phase="cancelled", error="cancelado", finished_at=_now())
+            self.save(job)
+        return job
+
+    def purge(self, retention_days: int, now: datetime | None = None) -> int:
+        """Borra los diagnósticos terminados hace más de ``retention_days`` días."""
+        if retention_days <= 0:
+            return 0
+        now = now or datetime.now(UTC)
+        removed = 0
+        for job in self.all():
+            finished = job.get("finished_at") or job.get("created_at")
+            if job["status"] not in TERMINAL or not finished:
+                continue
+            age = now - datetime.fromisoformat(finished)
+            if age.total_seconds() > retention_days * 86400:
+                shutil.rmtree(self.path(job["id"]), ignore_errors=True)
+                removed += 1
+        return removed
+
     def recover_interrupted(self) -> None:
         for job in self.all():
             if job["status"] == "running":
@@ -122,6 +155,10 @@ class DiagnosisStore:
                 self.save(job)
 
 
+class DiagnosisCancelled(Exception):
+    """Se pidió cancelar el diagnóstico en curso."""
+
+
 class DiagnosisRunner:
     """Ejecuta un diagnóstico de principio a fin."""
 
@@ -129,17 +166,39 @@ class DiagnosisRunner:
         self._app = app
         self._store = store
         self._api_key = api_key
+        self._cancelled = False
+        self._process: asyncio.subprocess.Process | None = None
+        self.job_id: str | None = None
+
+    def cancel(self) -> None:
+        """Corta el diagnóstico: mata el script en curso y para en la siguiente fase."""
+        self._cancelled = True
+        if self._process is not None and self._process.returncode is None:
+            self._process.kill()
+
+    def _check(self) -> None:
+        if self._cancelled:
+            raise DiagnosisCancelled()
 
     # ── Entrada ─────────────────────────────────────────────────────────
 
     async def run(self, job: dict[str, Any]) -> None:
+        self.job_id = job["id"]
         job.update(status="running", phase="cases", started_at=_now(), error=None)
         self._store.save(job)
         try:
             await self._run(job)
+            self._check()
+        except DiagnosisCancelled:
+            job.update(status="cancelled", phase="cancelled", error="cancelado")
         except Exception as exc:  # noqa: BLE001 — el informe dice por qué
-            logger.exception("benchmark_diagnosis_failed", job_id=job["id"])
-            job.update(status="failed", phase="failed", error=f"{type(exc).__name__}: {exc}"[:2000])
+            if self._cancelled:  # matar el script hace fallar la fase en curso
+                job.update(status="cancelled", phase="cancelled", error="cancelado")
+            else:
+                logger.exception("benchmark_diagnosis_failed", job_id=job["id"])
+                job.update(
+                    status="failed", phase="failed", error=f"{type(exc).__name__}: {exc}"[:2000]
+                )
         else:
             job.update(status="completed", phase="completed")
         job["finished_at"] = _now()
@@ -172,6 +231,7 @@ class DiagnosisRunner:
             job["phase"] = "rescore"
             self._store.save(job)
             await self._bfcl_rescore(directory, workspace, cases)
+        self._check()
         job["phase"] = "reference"
         job["progress"] = {"completed": 0, "total": 0, "cases": len(cases)}
         self._store.save(job)
@@ -230,6 +290,7 @@ class DiagnosisRunner:
             replayable = [
                 case for case in cases if case["case_id"] in sample and case["replayable"]
             ]
+            self._check()
             if can_replay and replayable:
                 job["phase"] = "replay"
                 self._store.save(job)
@@ -605,7 +666,10 @@ class DiagnosisRunner:
                 stdout=log,
                 stderr=asyncio.subprocess.STDOUT,
             )
+            self._process = process
             await asyncio.wait_for(process.wait(), timeout=1800)
+            self._process = None
+        self._check()
         if process.returncode != 0:
             raise RuntimeError(f"{name} terminó con código {process.returncode}; ver {name}.log")
         return output
@@ -712,6 +776,7 @@ class DiagnosisRunner:
                 stdout=log,
                 stderr=asyncio.subprocess.STDOUT,
             )
+            self._process = process
             while True:
                 try:
                     await asyncio.wait_for(process.wait(), timeout=5)
@@ -723,6 +788,8 @@ class DiagnosisRunner:
                         self._store.save(job)
         finally:
             log.close()
+            self._process = None
+        self._check()
         if process.returncode != 0:
             raise RuntimeError(
                 f"la repetición terminó con código {process.returncode}; ver replay.log"

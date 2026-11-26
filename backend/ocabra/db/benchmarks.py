@@ -34,6 +34,7 @@ class BenchmarkRun(Base):
     # Nodo de la federación donde se mide (nombre del peer); None = este nodo.
     # El runner sigue en el hub y sus peticiones van forzadas a ese nodo.
     node: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sampling: Mapped[str | None] = mapped_column(Text, nullable=True)
     pause_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_model_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     current_model: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -126,6 +127,7 @@ class BenchmarkSchedule(Base):
     suite_args: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     auto_pause: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     node: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sampling: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     weekdays: Mapped[list[int]] = mapped_column(JSONB, nullable=False, default=list)
     time_of_day: Mapped[str] = mapped_column(Text, nullable=False, default="02:00")

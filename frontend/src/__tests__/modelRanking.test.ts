@@ -163,3 +163,11 @@ describe("global benchmark ranking", () => {
     ])
   })
 })
+
+describe("notas invalidadas", () => {
+  it("una ejecución con scoringIssue no entra en el ranking", () => {
+    const broken = { ...run("bfcl", "core", "qwen", 0.2), scoringIssue: { reason: "x", fixedIn: "0.137.0" } }
+    const ranking = buildModelRanking([broken, run("ifeval", "full", "qwen", 0.8), run("corrala", "llm", "qwen", 0.8)], balanced)
+    expect(ranking[0].dimensions).not.toContain("bfcl")
+  })
+})

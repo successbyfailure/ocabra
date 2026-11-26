@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.138.0 — 2026-11-26
+
+### Nuevo (administración de benchmarks)
+
+- **Ejecuciones con el muestreo del fabricante.** `POST /ocabra/benchmarks/runs`
+  (y los planes) aceptan `sampling: "recommended"`: oCabra pisa en el servidor
+  temperatura, `top_p`, `top_k`, `min_p` y penalizaciones de las peticiones del
+  runner con los de la ficha oficial del modelo en Hugging Face. Solo afecta a
+  las peticiones que llevan la clave de servicio de los benchmarks, nunca a las
+  de usuarios. Por defecto, `"benchmark"` (lo de siempre). No se combina con
+  `node`. Estas ejecuciones no cuentan en el ranking.
+- **Notas invalidadas.** Las ejecuciones afectadas por un fallo conocido del
+  arnés llevan `scoringIssue` (`reason`, `fixedIn`) y no cuentan en el ranking.
+  De momento, las de BFCL medidas antes de 0.137.0.
+- **Diagnósticos: cancelar y borrar.**
+  `POST /ocabra/benchmarks/diagnoses/{id}/cancel` y
+  `DELETE /ocabra/benchmarks/diagnoses/{id}`; los terminados se borran solos a
+  los `BENCHMARK_DIAGNOSIS_RETENTION_DAYS` días (30).
+
+**Acción:** ninguna en la API de inferencia.
+
+---
+
 ## 0.137.0 — 2026-11-26
 
 ### Nuevo

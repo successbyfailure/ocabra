@@ -206,7 +206,9 @@ function attemptReliability(attempt: BenchmarkAttempt | undefined): number {
 
 function observations(runs: BenchmarkRun[], filters: RankingFilters): Observation[] {
   const result: Observation[] = []
-  runs.filter((run) => run.status === "completed" && Object.keys(run.result).length > 0).forEach((run) => {
+  // Una nota invalidada por un fallo conocido del arnés no compara con nada.
+  // El muestreo del fabricante es otra condición de medida: no se mezcla.
+  runs.filter((run) => run.status === "completed" && !run.scoringIssue && run.sampling !== "recommended" && Object.keys(run.result).length > 0).forEach((run) => {
     const dimension = dimensionFor(run)
     if (!dimension) return
     Object.keys(run.result).forEach((profile) => {

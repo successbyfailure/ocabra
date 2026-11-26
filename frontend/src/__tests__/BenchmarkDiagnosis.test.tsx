@@ -70,3 +70,22 @@ describe("BenchmarkDiagnoses", () => {
     expect(container.textContent).toBe("")
   })
 })
+
+describe("BenchmarkDiagnoses · cancelar y borrar", () => {
+  it("cancela uno en curso y borra uno terminado", async () => {
+    const cancel = vi.fn().mockResolvedValue({})
+    const remove = vi.fn().mockResolvedValue(undefined)
+    const { api } = await import("@/api/client")
+    Object.assign(api.benchmarks.diagnoses, { cancel, remove })
+    list.mockResolvedValue([
+      { ...diagnosis, id: "d2", status: "running", phase: "replay", report: undefined, progress: { completed: 1, total: 4 } },
+      { ...diagnosis, id: "d3", status: "failed", report: undefined },
+    ])
+    render(<BenchmarkDiagnoses run={run} />)
+    await waitFor(() => expect(screen.getByText(/Cancelar/)).toBeTruthy())
+    fireEvent.click(screen.getByText(/Cancelar/))
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith("d2"))
+    fireEvent.click(screen.getByText(/Borrar/))
+    await waitFor(() => expect(remove).toHaveBeenCalledWith("d3"))
+  })
+})

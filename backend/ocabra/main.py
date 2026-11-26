@@ -205,9 +205,11 @@ app.add_middleware(StatsMiddleware)
 app.add_middleware(AdmissionMiddleware, on_reject=record_admission_rejection)
 # Outermost: marks requests that came from a federation peer before anything
 # else runs, so they are never forwarded to yet another peer.
+from ocabra.benchmarks.sampling_override import BenchmarkSamplingMiddleware  # noqa: E402
 from ocabra.core.federation import FederationHopMiddleware  # noqa: E402
 
 app.add_middleware(FederationHopMiddleware)
+app.add_middleware(BenchmarkSamplingMiddleware)
 
 from ocabra.core.privacy import PrivacyHeaderMiddleware  # noqa: E402
 

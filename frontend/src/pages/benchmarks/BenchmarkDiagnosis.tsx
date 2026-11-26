@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { Download, Loader2, Stethoscope } from "lucide-react"
+import { Ban, Download, Loader2, Stethoscope, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/api/client"
 import type {
@@ -85,6 +85,19 @@ export function BenchmarkDiagnoses({ run }: { run: BenchmarkRun }) {
     }
   }
 
+  const control = async (item: BenchmarkDiagnosis, action: "cancel" | "remove") => {
+    setBusy(item.id)
+    try {
+      if (action === "cancel") await api.benchmarks.diagnoses.cancel(item.id)
+      else await api.benchmarks.diagnoses.remove(item.id)
+      await refresh()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo completar la acción")
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
     <details className="mt-3 rounded-lg border border-border px-3 py-2 text-xs">
       <summary className="flex cursor-pointer list-none items-center gap-1.5 text-muted-foreground">
@@ -113,12 +126,23 @@ export function BenchmarkDiagnoses({ run }: { run: BenchmarkRun }) {
         <div key={item.id} className="mt-3 rounded-md border border-border/70 p-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="font-mono">{item.model}</span>
-            <span className="text-muted-foreground">
+            <span className="inline-flex items-center gap-2 text-muted-foreground">
               {item.status === "completed"
                 ? "completado"
                 : item.status === "failed"
                   ? "falló"
-                  : `${item.phase ?? item.status}${item.progress?.total ? ` · ${item.progress.completed}/${item.progress.total}` : ""}`}
+                  : item.status === "cancelled"
+                    ? "cancelado"
+                    : `${item.phase ?? item.status}${item.progress?.total ? ` · ${item.progress.completed}/${item.progress.total}` : ""}`}
+              {ACTIVE.has(item.status) ? (
+                <button type="button" disabled={busy !== null} onClick={() => void control(item, "cancel")} className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-destructive hover:bg-muted" title="Cancelar diagnóstico">
+                  <Ban size={11} /> Cancelar
+                </button>
+              ) : (
+                <button type="button" disabled={busy !== null} onClick={() => void control(item, "remove")} className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 hover:bg-muted" title="Borrar diagnóstico y sus ficheros">
+                  <Trash2 size={11} /> Borrar
+                </button>
+              )}
             </span>
           </div>
           {item.error && <div className="mt-1 text-destructive">{item.error}</div>}

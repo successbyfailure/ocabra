@@ -86,6 +86,7 @@ def run_from_schedule(schedule: BenchmarkSchedule, *, now: datetime | None = Non
         suite_args=list(schedule.suite_args),
         auto_pause=schedule.auto_pause,
         node=schedule.node,
+        sampling=getattr(schedule, "sampling", None),
         phase="queued",
         schedule_id=schedule.id,
         workspace_path=str(Path(settings.benchmark_dir).resolve() / "runs" / str(run_id)),
@@ -228,6 +229,10 @@ class BenchmarkManager:
         self._process: asyncio.subprocess.Process | None = None
         self._process_lock = asyncio.Lock()
         self._diagnoses = DiagnosisStore(self._root)
+        self._diagnosis_runner: DiagnosisRunner | None = None
+        # Override de muestreo activo (perfil, parámetros y clave del runner).
+        self.sampling_override: dict[str, object] | None = None
+        self._last_diagnosis_purge = 0.0
 
     @property
     def diagnoses(self) -> DiagnosisStore:
@@ -378,6 +383,35 @@ class BenchmarkManager:
         self.notify()
         return job
 
+    async def cancel_diagnosis(self, job_id: str) -> dict[str, object]:
+        """Cancela un diagnóstico en cola o en curso."""
+        job = await asyncio.to_thread(self._diagnoses.load, job_id)
+        if job is None:
+            raise LookupError("Diagnóstico no encontrado")
+        if job["status"] == "queued":
+            return await asyncio.to_thread(self._diagnoses.cancel_queued, job_id) or job
+        runner = self._diagnosis_runner
+        if job["status"] == "running" and runner is not None and runner.job_id == job_id:
+            runner.cancel()
+            return job
+        raise ValueError("El diagnóstico ya terminó")
+
+    async def delete_diagnosis(self, job_id: str) -> None:
+        if not await asyncio.to_thread(self._diagnoses.delete, job_id):
+            raise LookupError("Diagnóstico no encontrado")
+
+    async def _purge_diagnoses(self) -> None:
+        """Retención de los diagnósticos terminados, como mucho una vez por hora."""
+        now = asyncio.get_running_loop().time()
+        if self._last_diagnosis_purge and now - self._last_diagnosis_purge < 3600:
+            return
+        self._last_diagnosis_purge = now
+        removed = await asyncio.to_thread(
+            self._diagnoses.purge, settings.benchmark_diagnosis_retention_days
+        )
+        if removed:
+            logger.info("benchmark_diagnoses_purged", removed=removed)
+
     async def request_baseline(self, run_id: uuid.UUID) -> BenchmarkRun:
         """Make one completed run the unique reference for its application suite."""
         async with AsyncSessionLocal() as session:
@@ -404,10 +438,15 @@ class BenchmarkManager:
                     await self._execute_run(run_id)
                     continue
                 # Los diagnósticos repiten casos: solo con la cola de benchmarks vacía.
+                await self._purge_diagnoses()
                 job = await asyncio.to_thread(self._diagnoses.next_queued)
                 if job is not None and self._identity is not None:
                     runner = DiagnosisRunner(self._app, self._diagnoses, self._identity.raw_api_key)
-                    await runner.run(job)
+                    self._diagnosis_runner = runner
+                    try:
+                        await runner.run(job)
+                    finally:
+                        self._diagnosis_runner = None
                     continue
             except asyncio.CancelledError:
                 raise
@@ -590,6 +629,9 @@ class BenchmarkManager:
         environment = await self._base_environment(run_id, source, app, suite, model)
         if node:
             environment["node"] = await self._node_description(node)
+        sampling = await self._recommended_sampling(run_id, model)
+        if sampling is not None:
+            environment["sampling"] = {"mode": "recommended", **sampling}
         attempt = await self._create_attempt(
             run_id, model, attempt_number, workspace, log_path, environment
         )
@@ -603,15 +645,24 @@ class BenchmarkManager:
             command.extend(suite.resume_args)
         await self._set_phase(run_id, "running")
         started_at = datetime.now(UTC)
-        outcome = await self._run_process(
-            run_id,
-            command,
-            source,
-            log_path,
-            detect_external=not node,
-            progress_path=workspace / "progress.json",
-            node=node,
-        )
+        if sampling is not None and self._identity is not None:
+            self.sampling_override = {
+                "profile": model,
+                "params": sampling["params"],
+                "api_key": self._identity.raw_api_key,
+            }
+        try:
+            outcome = await self._run_process(
+                run_id,
+                command,
+                source,
+                log_path,
+                detect_external=not node,
+                progress_path=workspace / "progress.json",
+                node=node,
+            )
+        finally:
+            self.sampling_override = None
         finished_at = datetime.now(UTC)
         await self._set_phase(run_id, "finalizing")
         # StatsMiddleware records at response completion. Give its short DB
@@ -1162,6 +1213,34 @@ class BenchmarkManager:
             (p for p in manager.get_all_peers() if wanted in {p.name.lower(), str(p.peer_id)}),
             None,
         )
+
+    async def _recommended_sampling(self, run_id: uuid.UUID, model: str) -> dict | None:
+        """Muestreo del fabricante para ``model`` si la ejecución lo pide.
+
+        Sin ficha oficial en Hugging Face no hay con qué comparar: falla en vez
+        de medir con el muestreo de siempre y etiquetarlo como recomendado.
+        """
+        async with AsyncSessionLocal() as session:
+            mode = getattr(await self._get_run(session, run_id), "sampling", None)
+        if mode != "recommended":
+            return None
+        from ocabra.benchmarks.diagnosis.reference import load_reference, resolve_reference_repo
+
+        state_obj = self._app.state
+        profile = await state_obj.profile_registry.get(model)
+        state = await state_obj.model_manager.get_state(profile.base_model_id) if profile else None
+        repo = resolve_reference_repo(
+            str(getattr(state, "model_key", None) or model),
+            getattr(state, "artifact", None),
+            getattr(state, "extra_config", None),
+        )
+        reference = await load_reference(repo)
+        if reference.error or not reference.sampling:
+            raise RuntimeError(
+                f"Sin muestreo del fabricante para {model}: {reference.error or 'ficha vacía'}. "
+                "Fija extra_config.diagnosis.reference_repo o mide con el del benchmark."
+            )
+        return {"reference": reference.repo, "params": reference.sampling}
 
     async def _run_node(self, run_id: uuid.UUID) -> str | None:
         async with AsyncSessionLocal() as session:

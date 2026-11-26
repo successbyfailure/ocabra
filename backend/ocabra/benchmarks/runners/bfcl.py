@@ -91,7 +91,8 @@ def _line_count(path: Path) -> int:
 
 
 def _expanded_categories(
-    categories: list[str], collection_mapping: dict[str, list[str]],
+    categories: list[str],
+    collection_mapping: dict[str, list[str]],
 ) -> list[str]:
     expanded: list[str] = []
     for category in categories:
@@ -182,11 +183,20 @@ def main() -> int:
     try:
         generate(
             SimpleNamespace(
-                model=[model], test_category=categories, temperature=0.001,
-                include_input_log=False, exclude_state_log=False, num_gpus=1,
-                num_threads=1, gpu_memory_utilization=0.9, backend="sglang",
-                skip_server_setup=True, local_model_path=None, result_dir=result_dir,
-                allow_overwrite=False, run_ids=False,
+                model=[model],
+                test_category=categories,
+                temperature=0.001,
+                include_input_log=False,
+                exclude_state_log=False,
+                num_gpus=1,
+                num_threads=1,
+                gpu_memory_utilization=0.9,
+                backend="sglang",
+                skip_server_setup=True,
+                local_model_path=None,
+                result_dir=result_dir,
+                allow_overwrite=False,
+                run_ids=False,
             )
         )
     finally:

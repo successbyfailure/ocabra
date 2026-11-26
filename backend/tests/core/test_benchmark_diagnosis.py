@@ -377,3 +377,44 @@ def test_la_primera_diferencia_se_ve_aunque_la_linea_sea_larga() -> None:
     first = result["first_difference"]
     assert first["offset"] == 500
     assert "NUMBER" in first["oficial"] and "number" in first["servido"]
+
+
+def test_cancelar_borrar_y_retencion(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    store = DiagnosisStore(tmp_path)
+    queued = store.create({"attempt_id": "a"})
+    assert store.cancel_queued(queued["id"])["status"] == "cancelled"
+    running = store.create({"attempt_id": "b"})
+    running["status"] = "running"
+    store.save(running)
+    with pytest.raises(ValueError):
+        store.delete(running["id"])
+    assert store.delete(queued["id"]) is True
+    assert store.load(queued["id"]) is None
+
+    old = store.create({"attempt_id": "c"})
+    old.update(status="completed", finished_at=(datetime.now(UTC) - timedelta(days=40)).isoformat())
+    store.save(old)
+    fresh = store.create({"attempt_id": "d"})
+    fresh.update(status="failed", finished_at=datetime.now(UTC).isoformat())
+    store.save(fresh)
+    assert store.purge(30) == 1
+    assert store.load(old["id"]) is None and store.load(fresh["id"]) is not None
+    assert store.load(running["id"]) is not None  # en curso nunca se purga
+    assert store.purge(0) == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelar_mata_el_script_en_curso() -> None:
+    import asyncio
+
+    runner = DiagnosisRunner.__new__(DiagnosisRunner)
+    runner._cancelled = False
+    runner._process = await asyncio.create_subprocess_exec("sleep", "30")
+    runner.cancel()
+    assert await asyncio.wait_for(runner._process.wait(), timeout=5) != 0
+    from ocabra.benchmarks.diagnosis.jobs import DiagnosisCancelled
+
+    with pytest.raises(DiagnosisCancelled):
+        runner._check()

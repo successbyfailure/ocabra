@@ -33,6 +33,7 @@ export const benchmarksApiModule = {
       suiteArgs?: string[];
       autoPause?: boolean;
       node?: string | null;
+      sampling?: "benchmark" | "recommended";
     }) =>
       request<BenchmarkRun>("POST", "/ocabra/benchmarks/runs", {
         app: payload.app,
@@ -42,6 +43,7 @@ export const benchmarksApiModule = {
         suite_args: payload.suiteArgs ?? [],
         auto_pause: payload.autoPause ?? true,
         node: payload.node || null,
+        sampling: payload.sampling ?? "benchmark",
       }),
     pause: (runId: string) =>
       request<BenchmarkRun>(
@@ -93,6 +95,13 @@ export const benchmarksApiModule = {
             allow_load: payload.allowLoad ?? false,
           },
         ),
+      cancel: (diagnosisId: string) =>
+        request<BenchmarkDiagnosis>(
+          "POST",
+          `/ocabra/benchmarks/diagnoses/${encodeURIComponent(diagnosisId)}/cancel`,
+        ),
+      remove: (diagnosisId: string) =>
+        request<void>("DELETE", `/ocabra/benchmarks/diagnoses/${encodeURIComponent(diagnosisId)}`),
       fileUrl: (diagnosisId: string, name: string) =>
         `/ocabra/benchmarks/diagnoses/${encodeURIComponent(diagnosisId)}/files/${encodeURIComponent(name)}`,
     },
@@ -109,6 +118,7 @@ export const benchmarksApiModule = {
           revision: payload.revision || null, models: payload.models,
           suite_args: payload.suiteArgs ?? [], auto_pause: payload.autoPause ?? true,
           node: payload.node || null,
+          sampling: payload.sampling ?? "benchmark",
           enabled: payload.enabled ?? false, weekdays: payload.weekdays,
           time_of_day: payload.timeOfDay, timezone: payload.timezone,
         }),
@@ -119,6 +129,7 @@ export const benchmarksApiModule = {
             revision: payload.revision || null, models: payload.models,
             suite_args: payload.suiteArgs ?? [], auto_pause: payload.autoPause ?? true,
             node: payload.node || null,
+            sampling: payload.sampling ?? "benchmark",
             enabled: payload.enabled ?? false, weekdays: payload.weekdays,
             time_of_day: payload.timeOfDay, timezone: payload.timezone,
           },
