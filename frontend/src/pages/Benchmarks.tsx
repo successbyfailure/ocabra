@@ -12,6 +12,7 @@ import type {
   BenchmarkScheduleInput, FederationPeer,
   ModelProfile,
 } from "@/types"
+import { BenchmarkDiagnoses } from "./benchmarks/BenchmarkDiagnosis"
 import { BenchmarkResultsDashboard } from "./benchmarks/BenchmarkResultsDashboard"
 import { BenchmarkTimeEstimate } from "./benchmarks/BenchmarkTimeEstimate"
 import {
@@ -749,6 +750,7 @@ function RunCard({ run, history, busy, log, logOpen, onPause, onResume, onCancel
         {run.pauseReason && <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"><Activity size={14} className="mt-0.5 shrink-0" />{run.pauseReason === "external_traffic" ? "Pausado por tráfico externo. Se reanudará automáticamente cuando el servidor quede libre." : "Pausado manualmente. Usa Reanudar cuando quieras continuar."}</div>}
         {run.error && <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{run.error}</div>}
         {run.attempts.length > 0 && <Attempts attempts={run.attempts} />}
+        {run.attempts.length > 0 && <BenchmarkDiagnoses run={run} />}
       </div>
 
       {logOpen && <div className="border-t border-border bg-black/40"><div className="flex items-center justify-between px-3 py-2"><span className="text-xs font-medium text-zinc-300">Salida del último intento</span><div className="flex gap-1"><button type="button" onClick={onRefreshLog} className="rounded p-1.5 text-zinc-400 hover:bg-white/10" title="Actualizar log"><RefreshCw size={13} /></button><button type="button" onClick={() => void copyLog()} className="rounded p-1.5 text-zinc-400 hover:bg-white/10" title="Copiar log"><Copy size={13} /></button></div></div><pre className="max-h-96 overflow-auto border-t border-white/10 p-3 text-[11px] leading-relaxed text-zinc-300">{log?.join("\n") || "Sin salida todavía"}</pre></div>}

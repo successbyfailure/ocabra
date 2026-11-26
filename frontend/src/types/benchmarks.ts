@@ -160,3 +160,54 @@ export interface BenchmarkScheduleInput {
 }
 
 // Backend modules (Bloque 15) — re-exported for convenience.
+
+export type BenchmarkDiagnosisCategory =
+  | "plantilla"
+  | "sampling"
+  | "limites"
+  | "servido"
+  | "modelo"
+  | "no_reproduce"
+  | "sin_verificar"
+
+export interface BenchmarkDiagnosisCase {
+  case_id: string;
+  category: BenchmarkDiagnosisCategory;
+  case_category: string;
+  failure: string;
+  evidence: string[];
+}
+
+export interface BenchmarkDiagnosisReport {
+  model: string;
+  app: string;
+  suite: string;
+  repeats: number;
+  replayed_cases: number;
+  findings: string[];
+  summary: {
+    total: number;
+    counts: Record<BenchmarkDiagnosisCategory, number>;
+    percent_of_failures: Record<BenchmarkDiagnosisCategory, number>;
+  };
+  params?: { differences?: Record<string, { efectivo: unknown; recomendado: unknown }> };
+  reference?: { repo: string | null };
+  cases: BenchmarkDiagnosisCase[];
+  candidates: { train: number; eval: number };
+}
+
+export interface BenchmarkDiagnosis {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  phase: string | null;
+  progress: { completed: number; total: number; cases?: number } | null;
+  error: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+  attemptId: string;
+  runId: string;
+  app: string;
+  suite: string;
+  model: string;
+  report?: BenchmarkDiagnosisReport | null;
+}

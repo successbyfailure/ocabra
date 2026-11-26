@@ -585,3 +585,178 @@ async def cancel_benchmark_run(
 ) -> dict[str, object]:
     """Cancel queued work or terminate the current benchmark subprocess."""
     return await _control_run(run_id, request, "cancel")
+
+
+# ── Diagnóstico de fallos ────────────────────────────────────────────────
+
+_DIAGNOSIS_FILES = {
+    "report.md": "text/markdown; charset=utf-8",
+    "candidates.train.jsonl": "application/x-ndjson",
+    "candidates.eval.jsonl": "application/x-ndjson",
+    "replays.jsonl": "application/x-ndjson",
+}
+
+
+class BenchmarkDiagnosisCreate(BaseModel):
+    """Opciones de un diagnóstico «¿es el modelo o es cómo lo servimos?»."""
+
+    repeats: int = Field(default=3, ge=1, le=10)
+    max_cases: int = Field(default=30, ge=1, le=500)
+    compare_model: str | None = Field(default=None, max_length=200)
+    reference_repo: str | None = Field(default=None, max_length=200)
+    allow_load: bool = False
+
+    @field_validator("compare_model", "reference_repo")
+    @classmethod
+    def strip_optional(cls, value: str | None) -> str | None:
+        value = (value or "").strip()
+        return value or None
+
+
+def _diagnosis_payload(job: dict[str, object], report: dict | None = None) -> dict[str, object]:
+    request = job.get("request") or {}
+    payload: dict[str, object] = {
+        "id": job["id"],
+        "status": job["status"],
+        "phase": job.get("phase"),
+        "progress": job.get("progress"),
+        "error": job.get("error"),
+        "createdAt": job.get("created_at"),
+        "startedAt": job.get("started_at"),
+        "finishedAt": job.get("finished_at"),
+        "attemptId": request.get("attempt_id"),
+        "runId": request.get("run_id"),
+        "app": request.get("app"),
+        "suite": request.get("suite"),
+        "model": request.get("model"),
+        "options": {
+            key: request.get(key)
+            for key in ("repeats", "max_cases", "compare_model", "reference_repo", "allow_load")
+        },
+    }
+    if report is not None:
+        payload["report"] = report
+    return payload
+
+
+@router.post(
+    "/attempts/{attempt_id}/diagnoses",
+    status_code=202,
+    summary="Diagnose why a benchmark attempt's cases failed",
+)
+async def create_benchmark_diagnosis(
+    attempt_id: uuid.UUID,
+    request: Request,
+    body: BenchmarkDiagnosisCreate | None = None,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict[str, object]:
+    """Encola el diagnóstico de los casos fallidos de un intento completado.
+
+    Clasifica cada fallo en plantilla, sampling, límites, cuantización/servido o
+    modelo. Lo ejecuta la cola de benchmarks cuando no hay ninguno pendiente, y
+    sus repeticiones entran por la cola normal de oCabra.
+
+    Args:
+        attempt_id: intento completado (``attempts[].id`` de una ejecución).
+        body: ``repeats`` (repeticiones con el muestreo recomendado, 3),
+            ``max_cases`` (casos repetidos como máximo, muestra estratificada,
+            30), ``compare_model`` (perfil con otra cuantización para comparar),
+            ``reference_repo`` (repo de HF de la ficha oficial si no se deduce)
+            y ``allow_load`` (repetir aunque el modelo no esté cargado; puede
+            expulsar otros modelos).
+
+    Returns:
+        El diagnóstico encolado (``status: queued``).
+    """
+    options = (body or BenchmarkDiagnosisCreate()).model_dump()
+    try:
+        job = await _manager(request).request_diagnosis(attempt_id, options)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _diagnosis_payload(job)
+
+
+@router.get("/diagnoses", summary="List benchmark failure diagnoses")
+async def list_benchmark_diagnoses(
+    request: Request,
+    attempt_id: uuid.UUID | None = None,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> list[dict[str, object]]:
+    """Lista los diagnósticos, los más recientes primero.
+
+    Args:
+        attempt_id: solo los de ese intento.
+
+    Returns:
+        Diagnósticos sin el informe (pídelo en ``GET /diagnoses/{id}``).
+    """
+    jobs = await asyncio.to_thread(_manager(request).diagnoses.all)
+    if attempt_id is not None:
+        jobs = [
+            job for job in jobs if (job.get("request") or {}).get("attempt_id") == str(attempt_id)
+        ]
+    return [_diagnosis_payload(job) for job in jobs]
+
+
+@router.get("/diagnoses/{diagnosis_id}", summary="Read a benchmark failure diagnosis")
+async def get_benchmark_diagnosis(
+    diagnosis_id: uuid.UUID,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+) -> dict[str, object]:
+    """Devuelve el estado de un diagnóstico y, si terminó, su informe completo.
+
+    Args:
+        diagnosis_id: id del diagnóstico.
+
+    Returns:
+        Estado, progreso y ``report`` (resumen por categoría, parámetros
+        efectivos frente a recomendados, sondas de plantilla y la tabla de
+        casos con su evidencia).
+    """
+    store = _manager(request).diagnoses
+    job = await asyncio.to_thread(store.load, str(diagnosis_id))
+    if job is None:
+        raise HTTPException(status_code=404, detail="Diagnóstico no encontrado")
+    report = await asyncio.to_thread(store.report, str(diagnosis_id))
+    return _diagnosis_payload(job, report)
+
+
+@router.get(
+    "/diagnoses/{diagnosis_id}/files/{name}",
+    summary="Download a diagnosis report or training candidates",
+)
+async def get_benchmark_diagnosis_file(
+    diagnosis_id: uuid.UUID,
+    name: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("model_manager")),
+):
+    """Descarga un fichero del diagnóstico.
+
+    Args:
+        diagnosis_id: id del diagnóstico.
+        name: ``report.md``, ``candidates.train.jsonl``,
+            ``candidates.eval.jsonl`` (reservados para medir, no para entrenar)
+            o ``replays.jsonl``.
+
+    Returns:
+        El fichero tal cual.
+    """
+    from fastapi.responses import Response
+
+    media_type = _DIAGNOSIS_FILES.get(name)
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="Fichero no disponible")
+    path = _manager(request).diagnoses.path(str(diagnosis_id)) / name
+    try:
+        content = await asyncio.to_thread(path.read_bytes)
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="Fichero no disponible") from exc
+    return Response(
+        content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{diagnosis_id}-{name}"'},
+    )

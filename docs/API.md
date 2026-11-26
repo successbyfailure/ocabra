@@ -373,6 +373,10 @@ como resultado limpio.
 | PUT | `/ocabra/benchmarks/schedules/{schedule_id}` | Replace a benchmark plan | `model_manager` |
 | DELETE | `/ocabra/benchmarks/schedules/{schedule_id}` | Delete a benchmark plan | `model_manager` |
 | POST | `/ocabra/benchmarks/schedules/{schedule_id}/run` | Run a benchmark plan now | `model_manager` |
+| POST | `/ocabra/benchmarks/attempts/{attempt_id}/diagnoses` | Diagnose why a benchmark attempt's cases failed | `model_manager` |
+| GET | `/ocabra/benchmarks/diagnoses` | List benchmark failure diagnoses | `model_manager` |
+| GET | `/ocabra/benchmarks/diagnoses/{diagnosis_id}` | Read a benchmark failure diagnosis | `model_manager` |
+| GET | `/ocabra/benchmarks/diagnoses/{diagnosis_id}/files/{name}` | Download a diagnosis report or training candidates | `model_manager` |
 
 ## Daemon Ollama
 

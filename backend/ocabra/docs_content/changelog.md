@@ -16,6 +16,35 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.137.0 — 2026-11-26
+
+### Nuevo
+
+- **Diagnóstico de fallos de benchmark** (administración, rol `model_manager`):
+  `POST /ocabra/benchmarks/attempts/{attempt_id}/diagnoses` toma los casos que
+  fallaron en un intento y clasifica cada uno en plantilla, sampling, límites,
+  cuantización/servido o modelo. Compara el prompt servido con el de la
+  plantilla oficial de Hugging Face, los parámetros efectivos con los del
+  fabricante, mira si la salida se cortó o el prompt no cabía, y repite una
+  muestra de casos con el muestreo recomendado por la cola normal. Lo que queda
+  como «modelo» se exporta en JSONL, separado en entrenamiento y evaluación.
+  Estado e informe en `GET /ocabra/benchmarks/diagnoses/{id}` y ficheros en
+  `GET /ocabra/benchmarks/diagnoses/{id}/files/{name}`.
+
+### Arreglos
+
+- **BFCL puntuaba como «nombre de función incorrecto» respuestas correctas.**
+  Las APIs tipo OpenAI no admiten puntos en los nombres de función, así que
+  BFCL manda `math.factorial` como `math_factorial` y solo lo deshace al
+  puntuar si el modelo se registra con `underscore_to_dot`; nuestro runner no lo
+  hacía. Re-puntuado con el checker oficial, eran 516 de 771 fallos de
+  gemma4:12b y 527 de 745 de gemma4:26b. Las notas de BFCL anteriores a esta
+  versión están infravaloradas: repite la medida para comparar.
+
+**Acción:** ninguna en la API de inferencia.
+
+---
+
 ## 0.136.0 — 2026-11-26
 
 Sin cambios en la API de inferencia. La sección de administración Benchmarks

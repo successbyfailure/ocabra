@@ -158,6 +158,11 @@ def main() -> int:
         license="local",
         model_handler=OpenAICompletionsHandler,
         is_fc_model=True,
+        # Las APIs OpenAI no admiten «.» en los nombres de función: BFCL manda
+        # math.factorial como math_factorial y solo lo deshace al puntuar con
+        # esto. Sin ello, ~380 respuestas correctas por modelo contaban como
+        # «nombre de función incorrecto» (simple, java y multiple).
+        underscore_to_dot=True,
     )
     result_dir = f"ocabra_bfcl_raw_{_safe_model(model)}"
     score_dir = f"ocabra_bfcl_scores_{_safe_model(model)}"

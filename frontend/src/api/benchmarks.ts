@@ -5,6 +5,7 @@ import { request } from "@/api/http"
 import { buildQuery } from "@/api/_helpers"
 import type {
   BenchmarkAppCatalog,
+  BenchmarkDiagnosis,
   BenchmarkRun,
   BenchmarkSchedule,
   BenchmarkScheduleInput,
@@ -67,6 +68,34 @@ export const benchmarksApiModule = {
         "POST",
         `/ocabra/benchmarks/runs/${encodeURIComponent(runId)}/cancel`,
       ),
+    diagnoses: {
+      list: (attemptId?: string) =>
+        request<BenchmarkDiagnosis[]>(
+          "GET",
+          `/ocabra/benchmarks/diagnoses${buildQuery({ attempt_id: attemptId })}`,
+        ),
+      get: (diagnosisId: string) =>
+        request<BenchmarkDiagnosis>(
+          "GET",
+          `/ocabra/benchmarks/diagnoses/${encodeURIComponent(diagnosisId)}`,
+        ),
+      create: (
+        attemptId: string,
+        payload: { repeats?: number; maxCases?: number; compareModel?: string | null; allowLoad?: boolean } = {},
+      ) =>
+        request<BenchmarkDiagnosis>(
+          "POST",
+          `/ocabra/benchmarks/attempts/${encodeURIComponent(attemptId)}/diagnoses`,
+          {
+            repeats: payload.repeats ?? 3,
+            max_cases: payload.maxCases ?? 30,
+            compare_model: payload.compareModel || null,
+            allow_load: payload.allowLoad ?? false,
+          },
+        ),
+      fileUrl: (diagnosisId: string, name: string) =>
+        `/ocabra/benchmarks/diagnoses/${encodeURIComponent(diagnosisId)}/files/${encodeURIComponent(name)}`,
+    },
     log: (runId: string, lines = 500) =>
       request<{ lines: string[]; attemptId: string | null }>(
         "GET",

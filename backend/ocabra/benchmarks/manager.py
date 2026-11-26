@@ -33,6 +33,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from ocabra.benchmarks.catalog import APPS, AppSpec, SuiteSpec
+from ocabra.benchmarks.diagnosis.jobs import DiagnosisRunner, DiagnosisStore
 from ocabra.config import APP_VERSION, settings
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.auth import ApiKey, User, UserRole
@@ -226,11 +227,17 @@ class BenchmarkManager:
         self._wake = asyncio.Event()
         self._process: asyncio.subprocess.Process | None = None
         self._process_lock = asyncio.Lock()
+        self._diagnoses = DiagnosisStore(self._root)
+
+    @property
+    def diagnoses(self) -> DiagnosisStore:
+        return self._diagnoses
 
     async def start(self) -> None:
         self._root.mkdir(parents=True, exist_ok=True)
         self._identity = await self._create_service_identity()
         await self._recover_interrupted_runs()
+        await asyncio.to_thread(self._diagnoses.recover_interrupted)
         self._stop.clear()
         self._task = asyncio.create_task(self._worker_loop(), name="benchmark-manager")
         logger.info("benchmark_manager_started", root=str(self._root))
@@ -344,6 +351,33 @@ class BenchmarkManager:
         self.notify()
         return run
 
+    async def request_diagnosis(
+        self, attempt_id: uuid.UUID, options: dict[str, object]
+    ) -> dict[str, object]:
+        """Encola el diagnóstico de los fallos de un intento completado."""
+        from ocabra.benchmarks.diagnosis.cases import EXTRACTORS
+
+        async with AsyncSessionLocal() as session:
+            attempt = await session.get(BenchmarkAttempt, attempt_id)
+            if attempt is None:
+                raise LookupError("Intento de benchmark no encontrado")
+            run = await session.get(BenchmarkRun, attempt.run_id)
+            if attempt.status != "completed" or run is None:
+                raise ValueError("Solo se diagnostican intentos completados")
+            if run.app not in EXTRACTORS:
+                raise ValueError(f"El diagnóstico aún no sabe leer los casos de '{run.app}'")
+            request = {
+                **options,
+                "attempt_id": str(attempt.id),
+                "run_id": str(run.id),
+                "app": run.app,
+                "suite": run.suite,
+                "model": attempt.model,
+            }
+        job = await asyncio.to_thread(self._diagnoses.create, request)
+        self.notify()
+        return job
+
     async def request_baseline(self, run_id: uuid.UUID) -> BenchmarkRun:
         """Make one completed run the unique reference for its application suite."""
         async with AsyncSessionLocal() as session:
@@ -368,6 +402,12 @@ class BenchmarkManager:
                 run_id = await self._next_queued_run()
                 if run_id is not None:
                     await self._execute_run(run_id)
+                    continue
+                # Los diagnósticos repiten casos: solo con la cola de benchmarks vacía.
+                job = await asyncio.to_thread(self._diagnoses.next_queued)
+                if job is not None and self._identity is not None:
+                    runner = DiagnosisRunner(self._app, self._diagnoses, self._identity.raw_api_key)
+                    await runner.run(job)
                     continue
             except asyncio.CancelledError:
                 raise
