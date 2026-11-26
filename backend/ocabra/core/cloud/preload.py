@@ -466,19 +466,29 @@ async def drive(
 ) -> list[dict[str, Any]]:
     """Advance the preload one tick. Returns the updated list.
 
-    One model is worked on at a time (so a node isn't asked to fill its disk
-    and VRAM with everything at once), one step after another. Steps that
+    Manual preloads are serial. Download-only benchmark items can occupy
+    two slots; a finished download frees its slot in this same tick. Steps that
     finish immediately (backend already installed, model already registered)
     chain within the same tick; loads can take minutes, so they run as
     background tasks tracked in *tasks*.
     """
     items = [dict(i) for i in items]
-    active = next((i for i in items if i["status"] in ACTIVE), None)
-    if active is None:
-        active = next((i for i in items if i["status"] == "pending"), None)
-    if active is None:
-        return items
+    running = [i for i in items if i["status"] in ACTIVE]
+    pending = [i for i in items if i["status"] == "pending"]
+    occupied = 0
+    for item in running + pending:
+        parallel = item.get("benchmark_prefetch")
+        if occupied and (not parallel or occupied >= 2):
+            break
+        await _drive_item(fm, peer, item, tasks)
+        if not parallel:
+            break
+        if item["status"] in (*ACTIVE, "pending"):
+            occupied += 1
+    return items
 
+
+async def _drive_item(fm: Any, peer: Any, active: dict, tasks: dict) -> None:
     key = (peer.peer_id, active["model_id"])
     before = copy.deepcopy(active)
     try:
@@ -515,6 +525,11 @@ async def drive(
         while done:
             active["step"] += 1
             if active["step"] >= len(active["steps"]):
+                if active.get("benchmark_prefetch"):
+                    model = active["node_model_id"]
+                    response = await fm.proxy_get(peer, f"/ocabra/models/{model}")
+                    if response.status_code != 200:
+                        raise CloudError(f"El modelo descargado no está registrado: {model}", 502)
                 active.update(
                     status="loaded" if active.get("load") is not False else "ready", phase=None
                 )
@@ -535,14 +550,13 @@ async def drive(
         else:
             active.clear()
             active.update(before, transient_failures=failures, last_transient_error=str(exc)[:200])
-        return items
+        return
     except Exception as exc:  # noqa: BLE001 — one model failing must not stop the rest
         tasks.pop(key, None)
         active.update(status="error", error=str(exc)[:300])
-        return items
+        return
     active.pop("transient_failures", None)
     active.pop("last_transient_error", None)
-    return items
 
 
 async def replicable_models(

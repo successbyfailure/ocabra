@@ -638,6 +638,43 @@ async def test_drive_runs_a_recipe_and_can_download_without_loading():
     assert calls[0][1]["register_config"]["extra_config"]["llama_cpp"]["ctx_size"] == 262144
 
 
+async def test_prefetch_refills_only_the_finished_slot():
+    from ocabra.core.cloud import preload
+
+    completed = set()
+
+    async def post(peer, path, body, headers):
+        assert path == "/ocabra/downloads"
+        return httpx.Response(200, json={"job_id": body["model_ref"]})
+
+    async def get(peer, path):
+        if path.startswith("/ocabra/models/"):
+            assert path.rsplit("/", 1)[1] in completed
+            return httpx.Response(200, json={})
+        job = path.rsplit("/", 1)[1]
+        return httpx.Response(
+            200, json={"status": "completed" if job in completed else "downloading"}
+        )
+
+    fm = SimpleNamespace(proxy_get=get, proxy_request=post)
+    peer = SimpleNamespace(peer_id="pod")
+    items = [
+        dict(
+            model_id=m,
+            benchmark_prefetch=True,
+            load=False,
+            status="pending",
+            recipe_steps=[{"kind": "download", "body": {"model_ref": m}}],
+        )
+        for m in ("a", "b", "c", "d")
+    ]
+    items = await preload.drive(fm, peer, items, {})
+    assert [i["status"] for i in items] == ["downloading", "downloading", "pending", "pending"]
+    completed.add("b")
+    items = await preload.drive(fm, peer, items, {})
+    assert [i["status"] for i in items] == ["downloading", "ready", "downloading", "pending"]
+
+
 async def test_snapshot_reads_the_pod_and_skips_our_own_models(monkeypatch):
     from ocabra.core.cloud import recipes
 

@@ -494,6 +494,7 @@ class CloudNodeManager:
         recipes: list[str] | None = None,
         download_only: list[str] | None = None,
         backends: list[str] | None = None,
+        benchmark_prefetch: bool = False,
     ) -> dict[str, Any]:
         """Create a pod that joins us as a swarm peer. Returns the node.
 
@@ -510,6 +511,10 @@ class CloudNodeManager:
         preload_items = await self._preload_items(
             models, recipes or [], download_only or [], backends or []
         )
+        if benchmark_prefetch:
+            for item in preload_items:
+                if item.get("kind") != "backend":
+                    item.update(benchmark_prefetch=True, load=False)
 
         cfg = (await self.get_provider(provider))["settings"]
         hub_url = (cfg.get("hub_url") or getattr(self.fm.settings, "public_url", "") or "").rstrip(
@@ -548,6 +553,8 @@ class CloudNodeManager:
             # The pod kills itself if it can't keep its tunnel (see node watchdog).
             "OCABRA_CLOUD_SELF_DESTRUCT_MINUTES": "20",
         }
+        if benchmark_prefetch:
+            env["DOWNLOAD_WORKERS"] = "2"
         zero_data = privacy_mode == "zero_data"
         if zero_data:
             # Nothing about requests is kept on the pod; Secure Cloud (vetted
@@ -814,7 +821,7 @@ class CloudNodeManager:
         from ocabra.core.cloud import recipes as recipes_mod
         from ocabra.db.cloud import CloudModelRecipe
 
-        keep = ("model_id", "kind", "recipe_id", "recipe_steps", "load")
+        keep = ("model_id", "kind", "recipe_id", "recipe_steps", "load", "benchmark_prefetch")
         out = [{**{k: i[k] for k in keep if k in i}, "status": "pending"} for i in items]
         have = {i["model_id"] for i in out}
         async with self.fm.session_factory() as session:

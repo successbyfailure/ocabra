@@ -551,6 +551,12 @@ solape se repite desde un checkout limpio, incluso si `auto_pause=false` (en
 ese caso se reencola inmediatamente). Un intento interrumpido o fallido
 reutiliza su workspace y los argumentos de reanudación del runner.
 
+En un pod propio con varios modelos base, el hub prepara hasta dos en paralelo.
+Tras registrar un modelo del run, el primer intento disponible entra en la cola.
+El orden de `models` refleja la ejecución efectiva. El cursor conserva el prefijo
+procesado y los resultados siguen identificados por perfil. Las suites de una
+batería comparten las descargas y el pod.
+
 Cada `benchmark_attempt` conserva `environment`: versión de oCabra, Python,
 scorer cuando existe, commit real del dataset, revisión solicitada, perfil,
 backend y versión instalada del módulo (o commit exacto de fuentes para

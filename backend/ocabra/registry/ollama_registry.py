@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -404,23 +405,24 @@ class OllamaRegistry:
                 if target.exists() and target.stat().st_size == int(blob.get("size") or -1):
                     done += float(blob.get("size") or 0)
                     continue
-                partial = target.with_name(target.name + ".partial")
                 hasher = hashlib.sha256()
                 async with client.stream("GET", f"{base}/blobs/{digest}") as r:
                     r.raise_for_status()
-                    with partial.open("wb") as fh:
-                        async for chunk in r.aiter_bytes(1024 * 1024):
-                            fh.write(chunk)
-                            hasher.update(chunk)
-                            done += len(chunk)
-                            elapsed = max(time.monotonic() - started, 1e-6)
-                            progress_callback(
-                                min(99.9, done / total * 100.0), done / (1024 * 1024) / elapsed
-                            )
-                if hasher.hexdigest() != hexdigest:
-                    partial.unlink(missing_ok=True)
-                    raise RuntimeError(f"sha256 mismatch for {digest} of {model_ref}")
-                partial.replace(target)
+                    # Concurrent tags may share a blob. Publish only verified copies.
+                    with tempfile.TemporaryDirectory(dir=target.parent) as staging:
+                        partial = Path(staging) / "blob"
+                        with partial.open("wb") as fh:
+                            async for chunk in r.aiter_bytes(1024 * 1024):
+                                fh.write(chunk)
+                                hasher.update(chunk)
+                                done += len(chunk)
+                                elapsed = max(time.monotonic() - started, 1e-6)
+                                progress_callback(
+                                    min(99.9, done / total * 100.0), done / (1024 * 1024) / elapsed
+                                )
+                        if hasher.hexdigest() != hexdigest:
+                            raise RuntimeError(f"sha256 mismatch for {digest} of {model_ref}")
+                        partial.replace(target)
         manifest_path = store / "manifests" / relpath
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_bytes(manifest_raw)

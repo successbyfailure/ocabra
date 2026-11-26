@@ -88,7 +88,7 @@ async def _new_run(tmp_path: Path, **fields) -> BenchmarkRun:
         app="ifeval",
         suite="quick",
         revision="abc",
-        models=["gemma4:12b"],
+        models=fields.pop("models", ["gemma4:12b"]),
         suite_args=[],
         status="queued",
         phase="queued",
@@ -153,6 +153,64 @@ async def test_el_pod_se_pide_se_espera_y_solo_entonces_ocupa_la_cola(tmp_path: 
 
         # Al terminar la medida se apaga el pod.
         await manager._advance_run(run.id, "gemma4:12b", {"metrics": {}})
+        assert cloud.terminated == [(node_id, "benchmark_done")]
+    finally:
+        await _delete(run.id)
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_mide_el_primero_disponible_y_espera_solo_los_restantes(
+    tmp_path, monkeypatch
+) -> None:
+    cloud = FakeCloud()
+    manager = _manager(cloud)
+    run = await _new_run(tmp_path, models=["lento", "rapido", "tercero"])
+    measured = []
+
+    async def measure(run_id, app, suite, model):
+        measured.append(model)
+        await manager._advance_run(run_id, model, {"score": 1})
+
+    monkeypatch.setattr(manager, "_execute_model", measure)
+    try:
+        await manager._provision(run.id)
+        assert cloud.requests.created[0]["launch"]["benchmark_prefetch"]
+        rid = str((await _load(run.id)).cloud_request_id)
+        node_id = str(uuid.uuid4())
+        cloud.requests.rows[rid].update(status="launched", cloudNodeId=node_id)
+        items = [
+            {"model_id": f"llamacpp_mks/{model}", "status": state, "benchmark_prefetch": True}
+            for model, state in zip(run.models, ["downloading", "ready", "pending"], strict=True)
+        ]
+        cloud.nodes.append(
+            dict(
+                id=node_id,
+                status="running",
+                peer_online=True,
+                peer_name="pod",
+                preload_models=items,
+            )
+        )
+        await manager._provision(run.id)
+        first = await _load(run.id)
+        assert first.node == "pod" and first.models == ["rapido", "lento", "tercero"]
+        await manager._execute_run(run.id)
+        await manager._provision(run.id)
+        assert (await _load(run.id)).node is None
+        assert await manager._next_queued_run() != run.id
+        items[2]["status"] = "ready"
+        await manager._provision(run.id)
+        second = await _load(run.id)
+        assert second.node == "pod" and second.models[second.current_model_index] == "tercero"
+        assert second.result == {"rapido": {"score": 1}}
+        assert not cloud.terminated
+        await manager._execute_run(run.id)
+        items[0]["status"] = "ready"
+        await manager._provision(run.id)
+        await manager._execute_run(run.id)
+        assert measured == ["rapido", "tercero", "lento"]
+        assert (await _load(run.id)).status == "completed"
         assert cloud.terminated == [(node_id, "benchmark_done")]
     finally:
         await _delete(run.id)

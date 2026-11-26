@@ -1628,7 +1628,9 @@ class BenchmarkManager:
     async def _set_phase(self, run_id: uuid.UUID, phase: str) -> None:
         async with AsyncSessionLocal() as session:
             await session.execute(
-                sa.update(BenchmarkRun).where(BenchmarkRun.id == run_id).values(phase=phase)
+                sa.update(BenchmarkRun)
+                .where(BenchmarkRun.id == run_id, BenchmarkRun.phase != phase)
+                .values(phase=phase)
             )
             await session.commit()
 
@@ -1800,6 +1802,8 @@ class BenchmarkManager:
             else:
                 run.status = "queued"
                 run.phase = "queued"
+                if run.cloud:
+                    run.node = None  # El siguiente modelo puede seguir descargándose.
             await session.commit()
             finished = run.status == "completed"
         if finished:
@@ -1830,6 +1834,8 @@ class BenchmarkManager:
                 else:
                     run.status = "queued"
                     run.phase = "queued"
+                    if run.cloud:
+                        run.node = None
                 await session.commit()
                 if last:
                     await self._release_cloud(run_id)
@@ -1920,6 +1926,8 @@ class BenchmarkManager:
             spec = dict(run.cloud or {})
             request_id = run.cloud_request_id
             models = list(run.models)
+            cursor = run.current_model_index
+            waiting_since = run.updated_at if cursor > 0 else None
         if cloud is None:
             await self._fail_run(run_id, "La nube no está disponible (federación apagada)")
             return
@@ -1954,6 +1962,27 @@ class BenchmarkManager:
             )
             return
         items = node.get("preload_models") or []
+        selected = cursor
+        if any(item.get("benchmark_prefetch") for item in items):
+            # Cada perfil puede ser un alias del mismo modelo base. Solo la
+            # disponibilidad de un modelo pendiente de ESTA prueba la desbloquea.
+            by_id = {item["model_id"]: item for item in items}
+            prerequisites = [item for item in items if item.get("kind") == "backend"]
+            relevant = []
+            for index in range(cursor, len(models)):
+                profile = await self._app.state.profile_registry.get(models[index])
+                item = by_id.get(profile.base_model_id) if profile else None
+                if item is None:
+                    await self._fail_run(run_id, f"Falta la precarga de {models[index]}")
+                    return
+                relevant.append(item)
+                if item["status"] in ("ready", "loaded"):
+                    selected = index
+                    relevant = [item]
+                    break
+            # Un fallo ajeno no impide medir los modelos aún en preparación.
+            waiting = [i for i in relevant if i["status"] != "error"]
+            items = prerequisites + (waiting or relevant)
         broken = [item for item in items if item.get("status") == "error"]
         if broken:
             detail = "; ".join(f"{i.get('model_id')}: {i.get('error')}" for i in broken)[:1000]
@@ -1963,6 +1992,12 @@ class BenchmarkManager:
         if node.get("peer_online") and node.get("peer_name") and not pending:
             async with AsyncSessionLocal() as session:
                 run = await self._get_run(session, run_id)
+                if run.status != "queued" or run.node is not None:
+                    return
+                if selected != cursor:
+                    # El cursor y los checkpoints siguen apuntando al modelo medido.
+                    models.insert(cursor, models.pop(selected))
+                    run.models = models
                 run.node = node["peer_name"]
                 run.phase = "queued"
                 await session.commit()
@@ -1971,9 +2006,8 @@ class BenchmarkManager:
             return
         launched_at = request.get("finishedAt")
         timeout = int(spec.get("ready_timeout_minutes") or 90)
-        if launched_at and datetime.now(UTC) - datetime.fromisoformat(launched_at) > timedelta(
-            minutes=timeout
-        ):
+        since = waiting_since or (datetime.fromisoformat(launched_at) if launched_at else None)
+        if since and datetime.now(UTC) - since > timedelta(minutes=timeout):
             await self._fail_run(run_id, f"El pod no estuvo listo en {timeout} min")
             return
         await self._set_phase(run_id, "preparing_pod")
@@ -2029,6 +2063,7 @@ class BenchmarkManager:
             "cloud_type": spec.get("cloud_type"),
             "name": f"bench-{app}"[:40],
             "models": base_ids,
+            "benchmark_prefetch": len(base_ids) > 1,
             "recipes": list(spec.get("recipes") or []),
             "backends": list(spec.get("backends") or []),
             "volume_id": spec.get("volume_id"),

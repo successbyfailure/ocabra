@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,6 +9,37 @@ import pytest
 
 from ocabra.api.internal.downloads import DownloadManager
 from ocabra.schemas.registry import DownloadJob
+
+
+@pytest.mark.asyncio
+async def test_workers_del_pod_solapan_dos_transferencias(monkeypatch) -> None:
+    from ocabra.api.internal import downloads
+
+    manager = DownloadManager()
+    monkeypatch.setattr(downloads.settings, "download_workers", 2)
+    queue = asyncio.Queue()
+    for model in ("a", "b", "c"):
+        queue.put_nowait({"job_id": model})
+    monkeypatch.setattr(downloads, "rpop", lambda _: queue.get())
+    manager.get_job = AsyncMock(side_effect=lambda key: SimpleNamespace(id=key, status="queued"))
+    manager._cleanup_stale_jobs = AsyncMock()
+    started = asyncio.Queue()
+    finish = {key: asyncio.Event() for key in ("a", "b", "c")}
+
+    async def transfer(job):
+        started.put_nowait(job.id)
+        await finish[job.id].wait()
+
+    manager._execute_job = transfer
+    await manager.start()
+    try:
+        assert await asyncio.wait_for(started.get(), 2) == "a"
+        assert await asyncio.wait_for(started.get(), 2) == "b"
+        assert queue.qsize() == 1
+        finish["b"].set()
+        assert await asyncio.wait_for(started.get(), 2) == "c"
+    finally:
+        await asyncio.wait_for(manager.stop(), 2)
 
 
 @pytest.mark.asyncio

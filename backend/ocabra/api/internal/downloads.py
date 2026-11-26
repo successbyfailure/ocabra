@@ -84,18 +84,18 @@ class DownloadManager:
     def __init__(self) -> None:
         self._hf_registry = HuggingFaceRegistry()
         self._ollama_registry = OllamaRegistry()
-        self._worker_task: asyncio.Task | None = None
+        self._workers: list[asyncio.Task] = []
         self._cleanup_task: asyncio.Task | None = None
         self._active_cancel_flags: dict[str, asyncio.Event] = {}
         self._app = None
 
     async def start(self, app=None) -> None:
         self._app = app
-        if not self._worker_task or self._worker_task.done():
+        self._workers = [worker for worker in self._workers if not worker.done()]
+        if not self._workers:
             await self._cleanup_stale_jobs()
-            self._worker_task = asyncio.create_task(
-                self._worker_loop(), name="download-manager-worker"
-            )
+        while len(self._workers) < settings.download_workers:
+            self._workers.append(asyncio.create_task(self._worker_loop(), name="download-worker"))
         if not self._cleanup_task or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(
                 self._cleanup_loop(), name="download-manager-cleanup"
@@ -142,13 +142,13 @@ class DownloadManager:
         return deleted
 
     async def stop(self) -> None:
-        for task in (self._worker_task, self._cleanup_task):
-            if not task:
-                continue
+        tasks = self._workers + ([self._cleanup_task] if self._cleanup_task else [])
+        for task in tasks:
             task.cancel()
+        for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        self._worker_task = None
+        self._workers.clear()
         self._cleanup_task = None
 
     async def enqueue(
@@ -371,12 +371,12 @@ class DownloadManager:
                     "completed_at": datetime.now(UTC),
                 }
             )
-            await self._save_and_publish(completed)
             # Updates refresh bytes and metadata for existing deployments.
             # Auto-registration belongs only to first-time installs; running it
             # here created duplicate logical models/backends on update-all.
             if downloading.kind == "install" and downloading.register:
                 await self._auto_register_model(downloading)
+            await self._save_and_publish(completed)
             if downloading.register:
                 await self._refresh_registry_metadata(downloading)
         except asyncio.CancelledError:
@@ -384,6 +384,8 @@ class DownloadManager:
                 update={"status": "cancelled", "completed_at": datetime.now(UTC)}
             )
             await self._save_and_publish(cancelled)
+            if asyncio.current_task().cancelling():
+                raise
         except Exception as exc:
             failed = downloading.model_copy(
                 update={

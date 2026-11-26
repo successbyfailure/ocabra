@@ -16,6 +16,13 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.142.0 — Benchmarks multimodelo en pod
+
+Los pods propios preparan hasta dos modelos en paralelo y empiezan a medir el
+primero disponible mientras siguen las descargas. Los resultados conservan el
+identificador del perfil medido. Para dos transferencias simultáneas, el hub y
+la imagen del nodo deben incluir esta versión.
+
 ## 0.141.1 — 2026-11-26
 
 ### Arreglos

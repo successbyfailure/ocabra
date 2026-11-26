@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.141.1"
+APP_VERSION = "0.142.0"
 
 
 class Settings(BaseSettings):
@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # writing files until the disk fills mid-stream — the cascade that took
     # the pool to 100% during the 2026-05-09 update-all incident.
     download_min_free_gb: int = 30
+    download_workers: int = Field(default=1, ge=1, le=2)
     # Finished download/update job records (completed/failed/cancelled) are
     # never useful once their result has been seen — they just accumulate in
     # Redis forever otherwise (111 stale entries found on 2026-11-02, some
