@@ -2,8 +2,8 @@
 
 El diagnóstico de oCabra (`docs/benchmark-diagnosis.md`) solo puede repetir y
 clasificar casos de IFEval y BFCL. Para Corrala, Fulcrum y Escriba hace falta el
-mismo contrato en cada proyecto. Corrala ya lo tiene encargado (26/11); estos
-dos no se pudieron mandar (límite de peticiones del canal) y hay que reenviarlos.
+mismo contrato en cada proyecto. Encargados el 26/11 a los tres (Corrala cd6f1da1,
+Fulcrum 6cce4a1e, Escriba 56d7da2a); este fichero queda como referencia del contrato.
 
 ## Contrato común
 
