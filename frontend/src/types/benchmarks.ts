@@ -67,6 +67,8 @@ export interface BenchmarkAttempt {
       nodeTrafficVerified?: boolean;
       /** Dónde se sirvieron los modelos auxiliares de la suite (reranker, juez…). */
       auxiliaryNodes?: string[];
+      /** De dónde salen backend y GPU de un intento remoto: del propio nodo o (peor) del hub. */
+      source?: "node" | "hub";
     };
     /** Nodo remoto donde se midió: nombre, versión de oCabra y GPU. */
     node?: {
@@ -74,6 +76,12 @@ export interface BenchmarkAttempt {
       ocabra?: string;
       online?: boolean;
       gpus?: Array<{ index?: number; name?: string | null; totalVramMb?: number | null }>;
+      ocabraAtEnd?: string;
+      cuda?: { ok?: boolean; driver_cuda?: string | null; devices?: number | null; error?: string | null };
+      cloud?: {
+        provider?: string; podId?: string | null; gpuTypeId?: string | null; gpuCount?: number | null;
+        cloudType?: string | null; image?: string | null; costPerHr?: number | null; dataCenterId?: string | null;
+      } | null;
     };
     requests?: {
       count?: number;

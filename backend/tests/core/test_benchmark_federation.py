@@ -154,3 +154,55 @@ def test_el_nodo_se_valida_contra_los_peers():
     with pytest.raises(HTTPException) as err:
         _canonical_node(request, "nadie")
     assert err.value.status_code == 400
+
+
+# ── Entorno de un intento remoto: lo que dice el propio nodo ──────────────
+
+
+@pytest.mark.asyncio
+async def test_el_backend_y_las_gpu_salen_de_las_filas_del_nodo():
+    start = datetime(2026, 11, 26, 10, 0, tzinfo=UTC)
+    rows = [
+        # Llegó desde el hub para el modelo medido: cuenta.
+        {"modelId": "m", "requestedModel": "m", "startedAt": (start + timedelta(seconds=5)).isoformat(),
+         "durationMs": 100, "inboundFrom": "MakeSpace", "backendType": "llamacpp_mks",
+         "runtimeTelemetry": {"gpu_indices": [1]}},
+        # Del propio nodo (no por federación): no describe la medida.
+        {"modelId": "m", "startedAt": (start + timedelta(seconds=6)).isoformat(),
+         "durationMs": 100, "inboundFrom": None, "backendType": "ollama",
+         "runtimeTelemetry": {"gpu_indices": [0]}},
+        # Otro modelo (auxiliar de la suite): tampoco.
+        {"modelId": "reranker", "startedAt": (start + timedelta(seconds=7)).isoformat(),
+         "durationMs": 100, "inboundFrom": "MakeSpace", "backendType": "sentence_transformers"},
+    ]  # fmt: skip
+    manager = _manager_with_peer({"requests": rows})
+    gpus = {1: SimpleNamespace(name="RTX 4090", total_vram_mb=24564)}
+    served = await manager._node_served("Mapache", "m", start, start + timedelta(minutes=1), gpus)
+    assert served == {
+        "rows": 1,
+        "backends": ["llamacpp_mks"],
+        "gpus": [{"index": 1, "name": "RTX 4090", "totalVramMb": 24564}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_las_versiones_de_backend_son_las_del_nodo():
+    manager = _manager_with_peer(
+        [{"backend_type": "llamacpp_mks", "installed_version": "b7000", "oci_digest": "sha256:x",
+          "packages": {"llama-cpp": "b7000"}, "install_source": "oci"}]
+    )  # fmt: skip
+    versions = await manager._node_backend_versions("Mapache", ["llamacpp_mks", "vllm"])
+    assert versions[0]["installedVersion"] == "b7000" and versions[0]["node"] == "Mapache"
+    assert versions[0]["verified"] is True and versions[0]["installSource"] == "oci"
+    assert versions[1]["installedVersion"] is None and versions[1]["verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_los_detalles_del_nodo_llevan_cuda_y_version():
+    manager = _manager_with_peer({"status": "ok", "version": "0.138.0"})
+    peer = manager._app.state.federation_manager.get_all_peers()[0]
+    peer.cuda = {"ok": True, "driver_cuda": "13.0", "devices": 1}
+    details = await manager._node_details("Mapache")
+    assert details["cuda"] == {"ok": True, "driver_cuda": "13.0", "devices": 1}
+    assert details["ocabraAtEnd"] == "0.138.0"
+    assert details["cloud"] is None  # no es un pod (peer_id no es un UUID de cloud)

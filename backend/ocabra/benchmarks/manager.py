@@ -1151,6 +1151,18 @@ class BenchmarkManager:
             states = await gpu_manager.get_all_states()
             gpu_states = {state.index: state for state in states}
         observed = execution_observations(rows, gpu_states)
+        node_side: dict[str, object] | None = None
+        if node:
+            profile = str((base.get("model") or {}).get("profile") or "")
+            node_side = await self._node_served(node, profile, started_at, finished_at, gpu_states)
+            if node_side.get("rows"):
+                # Lo que dice el propio nodo manda: las filas del hub toman el
+                # backend y las GPU del estado local del hub, no del nodo.
+                observed["model"]["backends"] = node_side["backends"]
+                observed["hardware"]["gpus"] = node_side["gpus"]
+                observed["hardware"]["source"] = "node"
+            else:
+                observed["hardware"]["source"] = "hub"
         environment = dict(base)
         software = dict(environment.get("software") or {})
         installer = getattr(self._app.state, "backend_installer", None)
@@ -1171,6 +1183,18 @@ class BenchmarkManager:
             installer,
             source_commits,
         )
+        if node:
+            software["backends"] = await self._node_backend_versions(
+                node, list(model_observations["backends"])
+            )
+            details = await self._node_details(node)
+            node_env = (
+                dict(environment.get("node") or {})
+                if isinstance(environment.get("node"), dict)
+                else {}
+            )
+            node_env.update({key: value for key, value in details.items() if value is not None})
+            environment["node"] = node_env
         benchmark = environment.get("benchmark")
         if isinstance(benchmark, dict) and benchmark.get("app") == "bfcl":
             metadata_files = list(
@@ -1266,6 +1290,127 @@ class BenchmarkManager:
         if isinstance(payload, dict) and payload.get("version"):
             description["ocabra"] = payload["version"]
         return description
+
+    async def _node_served(
+        self,
+        node: str,
+        profile: str,
+        started_at: datetime,
+        finished_at: datetime,
+        gpu_states: dict[int, object],
+    ) -> dict[str, object]:
+        """Backend y GPU con los que el nodo atendió las peticiones del modelo medido.
+
+        Se leen de las estadísticas del propio nodo (las que le llegaron por la
+        federación desde aquí), que son las únicas que conocen su worker.
+        """
+        payload = await self._peer_json(self._peer(node), "/ocabra/stats/recent?limit=500")
+        rows = payload.get("requests") if isinstance(payload, dict) else None
+        backends: set[str] = set()
+        indices: set[int] = set()
+        count = 0
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or not row.get("inboundFrom"):
+                continue
+            if profile and (row.get("requestedModel") or row.get("modelId")) != profile:
+                continue
+            try:
+                started = datetime.fromisoformat(str(row.get("startedAt")))
+            except ValueError:
+                continue
+            ended = started + timedelta(milliseconds=int(row.get("durationMs") or 0))
+            if ended < started_at or started > finished_at:
+                continue
+            count += 1
+            if row.get("backendType"):
+                backends.add(str(row["backendType"]))
+            telemetry = (
+                row.get("runtimeTelemetry") if isinstance(row.get("runtimeTelemetry"), dict) else {}
+            )
+            for index in telemetry.get("gpu_indices") or []:
+                if isinstance(index, int):
+                    indices.add(index)
+        gpus = [
+            {
+                "index": index,
+                "name": getattr(gpu_states.get(index), "name", None),
+                "totalVramMb": getattr(gpu_states.get(index), "total_vram_mb", None),
+            }
+            for index in sorted(indices)
+        ]
+        return {"rows": count, "backends": sorted(backends), "gpus": gpus}
+
+    async def _node_backend_versions(
+        self, node: str, backend_types: list[str]
+    ) -> list[dict[str, object]]:
+        """Versiones de los backends instalados en el nodo (``/ocabra/backends``)."""
+        payload = await self._peer_json(self._peer(node), "/ocabra/backends")
+        states = {
+            str(item.get("backend_type")): item
+            for item in (payload if isinstance(payload, list) else [])
+            if isinstance(item, dict)
+        }
+        modules = []
+        for backend_type in backend_types:
+            state = states.get(backend_type) or {}
+            modules.append(
+                {
+                    "type": backend_type,
+                    "installedVersion": state.get("installed_version"),
+                    "packages": dict(state.get("packages") or {}),
+                    "ociDigest": state.get("oci_digest"),
+                    "gitRef": state.get("git_ref"),
+                    "sourceCommit": None,
+                    "installSource": state.get("install_source"),
+                    "node": node,
+                    "verified": bool(state),
+                }
+            )
+        return modules
+
+    async def _node_details(self, node: str) -> dict[str, object]:
+        """Driver/CUDA, versión y, si es un pod, sus datos de nube."""
+        peer = self._peer(node)
+        details: dict[str, object] = {}
+        cuda = getattr(peer, "cuda", None)
+        if isinstance(cuda, dict):
+            details["cuda"] = {
+                key: cuda.get(key)
+                for key in ("ok", "driver_cuda", "devices", "error")
+                if key in cuda
+            }
+        payload = await self._peer_json(peer, "/health")
+        if isinstance(payload, dict) and payload.get("version"):
+            details["ocabraAtEnd"] = payload["version"]
+        peer_id = getattr(peer, "peer_id", None)
+        if peer_id:
+            details["peerId"] = str(peer_id)
+            details["cloud"] = await self._cloud_metadata(str(peer_id))
+        return details
+
+    async def _cloud_metadata(self, peer_id: str) -> dict[str, object] | None:
+        from ocabra.db.cloud import CloudNode
+
+        try:
+            async with AsyncSessionLocal() as session:
+                row = await session.scalar(
+                    select(CloudNode).where(CloudNode.peer_id == uuid.UUID(peer_id)).limit(1)
+                )
+        except Exception:  # noqa: BLE001 — un peer que no es pod
+            return None
+        if row is None:
+            return None
+        return {
+            "provider": row.provider,
+            "podId": row.provider_pod_id,
+            "gpuTypeId": row.gpu_type_id,
+            "gpuCount": row.gpu_count,
+            "cloudType": row.cloud_type,
+            "image": row.image,
+            "costPerHr": row.cost_per_hr,
+            "dataCenterId": row.data_center_id,
+            "cloudNodeId": str(row.id),
+        }
 
     async def _peer_json(self, peer, path: str) -> object | None:
         manager = getattr(self._app.state, "federation_manager", None)

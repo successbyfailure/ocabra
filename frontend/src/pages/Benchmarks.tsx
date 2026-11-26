@@ -817,7 +817,11 @@ function ExecutionEnvironment({ attempt }: { attempt?: BenchmarkAttempt }) {
         <EnvironmentBlock icon={<Server size={13} />} title="Hardware" lines={[
           ...gpus.map((gpu) => `GPU ${gpu.index}: ${gpu.name ?? "desconocida"}${gpu.totalVramMb ? ` · ${(gpu.totalVramMb / 1024).toFixed(0)} GB` : ""}`),
           ...(hardware.nodes ?? []).map((node) => `Nodo ${node}`),
-          environment.node?.ocabra ? `oCabra del nodo ${environment.node.ocabra}` : null,
+          environment.node?.ocabra ? `oCabra del nodo ${environment.node.ocabra}${environment.node.ocabraAtEnd && environment.node.ocabraAtEnd !== environment.node.ocabra ? ` → ${environment.node.ocabraAtEnd} al terminar` : ""}` : null,
+          environment.node?.cuda?.driver_cuda ? `CUDA del driver ${environment.node.cuda.driver_cuda}${environment.node.cuda.ok === false ? " (con errores)" : ""}` : null,
+          environment.node?.cloud ? `Pod ${environment.node.cloud.provider ?? ""} ${environment.node.cloud.gpuCount ?? 1}× ${environment.node.cloud.gpuTypeId ?? "?"} · ${environment.node.cloud.cloudType ?? ""}${environment.node.cloud.costPerHr ? ` · ${environment.node.cloud.costPerHr.toFixed(2)} $/h` : ""}` : null,
+          environment.node?.cloud?.image ? `Imagen ${environment.node.cloud.image}` : null,
+          hardware.source === "hub" ? "Backend y GPU sin confirmar por el nodo" : null,
           hardware.nodeTrafficVerified === false ? "Tráfico propio del nodo sin comprobar" : null,
           hardware.auxiliaryNodes?.length ? `Auxiliares de la suite en ${hardware.auxiliaryNodes.join(", ")}` : null,
         ]} />
