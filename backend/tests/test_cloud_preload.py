@@ -904,3 +904,43 @@ def test_recipe_backend_rules():
         CloudRecipeCreate(source="ollama", model_ref="qwen3:8b", backend_type="ollama")
     with pytest.raises(ValidationError):  # an Ollama tag is a GGUF for llama.cpp
         CloudRecipeCreate(source="ollama", model_ref="qwen3:8b", backend_type="vllm")
+
+
+async def test_un_corte_del_tunel_no_da_el_modelo_por_fallido():
+    """El túnel se reconecta y la petición en vuelo cae con «tunnel closed»: se
+    reintenta en la siguiente pasada; solo tras varios cortes seguidos es error."""
+    from ocabra.core.cloud import preload
+    from ocabra.core.cloud.recipes import recipe_from_node
+
+    steps = recipe_from_node(NEMO_JOB, NEMO_MODEL)["steps"]
+    jobs: dict = {}
+    state = {"cuts": 1}
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        if state["cuts"] > 0:
+            state["cuts"] -= 1
+            raise httpx.ReadError("federation tunnel closed")
+        return httpx.Response(200, json=jobs[path.rsplit("/", 1)[1]])
+
+    async def proxy_request(peer, path, body, headers, timeout=None):  # noqa: ASYNC109
+        jobs["j0"] = {"status": "running", "progress_pct": 40}
+        return httpx.Response(200, json={"job_id": "j0"})
+
+    fm = SimpleNamespace(session_factory=None, proxy_get=proxy_get, proxy_request=proxy_request)
+    peer = SimpleNamespace(peer_id="p", gpus=[], tunnel_session=None)
+    item = {"model_id": NEMO, "status": "pending", "recipe_steps": steps, "load": False}
+    items = await preload.drive(fm, peer, [item], {})
+    assert items[0]["status"] == "downloading"
+    items = await preload.drive(fm, peer, items, {})  # el túnel se corta aquí
+    assert items[0]["status"] == "downloading" and items[0]["transient_failures"] == 1
+    jobs["j0"] = {"status": "completed", "progress_pct": 100}
+    items = await preload.drive(fm, peer, items, {})
+    assert items[0]["status"] == "ready" and "transient_failures" not in items[0]
+
+    # Cortes seguidos: al quinto se da por fallido.
+    state["cuts"] = 99
+    item = {"model_id": NEMO, "status": "pending", "recipe_steps": steps, "load": False}
+    items = await preload.drive(fm, peer, [item], {})
+    for _ in range(preload.MAX_TRANSIENT_FAILURES):
+        items = await preload.drive(fm, peer, items, {})
+    assert items[0]["status"] == "error" and "no respondió" in items[0]["error"]

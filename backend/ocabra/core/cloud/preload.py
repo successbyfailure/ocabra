@@ -29,6 +29,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from ocabra.core.cloud.manager import CloudError
 
 # Settings tied to *our* GPU layout: meaningless (or harmful) on another box.
@@ -340,6 +342,8 @@ def _node_version(peer: Any) -> tuple[int, ...] | None:
 
 
 ACTIVE = ("installing", "downloading", "registering", "loading")
+# Cortes de transporte seguidos (túnel, conexión) antes de dar un elemento por fallido.
+MAX_TRANSIENT_FAILURES = 5
 
 
 def _load_task(fm: Any, peer: Any, node_model_id: str) -> asyncio.Task:
@@ -476,6 +480,7 @@ async def drive(
         return items
 
     key = (peer.peer_id, active["model_id"])
+    before = copy.deepcopy(active)
     try:
         if active["status"] == "pending" or "steps" not in active:
             if active.get("recipe_steps"):
@@ -516,9 +521,27 @@ async def drive(
                 active.pop("progress", None)
                 break
             done = await _start_step(fm, peer, active, tasks, key)
+    except (httpx.TransportError, httpx.TimeoutException) as exc:
+        # El túnel se reconecta (p. ej. al rotar la conexión) y la petición en
+        # vuelo cae con «federation tunnel closed». No es un fallo del modelo:
+        # se deja el elemento como estaba y se reintenta en la próxima pasada.
+        failures = int(before.get("transient_failures") or 0) + 1
+        if failures >= MAX_TRANSIENT_FAILURES:
+            tasks.pop(key, None)
+            active.update(
+                status="error",
+                error=f"el nodo no respondió {failures} veces seguidas: {exc}"[:300],
+            )
+        else:
+            active.clear()
+            active.update(before, transient_failures=failures, last_transient_error=str(exc)[:200])
+        return items
     except Exception as exc:  # noqa: BLE001 — one model failing must not stop the rest
         tasks.pop(key, None)
         active.update(status="error", error=str(exc)[:300])
+        return items
+    active.pop("transient_failures", None)
+    active.pop("last_transient_error", None)
     return items
 
 

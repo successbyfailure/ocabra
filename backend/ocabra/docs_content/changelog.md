@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.140.2 — 2026-11-26
+
+### Arreglos
+
+- **Un corte momentáneo del túnel con un pod daba su modelo por fallido.**
+  Cuando el pod reconectaba su túnel con el hub, la petición de precarga en
+  curso caía con «federation tunnel closed» y el modelo quedaba en error (y un
+  benchmark con pod propio se cancelaba y apagaba la máquina). Ahora un corte
+  de transporte se reintenta en la siguiente pasada; solo se da por fallido
+  tras cinco cortes seguidos. En el ranking, una misma GPU en Community y en
+  Secure Cloud cuenta como hardware distinto.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.140.0 — 2026-11-26
 
 ### Nuevo (administración)
