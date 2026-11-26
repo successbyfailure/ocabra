@@ -266,9 +266,22 @@ def compare_prompts(
     b = _strip_bos(official, official_bos)
     if a == b:
         return {"status": "identical", "diff": []}
-    if "".join(a.split()) == "".join(b.split()):
-        return {"status": "whitespace", "diff": _diff(a, b)}
-    return {"status": "different", "diff": _diff(a, b)}
+    status = "whitespace" if "".join(a.split()) == "".join(b.split()) else "different"
+    return {"status": status, "diff": _diff(a, b), "first_difference": first_difference(a, b)}
+
+
+def first_difference(live: str, official: str, context: int = 60) -> dict[str, Any]:
+    """Dónde empiezan a diferir, con contexto (las líneas del diff se cortan)."""
+    index = next(
+        (i for i, (x, y) in enumerate(zip(live, official, strict=False)) if x != y),
+        min(len(live), len(official)),
+    )
+    start = max(0, index - context)
+    return {
+        "offset": index,
+        "oficial": official[start : index + context],
+        "servido": live[start : index + context],
+    }
 
 
 def _diff(a: str, b: str, limit: int = 40) -> list[str]:

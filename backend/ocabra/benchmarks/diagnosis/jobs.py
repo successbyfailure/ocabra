@@ -201,6 +201,13 @@ class DiagnosisRunner:
             worker = await serving.find_loaded_worker(
                 app_state.model_manager, profile.base_model_id
             )
+            if worker is None and request.get("allow_load"):
+                job["phase"] = "load"
+                self._store.save(job)
+                await self._warm_up(model)
+                worker = await serving.find_loaded_worker(
+                    app_state.model_manager, profile.base_model_id
+                )
         if worker is None:
             findings.append(
                 "El modelo no está cargado: sin plantilla viva ni parámetros por defecto del "
@@ -290,6 +297,20 @@ class DiagnosisRunner:
         )
         (directory / "report.md").write_text(render_markdown(report), encoding="utf-8")
 
+    async def _warm_up(self, model: str) -> None:
+        """Carga el modelo por la cola normal con una petición mínima."""
+        async with httpx.AsyncClient(timeout=1800) as client:
+            response = await client.post(
+                f"{settings.benchmark_base_url.rstrip('/')}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": "Di hola."}],
+                    "max_tokens": 1,
+                },
+            )
+            response.raise_for_status()
+
     # ── Parámetros ──────────────────────────────────────────────────────
 
     async def _params(
@@ -364,6 +385,14 @@ class DiagnosisRunner:
         kwargs = dict((params.get("effective") or {}).get("chat_template_kwargs") or {})
         probes: dict[str, dict[str, Any]] = {}
         user = [{"role": "user", "content": "Hola, ¿qué tal?"}]
+        if "enable_thinking" not in kwargs:
+            # Sin fijarlo, cada lado usa su valor por defecto (el servidor suele
+            # pensar y la plantilla oficial no): se compara con el del servidor,
+            # que es lo que de verdad ve el modelo.
+            default = await probe.apply_template(user, None, kwargs)
+            thinking = await probe.apply_template(user, None, {**kwargs, "enable_thinking": True})
+            kwargs["enable_thinking"] = default == thinking
+        params["template_kwargs"] = kwargs
 
         # reasoning_effort: ¿cambia de verdad el prompt?
         low = await probe.apply_template(user, None, {**kwargs, "reasoning_effort": "low"})
@@ -463,6 +492,7 @@ class DiagnosisRunner:
                 "verdict": comparison["status"],
                 "detail": "system + tool_call + resultado + nuevo turno frente a la plantilla oficial",
                 "diff": comparison["diff"],
+                "first_difference": comparison.get("first_difference"),
             }
             if comparison["status"] == "different":
                 findings.append(
@@ -504,7 +534,11 @@ class DiagnosisRunner:
         if probe is None:
             return templates, tokens
         props = await probe.props()
-        kwargs = dict((params.get("effective") or {}).get("chat_template_kwargs") or {})
+        kwargs = dict(
+            params.get("template_kwargs")
+            or (params.get("effective") or {}).get("chat_template_kwargs")
+            or {}
+        )
         for case in cases:
             if case["case_id"] not in sample or not case.get("messages"):
                 continue

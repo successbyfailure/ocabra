@@ -139,6 +139,12 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines += ["", "## Plantilla", ""]
         for name, probe in (template.get("probes") or {}).items():
             lines.append(f"- **{name}**: {probe.get('verdict')} — {probe.get('detail', '')}")
+            first = probe.get("first_difference")
+            if first:
+                lines.append(
+                    f"  - primera diferencia (carácter {first['offset']}): oficial "
+                    f"`{_cell(first['oficial'], 200)}` · servido `{_cell(first['servido'], 200)}`"
+                )
     lines += [
         "",
         "## Casos",

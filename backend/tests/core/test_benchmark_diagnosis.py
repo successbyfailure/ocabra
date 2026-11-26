@@ -368,3 +368,12 @@ def test_la_plantilla_oficial_se_renderiza_como_transformers() -> None:
     )
     prompt = json.loads(result.stdout)["prompt"]
     assert prompt == '<bos><user>año</user>\n[{"name": "f"}]<assistant>'
+
+
+def test_la_primera_diferencia_se_ve_aunque_la_linea_sea_larga() -> None:
+    official = "x" * 500 + "NUMBER" + "y" * 50
+    live = "x" * 500 + "number" + "y" * 50
+    result = compare_prompts(live, official, live_bos=None, official_bos=None)
+    first = result["first_difference"]
+    assert first["offset"] == 500
+    assert "NUMBER" in first["oficial"] and "number" in first["servido"]

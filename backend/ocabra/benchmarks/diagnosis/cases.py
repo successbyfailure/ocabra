@@ -291,11 +291,9 @@ def corrala_cases(source: Path, model: str, suite: str) -> list[FailedCase]:
                     "expected_queue": row.get("expected_queue"),
                 },
                 score=None,
-                client_body={
-                    key: row.get(key)
-                    for key in ("reasoning_effort", "generation_overrides")
-                    if row.get(key) is not None
-                },
+                # Corrala manda sus peticiones desde su propio stack: no
+                # sabemos el cuerpo exacto, así que se mide el del perfil.
+                client_body={},
                 signals={
                     "length_finishes": int(row.get("chain_length_finishes") or 0),
                     "completion_tokens": int(row.get("completion_tokens") or 0),
