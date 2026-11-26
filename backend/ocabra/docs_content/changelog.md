@@ -16,6 +16,13 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.143.1 — VRAM mínima inclusiva
+
+El selector de GPU de benchmarks incluye las tarjetas que igualan el mínimo.
+Por ejemplo, con 24 GB se pueden elegir tarjetas de 24 GB o más.
+
+---
+
 ## 0.143.0 — Selección de GPU para benchmarks en pod
 
 Las ejecuciones y planes de benchmark aceptan `cloud.cloud_type: "BOTH"`.

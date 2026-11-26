@@ -57,7 +57,7 @@ export function BenchmarkCloudFields({
     () =>
       (gpus ?? []).filter((gpu) =>
         offersFor(gpu, cloud).length > 0 &&
-        (minVram === "" || (gpu.memory_gb != null && gpu.memory_gb > Number(minVram))) &&
+        (minVram === "" || (gpu.memory_gb != null && gpu.memory_gb >= Number(minVram))) &&
         gpu.availability !== "NONE",
       ),
     [gpus, cloud, minVram],
@@ -84,7 +84,7 @@ export function BenchmarkCloudFields({
         <span className="font-medium">GPUs aceptables</span>
         <span className="ml-1 text-xs text-muted-foreground">(por orden: se prueba la primera y luego las demás)</span>
         <label className="mt-2 flex items-center gap-2 text-xs">
-          VRAM por GPU mayor que (GB)
+          VRAM mínima por GPU (GB)
           <input type="number" min="0" step="any" placeholder="Sin filtro" value={minVram}
             onChange={(e) => setMinVram(e.target.value)}
             className="w-24 rounded-md border border-border bg-background px-2 py-1" />

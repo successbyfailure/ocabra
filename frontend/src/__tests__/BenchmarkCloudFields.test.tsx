@@ -32,7 +32,7 @@ function Harness() {
 }
 
 describe("BenchmarkCloudFields", () => {
-  it("combina ambas nubes y excluye del pedido las GPU que no superan el umbral", async () => {
+  it("combina ambas nubes y conserva las GPU que igualan el mínimo de VRAM", async () => {
     render(<Harness />)
     fireEvent.click(await screen.findByText(/RTX 3090/))
     fireEvent.change(screen.getByLabelText("Nube"), { target: { value: "BOTH" } })
@@ -40,7 +40,11 @@ describe("BenchmarkCloudFields", () => {
     fireEvent.click(screen.getByText(/L40.*Secure/))
     expect(latest.cloud_type).toBe("BOTH")
     expect(latest.gpu_type_ids).toEqual(["3090", "L40"])
-    fireEvent.change(screen.getByLabelText(/VRAM por GPU/), { target: { value: "24" } })
+    const minimum = screen.getByLabelText(/VRAM mínima por GPU/)
+    fireEvent.change(minimum, { target: { value: "24" } })
+    expect(screen.getByText(/RTX 3090/)).toBeTruthy()
+    expect(latest.gpu_type_ids).toEqual(["3090", "L40"])
+    fireEvent.change(minimum, { target: { value: "25" } })
     expect(screen.queryByText(/RTX 3090/)).toBeNull()
     expect(screen.queryByText(/RTX 4090/)).toBeNull()
     expect(latest.gpu_type_ids).toEqual(["L40"])
