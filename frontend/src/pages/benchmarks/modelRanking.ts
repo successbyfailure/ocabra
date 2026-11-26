@@ -140,7 +140,11 @@ function attemptBackend(attempt: BenchmarkAttempt | undefined): string {
 function attemptHardware(attempt: BenchmarkAttempt | undefined): string {
   const gpus = attempt?.environment.hardware?.gpus ?? []
   if (gpus.length === 0) return "GPU no informada"
-  return gpus.map((gpu) => gpu.name || `GPU ${gpu.index}`).join(" + ")
+  const names = gpus.map((gpu) => gpu.name || `GPU ${gpu.index}`).join(" + ")
+  // Una misma GPU en Community y en Secure Cloud no es el mismo hardware
+  // (vecinos, red, disco): en pods se separan.
+  const cloud = attempt?.environment.node?.cloud?.cloudType
+  return cloud ? `${names} · ${cloud === "SECURE" ? "Secure" : "Community"} Cloud` : names
 }
 
 function attemptVersion(attempt: BenchmarkAttempt | undefined): string {

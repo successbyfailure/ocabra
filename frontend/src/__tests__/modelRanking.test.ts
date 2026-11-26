@@ -3,6 +3,7 @@ import { paretoIds, scatterPointRows } from "@/pages/benchmarks/BenchmarkModelRa
 import {
   buildModelRanking,
   RANKING_PROFILES,
+  rankingFilterOptions,
   type ModelRankingRow,
 } from "@/pages/benchmarks/modelRanking"
 import type { BenchmarkRun } from "@/types"
@@ -169,5 +170,17 @@ describe("notas invalidadas", () => {
     const broken = { ...run("bfcl", "core", "qwen", 0.2), scoringIssue: { reason: "x", fixedIn: "0.137.0" } }
     const ranking = buildModelRanking([broken, run("ifeval", "full", "qwen", 0.8), run("corrala", "llm", "qwen", 0.8)], balanced)
     expect(ranking[0].dimensions).not.toContain("bfcl")
+  })
+})
+
+describe("hardware en la nube", () => {
+  it("la misma GPU en Community y en Secure son hardware distinto", () => {
+    const pod = (cloudType: "COMMUNITY" | "SECURE", quality: number) => {
+      const base = run("ifeval", "full", `m-${cloudType}`, quality, { gpu: "RTX 4090" })
+      base.attempts[0].environment.node = { name: "pod", cloud: { cloudType } }
+      return base
+    }
+    const options = rankingFilterOptions([pod("COMMUNITY", 0.8), pod("SECURE", 0.9)])
+    expect(options.hardware).toEqual(["RTX 4090 · Community Cloud", "RTX 4090 · Secure Cloud"])
   })
 })
