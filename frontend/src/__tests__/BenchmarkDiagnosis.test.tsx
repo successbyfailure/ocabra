@@ -66,7 +66,7 @@ describe("BenchmarkDiagnoses", () => {
   })
 
   it("no aparece en apps que aún no sabe leer", () => {
-    const { container } = render(<BenchmarkDiagnoses run={{ ...run, app: "escriba" } as BenchmarkRun} />)
+    const { container } = render(<BenchmarkDiagnoses run={{ ...run, app: "vbench" } as BenchmarkRun} />)
     expect(container.textContent).toBe("")
   })
 })

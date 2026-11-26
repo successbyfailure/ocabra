@@ -21,6 +21,7 @@ import json
 import os
 import random
 import shutil
+import sys
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -46,6 +47,13 @@ logger = structlog.get_logger(__name__)
 TERMINAL = frozenset({"completed", "failed", "cancelled"})
 SCRIPTS = Path(__file__).resolve().parent / "scripts"
 _IFEVAL_DEPS = ("absl-py", "langdetect", "nltk", "immutabledict")
+# Apps que traen su propio script de repetición (contrato ocabra_replay.py):
+# repiten el caso por su stack real; el muestreo a comparar lo pone el servidor.
+EXTERNAL_REPLAY = {
+    "corrala": "backend/scripts/llm_benchmark/ocabra_replay.py",
+    "escriba": "eval/datasets/llm/ocabra_replay.py",
+    "fulcrum": "benchmarks/orchestration/ocabra_replay.py",
+}
 
 
 def _now() -> str:
@@ -294,7 +302,8 @@ class DiagnosisRunner:
             if can_replay and replayable:
                 job["phase"] = "replay"
                 self._store.save(job)
-                replays = await self._replay(
+                replay = self._replay_external if run.app in EXTERNAL_REPLAY else self._replay
+                replays = await replay(
                     job, directory, workspace, run.app, model, replayable, reference, request
                 )
 
@@ -713,6 +722,110 @@ class DiagnosisRunner:
                 signals["harness_dot_to_underscore"] = False
                 if row.get("error_type") and row["error_type"] not in case["failure"]:
                     case["failure"] = f"{row['error_type']} (re-puntuado con underscore_to_dot)"
+
+    async def _replay_external(
+        self,
+        job: dict[str, Any],
+        directory: Path,
+        workspace: Path,
+        app: str,
+        model: str,
+        cases: list[dict[str, Any]],
+        reference: Reference,
+        request: dict[str, Any],
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        """Repite con el ``ocabra_replay.py`` de la app.
+
+        Una pasada con el muestreo del benchmark («original») y otra con el
+        del fabricante («recomendado»), que el servidor aplica pisando el del
+        runner (mismo override que las ejecuciones con muestreo recomendado).
+        """
+        source = workspace / "source"
+        script = source / EXTERNAL_REPLAY[app]
+        if not script.is_file():
+            raise RuntimeError(
+                f"La revisión medida de {app} no trae {EXTERNAL_REPLAY[app]}: vuelve a medir "
+                "con la versión actual para poder repetir sus casos"
+            )
+        repeats = max(1, min(10, int(request.get("repeats") or 3)))
+        passes = [("original", model, 1, None), ("recomendado", model, repeats, reference.sampling)]
+        if request.get("compare_model"):
+            passes.append(("comparado", request["compare_model"], repeats, reference.sampling))
+        case_ids = [str(case["payload"]["case_id"]) for case in cases]
+        by_replay_id = {str(case["payload"]["case_id"]): case["case_id"] for case in cases}
+        cases_path = directory / "replay_cases.json"
+        cases_path.write_text(json.dumps({"case_ids": case_ids}), encoding="utf-8")
+        total = len(cases) * sum(n for _, _, n, _ in passes)
+        job["progress"] = {**job.get("progress", {}), "completed": 0, "total": total}
+        self._store.save(job)
+        env = self._script_env()
+        env["OPENAI_COMPATIBLE_URL"] = settings.benchmark_base_url
+        if app == "corrala":
+            manager = getattr(self._app.state, "benchmark_manager", None)
+            if manager is not None:
+                env["CORRALA_BENCH_DATABASE_URL"] = await manager._corrala_database_url()
+        results: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+        done = 0
+        for name, target, n, sampling in passes:
+            output = directory / f"replay_{name}.jsonl"
+            output.write_text("", encoding="utf-8")
+            command = [
+                sys.executable, "-I", str(script), "--model", target,
+                "--cases", str(cases_path), "--repeats", str(n), "--output", str(output),
+            ]  # fmt: skip
+            await self._run_with_override(command, source, env, target, sampling, directory, name)
+            for line in output.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                case_id = by_replay_id.get(str(row.get("case_id")), str(row.get("case_id")))
+                row["setting"] = name
+                results[case_id][name].append(row)
+            done += len(cases) * n
+            job["progress"]["completed"] = done
+            self._store.save(job)
+        with (directory / "replays.jsonl").open("w", encoding="utf-8") as handle:
+            for case_id, by_setting in results.items():
+                for rows in by_setting.values():
+                    for row in rows:
+                        handle.write(
+                            json.dumps({**row, "case_id": case_id}, ensure_ascii=False) + "\n"
+                        )
+        return {key: dict(value) for key, value in results.items()}
+
+    async def _run_with_override(
+        self,
+        command: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        profile: str,
+        sampling: dict[str, Any] | None,
+        directory: Path,
+        name: str,
+    ) -> None:
+        """Lanza el script; con ``sampling`` activa el override del servidor mientras dura."""
+        manager = getattr(self._app.state, "benchmark_manager", None)
+        if sampling and manager is not None:
+            manager.sampling_override = {
+                "profile": profile,
+                "params": sampling,
+                "api_key": self._api_key,
+            }
+        try:
+            with (directory / f"replay_{name}.log").open("ab") as log:
+                process = await asyncio.create_subprocess_exec(
+                    *command, cwd=str(cwd), env=env, stdout=log, stderr=asyncio.subprocess.STDOUT
+                )
+                self._process = process
+                await asyncio.wait_for(process.wait(), timeout=4 * 3600)
+                self._process = None
+        finally:
+            if sampling and manager is not None:
+                manager.sampling_override = None
+        self._check()
+        if process.returncode not in (0, None):
+            # El contrato sale ≠0 solo si todo falló por infraestructura.
+            raise RuntimeError(f"replay {name} terminó con código {process.returncode}")
 
     async def _replay(
         self,

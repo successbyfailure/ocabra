@@ -23,7 +23,7 @@ from typing import Any
 IFEVAL_CLIENT_BODY: dict[str, Any] = {"temperature": 0, "max_tokens": 4096}
 BFCL_CLIENT_BODY: dict[str, Any] = {"temperature": 0.001}
 
-REPLAYABLE_APPS = frozenset({"ifeval", "bfcl"})
+REPLAYABLE_APPS = frozenset({"ifeval", "bfcl", "corrala", "escriba", "fulcrum"})
 
 
 @dataclass
@@ -278,29 +278,73 @@ def corrala_cases(source: Path, model: str, suite: str) -> list[FailedCase]:
             continue
         checks = row.get("checks") or {}
         failed_checks = sorted(name for name, ok in checks.items() if ok is False)
+        replay_id = row.get("case_id") or f"{row.get('suite')}:{row.get('case')}"
+        has_messages = bool(row.get("messages"))
         cases.append(
             FailedCase(
-                case_id=f"corrala:{row.get('suite')}:{row.get('case')}:{row.get('run', 0)}",
+                case_id=f"corrala:{replay_id}:{row.get('run', 0)}",
                 app="corrala",
                 suite=suite,
                 category=str(row.get("suite") or "corrala"),
                 failure="falla: " + (", ".join(failed_checks) or str(row.get("error") or "?")),
+                # Desde Corrala b07a275 guarda la llamada decisiva tal cual salió.
+                messages=row.get("messages") if has_messages else None,
+                tools=row.get("tools"),
                 response=row.get("final_text"),
                 expected={
                     "primary": row.get("primary"),
                     "expected_queue": row.get("expected_queue"),
                 },
-                score=None,
+                score=row.get("score"),
                 # Corrala manda sus peticiones desde su propio stack: no
                 # sabemos el cuerpo exacto, así que se mide el del perfil.
                 client_body={},
                 signals={
-                    "length_finishes": int(row.get("chain_length_finishes") or 0),
+                    "length_finishes": int(row.get("chain_length_finishes") or 0)
+                    + int(row.get("finish_reason") == "length"),
                     "completion_tokens": int(row.get("completion_tokens") or 0),
                     "prompt_tokens": int(row.get("prompt_tokens") or 0),
                     "tool_loop": bool((row.get("loops") or {}).get("tool_loop")),
                     "iteration_cap_hit": bool((row.get("loops") or {}).get("iteration_cap_hit")),
                 },
+                # Solo se puede repetir si la revisión medida guarda los casos.
+                payload={"case_id": replay_id} if has_messages else {},
+            )
+        )
+    return cases
+
+
+# ── Escriba ───────────────────────────────────────────────────────────────
+
+
+def escriba_cases(source: Path, model: str, suite: str) -> list[FailedCase]:
+    if suite != "llm":
+        raise ValueError(f"El diagnóstico solo lee la suite llm de Escriba (no {suite})")
+    root = source / "eval" / "datasets" / "llm"
+    runs = _newest(list(root.glob("results_*/runs.jsonl")))
+    if runs is None:
+        raise FileNotFoundError(
+            f"No está runs.jsonl de Escriba en {root} (lo escribe desde 7834cba)"
+        )
+    cases: list[FailedCase] = []
+    for row in _read_jsonl(runs):
+        if row.get("model") not in (model, None) or row.get("passed") is not False:
+            continue  # aprobado, o fallo de infraestructura (passed: null)
+        replay_id = str(row.get("case_id"))
+        cases.append(
+            FailedCase(
+                case_id=f"escriba:{replay_id}:{row.get('rep', 0)}",
+                app="escriba",
+                suite=suite,
+                category=replay_id.split(":")[-1],
+                failure=f"score {row.get('score')} por debajo del umbral",
+                messages=row.get("messages"),
+                response=row.get("response"),
+                expected=row.get("expected"),
+                score=row.get("score"),
+                client_body={},
+                signals={"hit_output_cap": row.get("finish_reason") == "length"},
+                payload={"case_id": replay_id} if row.get("case_id") else {},
             )
         )
     return cases
@@ -319,27 +363,31 @@ def fulcrum_cases(source: Path, model: str, suite: str) -> list[FailedCase]:
         if row.get("model") not in (model, None) or row.get("error"):
             continue
         caps = row.get("caps") or {}
-        failed = sorted(name for name, ok in caps.items() if ok is False)
+        # None = sin evidencia (desde Fulcrum 977a039e): también cuenta como suspenso.
+        failed = sorted(name for name, ok in caps.items() if not ok)
         if not failed:
             continue
         detail = row.get("detail") or {}
         cutoffs = detail.get("cutoffs") or []
-        for capability in failed:
-            cases.append(
-                FailedCase(
-                    case_id=f"fulcrum:{row.get('scenario', 'fase_round')}:{row.get('rep', 0)}:{capability}",
-                    app="fulcrum",
-                    suite=suite,
-                    category=capability,
-                    failure=f"capacidad {capability} en falso",
-                    score=None,
-                    signals={
-                        "length_finishes": sum(1 for item in cutoffs if item == "truncated"),
-                        "tool_loop": any(item == "loop" for item in cutoffs),
-                        "truncated_calls": int(detail.get("truncated_calls") or 0),
-                    },
-                )
+        replay_id = row.get("case_id") or f"{row.get('scenario', 'fase_round')}:{row.get('rep', 0)}"
+        cases.append(
+            FailedCase(
+                # Una repetición del escenario es el caso: así se puede repetir.
+                case_id=f"fulcrum:{replay_id}",
+                app="fulcrum",
+                suite=suite,
+                category=",".join(failed),
+                failure="capacidades en falso: " + ", ".join(failed),
+                score=detail.get("capability_rate"),
+                signals={
+                    "length_finishes": sum(1 for item in cutoffs if item == "truncated")
+                    + int((row.get("finish_reasons") or {}).get("length", 0)),
+                    "tool_loop": any(item == "loop" for item in cutoffs),
+                    "truncated_calls": int(detail.get("truncated_calls") or 0),
+                },
+                payload={"case_id": replay_id} if row.get("case_id") else {},
             )
+        )
     return cases
 
 
@@ -347,6 +395,7 @@ EXTRACTORS = {
     "ifeval": ifeval_cases,
     "bfcl": bfcl_cases,
     "corrala": corrala_cases,
+    "escriba": escriba_cases,
     "fulcrum": fulcrum_cases,
 }
 

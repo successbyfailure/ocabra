@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.141.0 — 2026-11-26
+
+### Nuevo (administración de benchmarks)
+
+- **El diagnóstico de fallos repite casos de Corrala, Escriba y Fulcrum.**
+  Usa el `ocabra_replay.py` de cada app: una pasada con el muestreo del
+  benchmark y otra con el del fabricante (pisado en el servidor, solo para las
+  peticiones del runner). Escriba entra en el diagnóstico (suite `llm`) y en
+  Fulcrum cada repetición del escenario es un caso. Hace falta medir con las
+  versiones de las apps que guardan los casos; las ejecuciones anteriores
+  siguen como «sin verificar».
+
+**Acción:** ninguna.
+
+---
+
 ## 0.140.2 — 2026-11-26
 
 ### Arreglos

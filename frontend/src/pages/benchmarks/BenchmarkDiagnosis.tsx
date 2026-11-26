@@ -10,7 +10,7 @@ import type {
 } from "@/types"
 
 /** Apps cuyos casos fallidos sabe leer el diagnóstico (backend: diagnosis/cases.py). */
-export const DIAGNOSABLE_APPS = new Set(["ifeval", "bfcl", "corrala", "fulcrum"])
+export const DIAGNOSABLE_APPS = new Set(["ifeval", "bfcl", "corrala", "escriba", "fulcrum"])
 
 export const CATEGORY_LABEL: Record<BenchmarkDiagnosisCategory, string> = {
   plantilla: "Plantilla",

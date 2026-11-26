@@ -418,3 +418,121 @@ async def test_cancelar_mata_el_script_en_curso() -> None:
 
     with pytest.raises(DiagnosisCancelled):
         runner._check()
+
+
+# ── Contrato ocabra_replay.py de Corrala, Escriba y Fulcrum ──────────────
+
+
+def test_corrala_con_mensajes_se_puede_repetir(tmp_path: Path) -> None:
+    _jsonl(
+        tmp_path / "source/backend/scripts/llm_benchmark/results_2026-11-27/runs.jsonl",
+        [{"model": "m", "suite": "zammad", "case": "c1", "case_id": "zammad:c1", "run": 1,
+          "passed": False, "checks": {"queue": False}, "finish_reason": "length",
+          "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+          "tools": [{"type": "function", "function": {"name": "t"}}], "score": 0.5}],
+    )  # fmt: skip
+    (case,) = case_module.failed_cases("corrala", "llm", tmp_path, "m")
+    assert case.replayable and case.payload == {"case_id": "zammad:c1"}
+    assert case.messages[0]["role"] == "system" and case.tools and case.score == 0.5
+    assert case.signals["length_finishes"] == 1
+
+
+def test_escriba_solo_los_suspensos_del_modelo(tmp_path: Path) -> None:
+    _jsonl(
+        tmp_path / "source/eval/datasets/llm/results_2026-11-27/runs.jsonl",
+        [
+            {"model": "m", "case_id": "M", "rep": 0, "passed": False, "score": 0.4,
+             "messages": [{"role": "user", "content": "x"}], "finish_reason": "stop"},
+            {"model": "m", "case_id": "L", "rep": 0, "passed": None, "error": "HTTP 503"},
+            {"model": "m", "case_id": "S", "rep": 0, "passed": True, "score": 0.9},
+        ],
+    )  # fmt: skip
+    cases = case_module.failed_cases("escriba", "llm", tmp_path, "m")
+    assert [case.case_id for case in cases] == ["escriba:M:0"]
+    assert cases[0].replayable and cases[0].payload == {"case_id": "M"}
+
+
+def test_fulcrum_cuenta_las_capacidades_sin_evidencia(tmp_path: Path) -> None:
+    _jsonl(
+        tmp_path / "source/benchmarks/orchestration/results_2026-11-27/runs.jsonl",
+        [{"model": "m", "case_id": "fase_round:3", "caps": {"cola": None, "despacho": True,
+          "completo": False}, "detail": {"capability_rate": 0.3}}],
+    )  # fmt: skip
+    (case,) = case_module.failed_cases("fulcrum", "orquestacion", tmp_path, "m")
+    assert case.category == "cola,completo" and case.replayable
+    assert case.payload == {"case_id": "fase_round:3"} and case.score == 0.3
+
+
+@pytest.mark.asyncio
+async def test_la_repeticion_externa_pisa_el_muestreo_solo_en_su_pasada(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from ocabra.benchmarks.diagnosis.reference import Reference
+
+    script = tmp_path / "workspace/source/eval/datasets/llm/ocabra_replay.py"
+    script.parent.mkdir(parents=True)
+    # Pasa si el servidor tiene el override activo (lo apunta el gestor en un fichero).
+    flag = tmp_path / "override.json"
+    script.write_text(
+        "import argparse, json, os\n"
+        "p = argparse.ArgumentParser()\n"
+        "for a in ('--model','--cases','--repeats','--output'): p.add_argument(a)\n"
+        "a = p.parse_args()\n"
+        f"active = os.path.exists({str(flag)!r})\n"
+        "ids = json.load(open(a.cases))['case_ids']\n"
+        "with open(a.output, 'w') as out:\n"
+        "    for cid in ids:\n"
+        "        for rep in range(int(a.repeats)):\n"
+        "            out.write(json.dumps({'case_id': cid, 'rep': rep, 'passed': active,\n"
+        "                                  'finish_reason': 'stop'}) + '\\n')\n"
+    )
+
+    class Manager:
+        _override = None
+
+        @property
+        def sampling_override(self):
+            return self._override
+
+        @sampling_override.setter
+        def sampling_override(self, value):
+            self._override = value
+            if value:
+                flag.write_text(json.dumps(value))
+            elif flag.exists():
+                flag.unlink()
+
+    manager = Manager()
+    runner = DiagnosisRunner(
+        SimpleNamespace(state=SimpleNamespace(benchmark_manager=manager)),
+        DiagnosisStore(tmp_path),
+        "sk-runner",
+    )
+    job = runner._store.create({"attempt_id": "a"})
+    directory = runner._store.path(job["id"])
+    cases = [{"case_id": "escriba:M:0", "payload": {"case_id": "M"}}]
+    reference = Reference(repo="r", sampling={"temperature": 1.0, "top_k": 64})
+    replays = await runner._replay_external(
+        job, directory, tmp_path / "workspace", "escriba", "gemma4:12b", cases, reference,
+        {"repeats": 2},
+    )  # fmt: skip
+    assert [row["passed"] for row in replays["escriba:M:0"]["original"]] == [False]
+    assert [row["passed"] for row in replays["escriba:M:0"]["recomendado"]] == [True, True]
+    assert manager.sampling_override is None  # se suelta al terminar
+
+
+@pytest.mark.asyncio
+async def test_sin_script_de_repeticion_lo_dice(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from ocabra.benchmarks.diagnosis.reference import Reference
+
+    runner = DiagnosisRunner(
+        SimpleNamespace(state=SimpleNamespace()), DiagnosisStore(tmp_path), "k"
+    )
+    job = runner._store.create({"attempt_id": "a"})
+    with pytest.raises(RuntimeError, match="no trae"):
+        await runner._replay_external(
+            job, runner._store.path(job["id"]), tmp_path / "ws", "corrala", "m",
+            [{"case_id": "c", "payload": {"case_id": "x"}}], Reference(repo=None), {},
+        )  # fmt: skip

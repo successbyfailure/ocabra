@@ -59,9 +59,12 @@ runners de cada app. Estas ejecuciones no entran en el ranking.
    repeticiones con otro perfil (p. ej. Q8). Además, el arnés: BFCL se
    re-puntúa con `underscore_to_dot`.
 
-Apps: IFEval y BFCL completas. Corrala y Fulcrum no guardan los mensajes de cada
-caso: solo límites y señales (bucles, salidas cortadas), el resto queda «sin
-verificar». Escriba aún no.
+Apps: IFEval y BFCL con scripts propios de oCabra. Corrala (`b07a275`), Escriba
+(suite `llm`, `7834cba`) y Fulcrum (`977a039e`) con su `ocabra_replay.py`: el
+diagnóstico lo lanza una vez con el muestreo del benchmark y otra con el del
+fabricante, que el servidor pisa en las peticiones del runner. Solo con
+ejecuciones medidas con esas versiones o posteriores; las anteriores no guardan
+los casos y quedan «sin verificar».
 
 ## Categorías
 

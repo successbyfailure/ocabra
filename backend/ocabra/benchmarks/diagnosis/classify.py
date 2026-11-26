@@ -91,8 +91,11 @@ def classify_case(
     verdict = _majority(recommended)
     if verdict is None:
         reason = "no se pudo repetir el caso"
-        if case.get("app") not in ("ifeval", "bfcl"):
-            reason = f"la app {case.get('app')} no guarda los mensajes del caso"
+        if not case.get("replayable"):
+            reason = (
+                f"esta ejecución de {case.get('app')} no guarda el caso para repetirlo "
+                "(mide con la versión actual de la app)"
+            )
         return "sin_verificar", [reason]
     if verdict and _any_length(recommended):
         return "limites", ["con el muestreo recomendado se corta por finish_reason=length"]
