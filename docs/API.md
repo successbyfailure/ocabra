@@ -533,6 +533,9 @@ Un agente se usa como modelo `agent/<slug>` en `/v1/chat/completions`.
 | GET | `/ocabra/cloud/runpod/gpu-types` | RunPod GPU catalog | `system_admin` |
 | GET | `/ocabra/cloud/nodes` | Cloud nodes | `system_admin` |
 | POST | `/ocabra/cloud/nodes` | Launch a cloud node | `system_admin` |
+| POST | `/ocabra/cloud/requests` | Request a cloud node and retry until there is capacity | `system_admin` |
+| GET | `/ocabra/cloud/requests` | List cloud node requests | `system_admin` |
+| POST | `/ocabra/cloud/requests/{request_id}/cancel` | Cancel a cloud node request | `system_admin` |
 | DELETE | `/ocabra/cloud/nodes/{node_id}` | Terminate a cloud node | `system_admin` |
 | POST | `/ocabra/cloud/nodes/{node_id}/update-image` | Restart a cloud node on another ocabra-node image | `system_admin` |
 | POST | `/ocabra/cloud/orphans/{pod_id}/terminate` | Terminate an orphan pod | `system_admin` |

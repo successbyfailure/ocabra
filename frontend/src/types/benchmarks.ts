@@ -44,6 +44,8 @@ export interface BenchmarkAttempt {
         sourceCommit?: string | null;
         node?: string | null;
   sampling?: "benchmark" | "recommended";
+  /** Pod propio: se pide, se prepara, se mide y se apaga si se quiere. */
+  cloud?: BenchmarkCloudSpec | null;
       }>;
     };
     benchmark?: {
@@ -111,10 +113,14 @@ export interface BenchmarkRun {
   isBaseline: boolean;
   /** Fallo conocido del arnés que invalida la nota (se mide con la versión de oCabra). */
   scoringIssue?: { reason: string; fixedIn: string } | null;
+  cloudRequestId?: string | null;
+  cloudNodeId?: string | null;
   autoPause: boolean;
   /** Nodo de la federación donde se midió (null = este nodo). */
   node?: string | null;
   sampling?: "benchmark" | "recommended";
+  /** Pod propio: se pide, se prepara, se mide y se apaga si se quiere. */
+  cloud?: BenchmarkCloudSpec | null;
   pauseReason: "manual" | "external_traffic" | null;
   currentModelIndex: number;
   currentModel: string | null;
@@ -146,6 +152,8 @@ export interface BenchmarkSchedule {
   autoPause: boolean;
   node?: string | null;
   sampling?: "benchmark" | "recommended";
+  /** Pod propio: se pide, se prepara, se mide y se apaga si se quiere. */
+  cloud?: BenchmarkCloudSpec | null;
   enabled: boolean;
   weekdays: number[];
   timeOfDay: string;
@@ -167,6 +175,8 @@ export interface BenchmarkScheduleInput {
   autoPause?: boolean;
   node?: string | null;
   sampling?: "benchmark" | "recommended";
+  /** Pod propio: se pide, se prepara, se mide y se apaga si se quiere. */
+  cloud?: BenchmarkCloudSpec | null;
   enabled?: boolean;
   weekdays: number[];
   timeOfDay: string;
@@ -224,4 +234,20 @@ export interface BenchmarkDiagnosis {
   suite: string;
   model: string;
   report?: BenchmarkDiagnosisReport | null;
+}
+
+
+export interface BenchmarkCloudSpec {
+  /** GPUs aceptables, por orden de preferencia. */
+  gpu_type_ids: string[];
+  gpu_count: number;
+  cloud_type: "COMMUNITY" | "SECURE" | null;
+  backends: string[];
+  recipes: string[];
+  volume_id?: string | null;
+  privacy_mode: "functional" | "zero_data";
+  wait_minutes: number;
+  ready_timeout_minutes: number;
+  max_runtime_minutes: number;
+  terminate_after: boolean;
 }

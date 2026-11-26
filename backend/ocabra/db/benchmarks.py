@@ -35,6 +35,10 @@ class BenchmarkRun(Base):
     # El runner sigue en el hub y sus peticiones van forzadas a ese nodo.
     node: Mapped[str | None] = mapped_column(Text, nullable=True)
     sampling: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Pod propio: especificación de la máquina (ver api BenchmarkCloudSpec).
+    cloud: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    cloud_request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    cloud_node_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     pause_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_model_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     current_model: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -128,6 +132,7 @@ class BenchmarkSchedule(Base):
     auto_pause: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     node: Mapped[str | None] = mapped_column(Text, nullable=True)
     sampling: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cloud: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     weekdays: Mapped[list[int]] = mapped_column(JSONB, nullable=False, default=list)
     time_of_day: Mapped[str] = mapped_column(Text, nullable=False, default="02:00")

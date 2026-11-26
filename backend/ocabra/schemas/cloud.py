@@ -182,3 +182,23 @@ class CloudRecipeUpdate(BaseModel):
     parallel: int | None = Field(default=None, ge=0, le=64, description="0 = node default")
     load_policy: str | None = Field(default=None, pattern=r"^(on_demand|warm|pin)$")
     display_name: str | None = Field(default=None, max_length=255)
+
+
+class CloudLaunchRequestCreate(CloudNodeLaunch):
+    """Pide una máquina y reintenta hasta que haya capacidad.
+
+    Los mismos campos que un lanzamiento, más las GPUs aceptables por orden de
+    preferencia (``gpu_type_id`` es la primera; ``alternatives`` el resto).
+    """
+
+    alternatives: list[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description="Otras GPUs aceptables, por orden de preferencia, si la primera no está",
+    )
+    wait_minutes: int = Field(
+        default=360, ge=1, le=7 * 24 * 60, description="Cuánto seguir intentándolo"
+    )
+    retry_interval_minutes: int = Field(
+        default=2, ge=1, le=120, description="Cada cuánto se vuelve a probar"
+    )

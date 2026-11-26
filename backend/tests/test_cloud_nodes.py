@@ -211,6 +211,9 @@ class FakeProvider:
         self.updated: list[tuple] = []
         self.restarted: list[str] = []
         self.envs: dict[str, dict] = {}
+        # GPUs sin máquinas libres (para la cola de peticiones).
+        self.no_capacity: set[str] = set()
+        self.fatal: str | None = None
 
     def factory(self, provider, api_key):
         return self
@@ -222,6 +225,14 @@ class FakeProvider:
         return [{"id": "3090", "price_community": 0.22}]
 
     async def create_pod(self, spec):
+        if spec.gpu_type_id in self.no_capacity:
+            from ocabra.core.cloud.manager import CloudCapacityError
+
+            raise CloudCapacityError(f"sin máquinas {spec.gpu_type_id}")
+        if self.fatal:
+            from ocabra.core.cloud.manager import CloudError
+
+            raise CloudError(self.fatal, 402)
         pod = PodInfo(
             pod_id=f"pod-{len(self.created)}", name=spec.name, status="starting", cost_per_hr=0.25
         )
@@ -279,11 +290,12 @@ class FakeProvider:
 
 async def _clean():
     from ocabra.db.auth import User
-    from ocabra.db.cloud import CloudNode, CloudProvider
+    from ocabra.db.cloud import CloudLaunchRequest, CloudNode, CloudProvider
     from ocabra.db.federation import FederationInvite, FederationJoinRequest, FederationPeer
 
     async with AsyncSessionLocal() as s:
         for model in (
+            CloudLaunchRequest,
             CloudNode,
             CloudProvider,
             FederationJoinRequest,
@@ -763,7 +775,7 @@ async def test_update_image_restarts_the_pod_and_it_joins_again(hub):
 
     out = await fm.cloud.update_image(node["id"], "0.96.0")
     assert out["status"] == "starting" and out["peer_id"] is None
-    (pid, image, env), = fake.updated
+    ((pid, image, env),) = fake.updated
     assert pid == pod_id and image == "ghcr.io/successbyfailure/ocabra-node:0.96.0"
     # Everything stays but the invite: a new single-use one.
     assert env["HF_TOKEN"] == "hf_secret" and env["FEDERATION_JOIN_URL"] == "https://hub.example"
@@ -779,7 +791,11 @@ async def test_update_image_restarts_the_pod_and_it_joins_again(hub):
     assert (await _node(fm, node["id"]))["status"] != "terminated"
 
     await fm.join_service.create_request(
-        {"node_id": "pod-node-2", "node_name": spec.name, "invite_code": env["FEDERATION_JOIN_INVITE"]},
+        {
+            "node_id": "pod-node-2",
+            "node_name": spec.name,
+            "invite_code": env["FEDERATION_JOIN_INVITE"],
+        },
         source_ip="1.2.3.4",
     )
     await fm.cloud.reconcile()
@@ -794,3 +810,83 @@ async def test_update_image_needs_a_running_node(hub):
     await fm.cloud.terminate(node["id"])
     with pytest.raises(CloudError, match="no está en marcha"):
         await fm.cloud.update_image(node["id"])
+
+
+# ── Peticiones de máquina que esperan capacidad ──────────────────
+
+
+async def _age_request(request_id: str, seconds: int) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from ocabra.db.cloud import CloudLaunchRequest
+
+    async with AsyncSessionLocal() as s:
+        row = await s.get(CloudLaunchRequest, uuid.UUID(request_id))
+        row.last_attempt_at = datetime.now(UTC) - timedelta(seconds=seconds)
+        await s.commit()
+
+
+@requires_db
+async def test_la_peticion_prueba_las_gpu_por_orden(hub):
+    fm, fake = hub
+    fake.no_capacity = {"4090"}
+    req = await fm.cloud.requests.create(
+        gpu_type_ids=["4090", "3090"], launch={}, wait_minutes=60, retry_interval_s=120
+    )
+    assert req["status"] == "launched" and req["launchedGpuTypeId"] == "3090"
+    assert req["cloudNodeId"] and [spec.gpu_type_id for spec in fake.created] == ["3090"]
+
+
+@requires_db
+async def test_sin_capacidad_espera_y_reintenta_cuando_toca(hub):
+    fm, fake = hub
+    fake.no_capacity = {"4090"}
+    req = await fm.cloud.requests.create(
+        gpu_type_ids=["4090"], launch={"gpu_count": 1}, wait_minutes=60, retry_interval_s=120
+    )
+    assert (
+        req["status"] == "waiting" and req["attempts"] == 1 and "sin capacidad" in req["lastError"]
+    )
+    await fm.cloud.requests.drive()  # aún no toca
+    assert (await fm.cloud.requests.get(req["id"]))["attempts"] == 1
+    fake.no_capacity = set()
+    await _age_request(req["id"], 200)
+    await fm.cloud.requests.drive()
+    done = await fm.cloud.requests.get(req["id"])
+    assert done["status"] == "launched" and done["attempts"] == 2
+
+
+@requires_db
+async def test_un_fallo_que_no_es_de_capacidad_cierra_la_peticion(hub):
+    fm, fake = hub
+    fake.no_capacity = {"4090"}
+    fake.fatal = "Saldo insuficiente en RunPod"
+    req = await fm.cloud.requests.create(
+        gpu_type_ids=["4090", "3090"], launch={}, wait_minutes=60, retry_interval_s=120
+    )
+    assert req["status"] == "failed" and req["lastError"] == "Saldo insuficiente en RunPod"
+
+
+@requires_db
+async def test_caduca_y_se_cancela(hub):
+    fm, fake = hub
+    fake.no_capacity = {"4090"}
+    req = await fm.cloud.requests.create(
+        gpu_type_ids=["4090"], launch={}, wait_minutes=1, retry_interval_s=60
+    )
+    from datetime import UTC, datetime, timedelta
+
+    from ocabra.db.cloud import CloudLaunchRequest
+
+    async with AsyncSessionLocal() as s:
+        row = await s.get(CloudLaunchRequest, uuid.UUID(req["id"]))
+        row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await s.commit()
+    await fm.cloud.requests.drive()
+    assert (await fm.cloud.requests.get(req["id"]))["status"] == "expired"
+
+    other = await fm.cloud.requests.create(
+        gpu_type_ids=["4090"], launch={}, wait_minutes=60, retry_interval_s=60
+    )
+    assert (await fm.cloud.requests.cancel(other["id"]))["status"] == "cancelled"
+    assert [item["id"] for item in await fm.cloud.requests.list(include_finished=False)] == []

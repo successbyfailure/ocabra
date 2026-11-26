@@ -6,6 +6,8 @@ import { isRecord } from "@/api/_helpers"
 import type {
   CloudGpuType,
   CloudNode,
+  CloudLaunchRequest,
+  CloudLaunchRequestCreate,
   CloudNodeLaunch,
   CloudProviderInfo,
   CloudReplicableModel,
@@ -285,6 +287,14 @@ export const federationApiModule = {
         request<CloudNode[]>("GET", "/ocabra/cloud/nodes"),
       launch: async (data: CloudNodeLaunch): Promise<CloudNode> =>
         request<CloudNode>("POST", "/ocabra/cloud/nodes", data),
+      requests: {
+        list: (active = false) =>
+          request<CloudLaunchRequest[]>("GET", `/ocabra/cloud/requests${active ? "?active=true" : ""}`),
+        create: (data: CloudLaunchRequestCreate) =>
+          request<CloudLaunchRequest>("POST", "/ocabra/cloud/requests", data),
+        cancel: (id: string) =>
+          request<CloudLaunchRequest>("POST", `/ocabra/cloud/requests/${encodeURIComponent(id)}/cancel`),
+      },
       terminate: async (id: string): Promise<CloudNode> =>
         request<CloudNode>("DELETE", `/ocabra/cloud/nodes/${encodeURIComponent(id)}`),
       replicableModels: async (): Promise<CloudReplicableModel[]> =>

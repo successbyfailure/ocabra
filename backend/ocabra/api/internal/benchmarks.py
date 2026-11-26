@@ -36,6 +36,26 @@ _RESERVED_SUITE_ARGS = {
 }
 
 
+class BenchmarkCloudSpec(BaseModel):
+    """Pod propio para medir: se pide, se prepara, se mide y (si se quiere) se apaga."""
+
+    gpu_type_ids: list[str] = Field(
+        ..., min_length=1, max_length=8, description="GPUs aceptables, por orden de preferencia"
+    )
+    gpu_count: int = Field(default=1, ge=1, le=8)
+    cloud_type: Literal["COMMUNITY", "SECURE"] | None = None
+    backends: list[str] = Field(default_factory=list, max_length=20)
+    recipes: list[str] = Field(default_factory=list, max_length=10)
+    volume_id: str | None = Field(default=None, max_length=64)
+    privacy_mode: Literal["functional", "zero_data"] = "functional"
+    wait_minutes: int = Field(default=360, ge=1, le=7 * 24 * 60, description="Espera de capacidad")
+    ready_timeout_minutes: int = Field(
+        default=90, ge=5, le=24 * 60, description="Tope desde que sale el pod hasta que está listo"
+    )
+    max_runtime_minutes: int = Field(default=480, ge=30, le=7 * 24 * 60)
+    terminate_after: bool = True
+
+
 class BenchmarkRunCreate(BaseModel):
     app: str
     suite: str
@@ -48,11 +68,15 @@ class BenchmarkRunCreate(BaseModel):
     # "benchmark": el muestreo que mande cada runner; "recommended": el del
     # fabricante (ficha de HF), aplicado en el servidor a las peticiones del runner.
     sampling: Literal["benchmark", "recommended"] = "benchmark"
+    # Lanzar un pod propio para medir (en vez de un nodo que ya existe).
+    cloud: BenchmarkCloudSpec | None = None
 
     @model_validator(mode="after")
     def validate_sampling_node(self):
-        if self.sampling == "recommended" and self.node:
+        if self.sampling == "recommended" and (self.node or self.cloud):
             raise ValueError("El muestreo del fabricante solo se aplica en este nodo")
+        if self.cloud and self.node:
+            raise ValueError("Elige un nodo existente o un pod nuevo, no los dos")
         return self
 
     @field_validator("node")
@@ -225,6 +249,11 @@ def _run_payload(run: BenchmarkRun, *, include_attempts: bool = True) -> dict[st
         "autoPause": run.auto_pause,
         "node": getattr(run, "node", None),
         "sampling": getattr(run, "sampling", None) or "benchmark",
+        "cloud": getattr(run, "cloud", None),
+        "cloudRequestId": str(run.cloud_request_id)
+        if getattr(run, "cloud_request_id", None)
+        else None,
+        "cloudNodeId": str(run.cloud_node_id) if getattr(run, "cloud_node_id", None) else None,
         "pauseReason": run.pause_reason,
         "currentModelIndex": run.current_model_index,
         "currentModel": run.current_model,
@@ -265,6 +294,7 @@ def _schedule_payload(schedule: BenchmarkSchedule) -> dict[str, object]:
         "autoPause": schedule.auto_pause,
         "node": getattr(schedule, "node", None),
         "sampling": getattr(schedule, "sampling", None) or "benchmark",
+        "cloud": getattr(schedule, "cloud", None),
         "enabled": schedule.enabled,
         "weekdays": schedule.weekdays,
         "timeOfDay": schedule.time_of_day,
@@ -361,6 +391,7 @@ async def create_benchmark_run(
         auto_pause=body.auto_pause,
         node=_canonical_node(request, body.node),
         sampling=None if body.sampling == "benchmark" else body.sampling,
+        cloud=body.cloud.model_dump() if body.cloud else None,
         phase="queued",
         workspace_path=workspace,
         created_by=_user_uuid(user),
@@ -410,6 +441,7 @@ async def create_benchmark_schedule(
         auto_pause=body.auto_pause,
         node=_canonical_node(request, body.node),
         sampling=None if body.sampling == "benchmark" else body.sampling,
+        cloud=body.cloud.model_dump() if body.cloud else None,
         enabled=body.enabled,
         weekdays=body.weekdays,
         time_of_day=body.time_of_day,
@@ -459,6 +491,7 @@ async def update_benchmark_schedule(
             setattr(schedule, field, getattr(body, field))
         schedule.node = node
         schedule.sampling = None if body.sampling == "benchmark" else body.sampling
+        schedule.cloud = body.cloud.model_dump() if body.cloud else None
         schedule.next_run_at = (
             next_schedule_occurrence(
                 body.weekdays, body.time_of_day, body.timezone, datetime.now(UTC)

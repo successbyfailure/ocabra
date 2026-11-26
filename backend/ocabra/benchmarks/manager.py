@@ -87,6 +87,7 @@ def run_from_schedule(schedule: BenchmarkSchedule, *, now: datetime | None = Non
         auto_pause=schedule.auto_pause,
         node=schedule.node,
         sampling=getattr(schedule, "sampling", None),
+        cloud=getattr(schedule, "cloud", None),
         phase="queued",
         schedule_id=schedule.id,
         workspace_path=str(Path(settings.benchmark_dir).resolve() / "runs" / str(run_id)),
@@ -306,6 +307,8 @@ class BenchmarkManager:
             run.pause_reason = None
             await session.commit()
             await session.refresh(run)
+        if run.status == "cancelled":
+            await self._release_cloud(run_id)
         self.notify()
         return run
 
@@ -315,6 +318,20 @@ class BenchmarkManager:
             run = await self._get_run(session, run_id)
             if run.status != "failed":
                 raise ValueError("Solo se puede reintentar una ejecución fallida")
+            if run.cloud and run.cloud_node_id is not None:
+                # Si su pod ya no está (se apagó al fallar), se pide otro.
+                cloud = self._cloud()
+                nodes = await cloud.list_nodes() if cloud is not None else []
+                live = any(
+                    item["id"] == str(run.cloud_node_id) and item["status"] != "terminated"
+                    for item in nodes
+                )
+                if not live:
+                    run.node = None
+                    run.cloud_node_id = None
+                    run.cloud_request_id = None
+            elif run.cloud and run.node is None:
+                run.cloud_request_id = None
             run.status = "queued"
             run.phase = "queued"
             run.pause_reason = None
@@ -433,6 +450,7 @@ class BenchmarkManager:
             try:
                 await self._enqueue_due_schedules()
                 await self._resume_after_quiet_period()
+                await self._advance_provisioning()
                 run_id = await self._next_queued_run()
                 if run_id is not None:
                     await self._execute_run(run_id)
@@ -507,7 +525,12 @@ class BenchmarkManager:
         async with AsyncSessionLocal() as session:
             run_id = await session.scalar(
                 select(BenchmarkRun.id)
-                .where(BenchmarkRun.status == "queued")
+                .where(
+                    BenchmarkRun.status == "queued",
+                    # Las que esperan su pod no ocupan la cola: las mueve
+                    # _advance_provisioning hasta que el nodo está listo.
+                    sa.or_(BenchmarkRun.cloud.is_(None), BenchmarkRun.node.is_not(None)),
+                )
                 .order_by(BenchmarkRun.created_at)
                 .limit(1)
             )
@@ -1710,6 +1733,7 @@ class BenchmarkManager:
             run.phase = "cancelled"
             run.finished_at = datetime.now(UTC)
             await session.commit()
+        await self._release_cloud(run_id)
 
     async def _advance_run(
         self,
@@ -1732,6 +1756,9 @@ class BenchmarkManager:
                 run.status = "queued"
                 run.phase = "queued"
             await session.commit()
+            finished = run.status == "completed"
+        if finished:
+            await self._release_cloud(run_id)
         self.notify()
 
     async def _model_failed(self, run_id: uuid.UUID, model: str, error: str) -> None:
@@ -1759,6 +1786,8 @@ class BenchmarkManager:
                     run.status = "queued"
                     run.phase = "queued"
                 await session.commit()
+                if last:
+                    await self._release_cloud(run_id)
                 self.notify()
                 return
         message = f"{failed_before}\n{model}: {error}" if failed_before else error
@@ -1793,6 +1822,169 @@ class BenchmarkManager:
                 run.error = error[:4000]
                 run.finished_at = now
                 await session.commit()
+        await self._release_cloud(run_id)
+
+    # ── Pod propio ──────────────────────────────────────────────────────
+
+    def _cloud(self):
+        federation = getattr(self._app.state, "federation_manager", None)
+        return getattr(federation, "cloud", None)
+
+    async def _advance_provisioning(self) -> None:
+        """Mueve las ejecuciones que esperan su pod: pedirlo, esperarlo, darlo por listo."""
+        async with AsyncSessionLocal() as session:
+            run_ids = (
+                (
+                    await session.execute(
+                        select(BenchmarkRun.id).where(
+                            BenchmarkRun.status == "queued",
+                            BenchmarkRun.cloud.is_not(None),
+                            BenchmarkRun.node.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for run_id in run_ids:
+            try:
+                await self._provision(run_id)
+            except Exception as exc:  # noqa: BLE001 — se informa en la ejecución
+                logger.exception("benchmark_provisioning_failed", run_id=str(run_id))
+                await self._fail_run(run_id, f"No se pudo preparar el pod: {exc}")
+
+    async def _provision(self, run_id: uuid.UUID) -> None:
+        cloud = self._cloud()
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            spec = dict(run.cloud or {})
+            request_id = run.cloud_request_id
+            models = list(run.models)
+        if cloud is None:
+            await self._fail_run(run_id, "La nube no está disponible (federación apagada)")
+            return
+        if request_id is None:
+            await self._request_pod(run_id, cloud, spec, models)
+            return
+        request = await cloud.requests.get(str(request_id))
+        if request["status"] == "waiting":
+            await self._set_phase(run_id, "waiting_capacity")
+            return
+        if request["status"] != "launched":
+            reason = request.get("lastError") or request["status"]
+            await self._fail_run(run_id, f"No hubo máquina para el benchmark: {reason}")
+            return
+        node_id = request["cloudNodeId"]
+        node = next((item for item in await cloud.list_nodes() if item["id"] == node_id), None)
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            run.cloud_node_id = uuid.UUID(node_id)
+            await session.commit()
+        if node is None or node["status"] in ("terminated", "error"):
+            await self._fail_run(
+                run_id, f"El pod se cayó antes de medir: {(node or {}).get('error') or 'terminado'}"
+            )
+            return
+        items = node.get("preload_models") or []
+        broken = [item for item in items if item.get("status") == "error"]
+        if broken:
+            detail = "; ".join(f"{i.get('model_id')}: {i.get('error')}" for i in broken)[:1000]
+            await self._fail_run(run_id, f"No se pudo preparar el pod: {detail}")
+            return
+        pending = [item for item in items if item.get("status") not in ("loaded", "ready")]
+        if node.get("peer_online") and node.get("peer_name") and not pending:
+            async with AsyncSessionLocal() as session:
+                run = await self._get_run(session, run_id)
+                run.node = node["peer_name"]
+                run.phase = "queued"
+                await session.commit()
+            logger.info("benchmark_pod_ready", run_id=str(run_id), node=node["peer_name"])
+            self.notify()
+            return
+        launched_at = request.get("finishedAt")
+        timeout = int(spec.get("ready_timeout_minutes") or 90)
+        if launched_at and datetime.now(UTC) - datetime.fromisoformat(launched_at) > timedelta(
+            minutes=timeout
+        ):
+            await self._fail_run(run_id, f"El pod no estuvo listo en {timeout} min")
+            return
+        await self._set_phase(run_id, "preparing_pod")
+
+    async def _request_pod(self, run_id: uuid.UUID, cloud, spec: dict, models: list[str]) -> None:
+        """Pide la máquina: los modelos medidos se replican en el pod."""
+        registry = self._app.state.profile_registry
+        base_ids: list[str] = []
+        for model in models:
+            profile = await registry.get(model)
+            if profile is None:
+                await self._fail_run(run_id, f"Perfil desconocido: {model}")
+                return
+            if profile.base_model_id not in base_ids:
+                base_ids.append(profile.base_model_id)
+        async with AsyncSessionLocal() as session:
+            app = (await self._get_run(session, run_id)).app
+        launch = {
+            "gpu_count": int(spec.get("gpu_count") or 1),
+            "cloud_type": spec.get("cloud_type"),
+            "name": f"bench-{app}"[:40],
+            "models": base_ids,
+            "recipes": list(spec.get("recipes") or []),
+            "backends": list(spec.get("backends") or []),
+            "volume_id": spec.get("volume_id"),
+            "privacy_mode": spec.get("privacy_mode") or "functional",
+            "max_runtime_minutes": int(spec.get("max_runtime_minutes") or 480),
+            # Entre que queda listo y la primera petición no hay tráfico: margen.
+            "idle_shutdown_minutes": 60,
+        }
+        request = await cloud.requests.create(
+            gpu_type_ids=list(spec.get("gpu_type_ids") or []),
+            launch=launch,
+            wait_minutes=int(spec.get("wait_minutes") or 360),
+            retry_interval_s=120,
+            purpose="benchmark",
+            benchmark_run_id=run_id,
+        )
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            run.cloud_request_id = uuid.UUID(request["id"])
+            if request.get("cloudNodeId"):
+                run.cloud_node_id = uuid.UUID(request["cloudNodeId"])
+            run.phase = "preparing_pod" if request["status"] == "launched" else "waiting_capacity"
+            await session.commit()
+        if request["status"] in ("failed", "expired", "cancelled"):
+            await self._fail_run(
+                run_id, f"No hubo máquina para el benchmark: {request.get('lastError')}"
+            )
+        self.notify()
+
+    async def _release_cloud(self, run_id: uuid.UUID) -> None:
+        """Al terminar (bien, mal o cancelada): suelta la petición y, si se pidió, el pod."""
+        try:
+            async with AsyncSessionLocal() as session:
+                run = await self._get_run(session, run_id)
+                spec = dict(run.cloud or {}) if run.cloud else None
+                request_id = run.cloud_request_id
+                node_id = run.cloud_node_id
+            cloud = self._cloud()
+            if not spec or cloud is None:
+                return
+            if request_id is not None:
+                request = await cloud.requests.get(str(request_id))
+                if request["status"] == "waiting":
+                    await cloud.requests.cancel(str(request_id))
+                if node_id is None and request.get("cloudNodeId"):
+                    node_id = uuid.UUID(request["cloudNodeId"])
+            if node_id is not None and spec.get("terminate_after", True):
+                node = next(
+                    (item for item in await cloud.list_nodes() if item["id"] == str(node_id)), None
+                )
+                if node is not None and node["status"] not in ("terminated",):
+                    await cloud.terminate(str(node_id), reason="benchmark_done")
+                    logger.info(
+                        "benchmark_pod_terminated", run_id=str(run_id), node_id=str(node_id)
+                    )
+        except Exception:  # noqa: BLE001 — no dejar el error del pod tapar el de la medida
+            logger.exception("benchmark_pod_release_failed", run_id=str(run_id))
 
 
 async def load_run(run_id: uuid.UUID) -> BenchmarkRun | None:

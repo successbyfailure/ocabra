@@ -16,6 +16,35 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.139.0 — 2026-11-26
+
+### Nuevo (administración)
+
+- **Peticiones de máquina en la nube que esperan capacidad.**
+  `POST /ocabra/cloud/requests` acepta lo mismo que lanzar un nodo más
+  `alternatives` (otras GPUs aceptables, por orden), `wait_minutes` (360) y
+  `retry_interval_minutes` (2). Si ninguna GPU tiene máquinas libres, la
+  petición queda en `waiting` y se reintenta sola hasta lanzar el pod o
+  caducar; otros fallos (presupuesto, API key) la cierran como `failed`.
+  `GET /ocabra/cloud/requests` y `POST /ocabra/cloud/requests/{id}/cancel`.
+- **Benchmarks con pod propio.** `POST /ocabra/benchmarks/runs` y los planes
+  aceptan `cloud` (GPUs aceptables por orden, número, nube, backends, espera de
+  capacidad, tope para estar listo, vida máxima y `terminate_after`). La
+  ejecución pide la máquina, espera a que se una con sus modelos cargados,
+  mide en ella y, si se pidió, la apaga al terminar, al fallar o al cancelarla.
+
+### Arreglos
+
+- **Benchmarks en nodos remotos: backend, GPU y versiones del nodo.** Hasta
+  ahora un intento medido en otro nodo tomaba el backend y las GPU del estado
+  local del hub, y las versiones de backend quedaban vacías. Ahora salen de las
+  estadísticas y de `/ocabra/backends` del propio nodo, junto con su driver y
+  CUDA y, si es un pod, su tipo de GPU, imagen y coste.
+
+**Acción:** ninguna en la API de inferencia.
+
+---
+
 ## 0.138.0 — 2026-11-26
 
 ### Nuevo (administración de benchmarks)

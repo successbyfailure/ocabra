@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import structlog
 
-from ocabra.core.cloud.manager import CloudError, PodInfo, PodSpec
+from ocabra.core.cloud.manager import CloudCapacityError, CloudError, PodInfo, PodSpec
 
 logger = structlog.get_logger(__name__)
 
@@ -192,15 +192,14 @@ class RunPodClient:
             # is the common one and needs a different action from the user.
             if "does not have the resources" in str(exc) or "no longer any instances" in str(exc):
                 cloud = "Community" if spec.cloud_type == "COMMUNITY" else "Secure"
-                raise CloudError(
+                raise CloudCapacityError(
                     f"RunPod no tiene ahora mismo ninguna máquina libre con {spec.gpu_type_id} "
                     f"en {cloud} Cloud (el stock del catálogo es aproximado). Prueba otra GPU "
                     f"o la otra nube, o vuelve a intentarlo en unos minutos.",
-                    409,
                 ) from exc
             raise
         if resp.status_code == 202:
-            raise CloudError("RunPod no tiene capacidad ahora mismo para esa GPU", 409)
+            raise CloudCapacityError("RunPod no tiene capacidad ahora mismo para esa GPU")
         return pod_info(resp.json())
 
     async def list_pods(self) -> list[PodInfo]:

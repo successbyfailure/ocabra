@@ -240,6 +240,37 @@ export interface CloudNodeLaunch {
   privacy_mode?: "functional" | "zero_data";
 }
 
+/** Petición de máquina que se reintenta hasta que hay capacidad. */
+export interface CloudLaunchRequestCreate extends CloudNodeLaunch {
+  /** Otras GPUs aceptables, por orden de preferencia. */
+  alternatives?: string[];
+  wait_minutes?: number;
+  retry_interval_minutes?: number;
+}
+
+export interface CloudLaunchRequest {
+  id: string;
+  status: "waiting" | "launched" | "expired" | "cancelled" | "failed";
+  gpuTypeIds: string[];
+  gpuCount: number;
+  cloudType: string | null;
+  name: string | null;
+  models: string[];
+  recipes: string[];
+  backends: string[];
+  retryIntervalS: number;
+  expiresAt: string | null;
+  attempts: number;
+  lastAttemptAt: string | null;
+  lastError: string | null;
+  cloudNodeId: string | null;
+  launchedGpuTypeId: string | null;
+  purpose: "manual" | "benchmark";
+  benchmarkRunId: string | null;
+  createdAt: string | null;
+  finishedAt: string | null;
+}
+
 /** A model a pod had (set up there, e.g. by hand in its panel), offered again. */
 export interface CloudRecipe {
   id: string;

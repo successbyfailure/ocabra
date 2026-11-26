@@ -93,3 +93,37 @@ class CloudModelRecipe(Base):
     captured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class CloudLaunchRequest(Base):
+    """Petición de máquina que se reintenta hasta que hay capacidad.
+
+    Guarda el lanzamiento entero (``launch``, los argumentos de
+    ``CloudNodeManager.launch`` sin la GPU) y una lista de GPUs aceptables por
+    orden de preferencia. El bucle de nube la prueba cada
+    ``retry_interval_s`` hasta que lanza un pod o caduca.
+    """
+
+    __tablename__ = "cloud_launch_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # waiting | launched | expired | cancelled | failed
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="waiting")
+    gpu_type_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    launch: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    retry_interval_s: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cloud_node_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cloud_nodes.id", ondelete="SET NULL"), nullable=True
+    )
+    launched_gpu_type_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # manual | benchmark: quién la pidió (una ejecución de benchmark con pod propio).
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
+    benchmark_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

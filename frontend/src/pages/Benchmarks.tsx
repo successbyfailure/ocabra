@@ -8,10 +8,11 @@ import { toast } from "sonner"
 import { api } from "@/api/client"
 import { formatDateTime, formatDurationBetween } from "@/lib/format"
 import type {
-  BenchmarkAppCatalog, BenchmarkAttempt, BenchmarkRun, BenchmarkRunStatus, BenchmarkSchedule,
+  BenchmarkAppCatalog, BenchmarkAttempt, BenchmarkCloudSpec, BenchmarkRun, BenchmarkRunStatus, BenchmarkSchedule,
   BenchmarkScheduleInput, FederationPeer,
   ModelProfile,
 } from "@/types"
+import { BenchmarkCloudFields, CLOUD_NODE, DEFAULT_CLOUD_SPEC } from "./benchmarks/BenchmarkCloudFields"
 import { BenchmarkDiagnoses } from "./benchmarks/BenchmarkDiagnosis"
 import { BenchmarkResultsDashboard } from "./benchmarks/BenchmarkResultsDashboard"
 import { BenchmarkTimeEstimate } from "./benchmarks/BenchmarkTimeEstimate"
@@ -37,6 +38,8 @@ const ATTEMPT_LABEL: Record<BenchmarkAttempt["status"], string> = {
 
 const PHASE_LABEL: Record<string, string> = {
   queued: "Esperando turno",
+  waiting_capacity: "Esperando máquina en la nube",
+  preparing_pod: "Preparando el pod (backends y modelos)",
   checkout: "Preparando checkout",
   preparing: "Preparando dataset",
   running: "Ejecutando runner",
@@ -171,6 +174,11 @@ export function Benchmarks() {
   // Nodo de la federación donde medir ("" = este nodo).
   const [node, setNode] = useState("")
   const [sampling, setSampling] = useState<"benchmark" | "recommended">("benchmark")
+  const [cloudSpec, setCloudSpec] = useState<BenchmarkCloudSpec>(DEFAULT_CLOUD_SPEC)
+  const [cloudReady, setCloudReady] = useState(false)
+  useEffect(() => {
+    api.federation.cloud.getRunpod().then((info) => setCloudReady(Boolean(info.has_api_key))).catch(() => setCloudReady(false))
+  }, [])
   const [peers, setPeers] = useState<FederationPeer[]>([])
   const [scheduleName, setScheduleName] = useState("")
   const [scheduleEnabled, setScheduleEnabled] = useState(false)
@@ -268,7 +276,7 @@ export function Benchmarks() {
     try {
       await api.benchmarks.create({
         app: appName, suite: suiteName, models, revision,
-        suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node || null, sampling: node ? "benchmark" : sampling,
+        suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node && node !== CLOUD_NODE ? node : null, sampling: node ? "benchmark" : sampling, cloud: node === CLOUD_NODE ? cloudSpec : null,
       })
       toast.success("Benchmark añadido a la cola")
       setModels([])
@@ -283,7 +291,7 @@ export function Benchmarks() {
 
   const schedulePayload = (overrides: Partial<BenchmarkScheduleInput> = {}): BenchmarkScheduleInput => ({
     name: scheduleName.trim(), app: appName, suite: suiteName, models, revision,
-    suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node || null, sampling: node ? "benchmark" : sampling,
+    suiteArgs: suiteProfileArgs(appName, profile), autoPause, node: node && node !== CLOUD_NODE ? node : null, sampling: node ? "benchmark" : sampling, cloud: node === CLOUD_NODE ? cloudSpec : null,
     enabled: scheduleEnabled,
     weekdays: scheduleDays, timeOfDay: scheduleTime, timezone: scheduleTimezone,
     ...overrides,
@@ -321,7 +329,8 @@ export function Benchmarks() {
     setModels(schedule.models)
     setRevision(schedule.revision)
     setAutoPause(schedule.autoPause)
-    setNode(schedule.node ?? "")
+    setNode(schedule.cloud ? CLOUD_NODE : schedule.node ?? "")
+    setCloudSpec(schedule.cloud ?? DEFAULT_CLOUD_SPEC)
     setSampling(schedule.sampling ?? "benchmark")
     setScheduleEnabled(schedule.enabled)
     setScheduleDays(schedule.weekdays)
@@ -338,7 +347,7 @@ export function Benchmarks() {
       await api.benchmarks.schedules.update(schedule.id, {
         name: schedule.name, app: schedule.app, suite: schedule.suite,
         revision: schedule.revision, models: schedule.models, suiteArgs: schedule.suiteArgs,
-        autoPause: schedule.autoPause, node: schedule.node ?? null, sampling: schedule.sampling ?? "benchmark", enabled: schedule.enabled,
+        autoPause: schedule.autoPause, node: schedule.node ?? null, sampling: schedule.sampling ?? "benchmark", cloud: schedule.cloud ?? null, enabled: schedule.enabled,
         weekdays: schedule.weekdays, timeOfDay: schedule.timeOfDay,
         timezone: schedule.timezone, ...changes,
       })
@@ -388,7 +397,7 @@ export function Benchmarks() {
     try {
       await api.benchmarks.create({
         app: run.app, suite: run.suite, models: run.models, revision: run.revision,
-        suiteArgs: run.suiteArgs, autoPause: run.autoPause, node: run.node ?? null, sampling: run.sampling ?? "benchmark",
+        suiteArgs: run.suiteArgs, autoPause: run.autoPause, node: run.cloud ? null : run.node ?? null, sampling: run.sampling ?? "benchmark", cloud: run.cloud ?? null,
       })
       toast.success("Configuración añadida de nuevo a la cola")
       await refresh()
@@ -520,7 +529,7 @@ export function Benchmarks() {
 
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
             <div className="space-y-3">
-              {peers.length > 0 && (
+              {(peers.length > 0 || cloudReady) && (
                 <div className="space-y-1.5" data-testid="benchmark-node">
                   <label className="text-sm font-medium" htmlFor="benchmark-node-select">Nodo</label>
                   <select
@@ -530,6 +539,7 @@ export function Benchmarks() {
                     className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
                   >
                     <option value="">Este nodo</option>
+                    {cloudReady && <option value={CLOUD_NODE}>Pod nuevo en RunPod…</option>}
                     {peers.map((peer) => (
                       <option key={peer.peer_id} value={peer.name} disabled={!peer.online}>
                         {peer.name}{peer.online ? "" : " (desconectado)"}
@@ -537,6 +547,7 @@ export function Benchmarks() {
                       </option>
                     ))}
                   </select>
+                  {node === CLOUD_NODE && <BenchmarkCloudFields value={cloudSpec} onChange={setCloudSpec} />}
                   {selectedPeer && (
                     <p className="text-xs text-muted-foreground">
                       El runner sigue aquí y cada petición va forzada a {selectedPeer.name}. El túnel añade
@@ -653,7 +664,7 @@ export function Benchmarks() {
         <div className="flex items-center gap-2 border-b border-border px-4 py-3"><CalendarDays size={16} className="text-primary" /><div><h2 className="font-medium">Planes y horarios</h2><p className="text-xs text-muted-foreground">Las plantillas desactivadas se conservan sin lanzarse solas.</p></div></div>
         {schedules.length === 0 ? <p className="p-6 text-center text-sm text-muted-foreground">Todavía no hay planes guardados.</p> : <div className="grid gap-3 p-4 lg:grid-cols-2">{schedules.map((schedule) => (
           <article key={schedule.id} className="rounded-lg border border-border bg-background p-3">
-            <div className="flex items-start justify-between gap-3"><div><h3 className="font-medium">{schedule.name}</h3><p className="font-mono text-xs text-muted-foreground">{schedule.app}/{schedule.suite} · {schedule.models.length} modelo{schedule.models.length === 1 ? "" : "s"}{schedule.node ? ` · en ${schedule.node}` : ""}</p></div><button type="button" disabled={busyId === schedule.id} onClick={() => void updateSchedule(schedule, { enabled: !schedule.enabled })} className={`rounded-full border px-2 py-1 text-xs ${schedule.enabled ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400" : "border-border text-muted-foreground"}`}>{schedule.enabled ? "Activo" : "Plantilla"}</button></div>
+            <div className="flex items-start justify-between gap-3"><div><h3 className="font-medium">{schedule.name}</h3><p className="font-mono text-xs text-muted-foreground">{schedule.app}/{schedule.suite} · {schedule.models.length} modelo{schedule.models.length === 1 ? "" : "s"}{schedule.cloud ? " · en pod propio" : schedule.node ? ` · en ${schedule.node}` : ""}</p></div><button type="button" disabled={busyId === schedule.id} onClick={() => void updateSchedule(schedule, { enabled: !schedule.enabled })} className={`rounded-full border px-2 py-1 text-xs ${schedule.enabled ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400" : "border-border text-muted-foreground"}`}>{schedule.enabled ? "Activo" : "Plantilla"}</button></div>
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground"><div><span className="block">Próxima</span><strong className="font-normal text-foreground">{schedule.nextRunAt ? formatDate(schedule.nextRunAt) : "No programada"}</strong></div><div><span className="block">Última</span><strong className="font-normal text-foreground">{formatDate(schedule.lastRunAt)}</strong></div><div><span className="block">Horario</span><strong className="font-normal text-foreground">{schedule.weekdays.map((day) => WEEKDAYS[day]).join(" ")} · {schedule.timeOfDay}</strong></div><div><span className="block">Zona</span><strong className="font-normal text-foreground">{schedule.timezone}</strong></div></div>
             <div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={() => void runSchedule(schedule)} disabled={busyId === schedule.id} className={ACTION_BUTTON}><Play size={12} /> Ejecutar ahora</button><button type="button" onClick={() => editSchedule(schedule)} className={ACTION_BUTTON}>Editar</button><button type="button" onClick={() => void removeSchedule(schedule)} disabled={busyId === schedule.id} className={`${ACTION_BUTTON} text-destructive`}><Trash2 size={12} /> Eliminar</button></div>
           </article>
@@ -720,6 +731,7 @@ function RunCard({ run, history, busy, log, logOpen, onPause, onResume, onCancel
               <span className={`rounded border px-2 py-0.5 text-xs ${statusClass(run.status)}`}>{STATUS_LABEL[run.status]}</span>
               {run.node && <span className="inline-flex items-center gap-1 rounded border border-violet-500/40 bg-violet-500/10 px-2 py-0.5 text-xs text-violet-300" title="Medido en este nodo de la federación"><Server size={11} /> {run.node}</span>}
               {run.isBaseline && <span className="inline-flex items-center gap-1 text-xs text-amber-400"><Star size={12} className="fill-current" /> Referencia</span>}
+              {run.cloud && <span className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-300" title={`GPUs: ${run.cloud.gpu_type_ids.join(" → ")}${run.cloud.terminate_after ? " · se apaga al terminar" : ""}`}><Server size={11} /> Pod propio{run.cloud.terminate_after ? " · se apaga al terminar" : ""}</span>}
               {run.sampling === "recommended" && <span className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-xs text-sky-300" title="Medido con el muestreo de la ficha del fabricante">Muestreo del fabricante</span>}
               {run.scoringIssue && <span className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-xs text-destructive" title={run.scoringIssue.reason}><AlertTriangle size={11} /> Nota no válida (antes de {run.scoringIssue.fixedIn})</span>}
               {run.contaminatedAttempts > 0 && <span className="inline-flex items-center gap-1 text-xs text-amber-400"><AlertTriangle size={12} /> {run.contaminatedAttempts} descartado{run.contaminatedAttempts === 1 ? "" : "s"}</span>}

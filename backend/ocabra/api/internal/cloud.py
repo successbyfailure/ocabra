@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.schemas.cloud import (
+    CloudLaunchRequestCreate,
     CloudNodeImageUpdate,
     CloudNodeLaunch,
     CloudNodeModels,
@@ -159,6 +160,85 @@ async def launch_node(
     """
     try:
         return await _cloud(request).launch(**body.model_dump())
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.post(
+    "/cloud/requests",
+    status_code=201,
+    summary="Request a cloud node and retry until there is capacity",
+    responses={409: {"description": "No API key / budget spent / no public URL"}},
+)
+async def create_launch_request(
+    body: CloudLaunchRequestCreate,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Deja una petición de máquina que se reintenta hasta que haya capacidad.
+
+    Hace un primer intento en el acto con cada GPU aceptable (``gpu_type_id`` y
+    luego ``alternatives``). Si ninguna tiene máquinas libres, la petición queda
+    en ``waiting`` y el bucle de nube la vuelve a probar cada
+    ``retry_interval_minutes`` hasta lanzar un pod o pasados ``wait_minutes``.
+    Solo se reintenta la falta de capacidad: otros fallos (presupuesto, API key,
+    volumen) la cierran como ``failed``.
+
+    Args:
+        body: lanzamiento (como ``POST /cloud/nodes``) más ``alternatives``,
+            ``wait_minutes`` (360) y ``retry_interval_minutes`` (2).
+
+    Returns:
+        La petición: ``launched`` con ``cloudNodeId`` si ya salió, o ``waiting``.
+    """
+    data = body.model_dump()
+    gpus = [data.pop("gpu_type_id"), *data.pop("alternatives")]
+    wait = data.pop("wait_minutes")
+    interval = data.pop("retry_interval_minutes") * 60
+    try:
+        return await _cloud(request).requests.create(
+            gpu_type_ids=gpus, launch=data, wait_minutes=wait, retry_interval_s=interval
+        )
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.get("/cloud/requests", summary="List cloud node requests")
+async def list_launch_requests(
+    request: Request,
+    active: bool = False,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> list[dict]:
+    """Lista las peticiones de máquina, las más recientes primero.
+
+    Args:
+        active: solo las que siguen esperando capacidad.
+
+    Returns:
+        Peticiones con su estado, intentos y último error.
+    """
+    try:
+        return await _cloud(request).requests.list(include_finished=not active)
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.post("/cloud/requests/{request_id}/cancel", summary="Cancel a cloud node request")
+async def cancel_launch_request(
+    request_id: str,
+    request: Request,
+    _user: UserContext = Depends(require_role("system_admin")),
+) -> dict:
+    """Deja de reintentar una petición de máquina.
+
+    Args:
+        request_id: id de la petición.
+
+    Returns:
+        La petición (``cancelled`` si aún esperaba).
+    """
+    try:
+        return await _cloud(request).requests.cancel(request_id)
     except Exception as exc:
         raise _err(exc) from exc
 

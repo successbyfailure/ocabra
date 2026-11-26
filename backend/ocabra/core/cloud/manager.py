@@ -66,6 +66,17 @@ class CloudError(Exception):
         self.status = status
 
 
+class CloudCapacityError(CloudError):
+    """El proveedor no tiene ahora mismo máquinas libres de ese tipo (reintentable).
+
+    Se separa del resto de 409 (presupuesto agotado, sin API key, volumen en uso)
+    porque es lo único que tiene sentido reintentar solo.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, 409)
+
+
 @dataclass
 class PodSpec:
     name: str
@@ -157,6 +168,10 @@ class CloudNodeManager:
         self.fm = fm
         self._client_factory = client_factory or self._default_client_factory
         self._task: asyncio.Task | None = None
+        from ocabra.core.cloud.requests import LaunchRequestQueue
+
+        # Peticiones de máquina que esperan capacidad (core/cloud/requests.py).
+        self.requests = LaunchRequestQueue(self)
         self.orphans: list[dict[str, Any]] = []
         self.last_reconcile_at: float | None = None
         self.last_error: str | None = None
@@ -208,6 +223,12 @@ class CloudNodeManager:
             except Exception as exc:  # noqa: BLE001 — keep the watchdog alive
                 self.last_error = str(exc) or type(exc).__name__
                 logger.warning("cloud_reconcile_error", error=self.last_error)
+            try:
+                await self.requests.drive()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — una petición rota no para el bucle
+                logger.warning("cloud_requests_error", error=str(exc) or type(exc).__name__)
             await asyncio.sleep(RECONCILE_INTERVAL_S)
 
     # ── provider config ──────────────────────────────────────────

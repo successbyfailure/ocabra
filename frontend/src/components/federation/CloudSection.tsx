@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
-import { AlertTriangle, ArrowUpCircle, Cloud, Cpu, KeyRound, Loader2, PackagePlus, Power, RefreshCw, Rocket, Settings2, Trash2 } from "lucide-react"
+import { AlertTriangle, ArrowUpCircle, Ban, Clock, Cloud, Cpu, KeyRound, Loader2, PackagePlus, Power, RefreshCw, Rocket, Settings2, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api, request } from "@/api/client"
 import { VolumesPanel } from "./VolumesPanel"
 import { EMPTY_PICK, ModelPicker, pickCount } from "./ModelPicker"
 import type {
   CloudDataCenter,
+  CloudLaunchRequest,
   CloudGpuType,
   CloudVolume,
   CloudNode,
@@ -348,6 +349,10 @@ function LaunchDialog({
   const [dataCenters, setDataCenters] = useState<CloudDataCenter[]>([])
   const [volumeId, setVolumeId] = useState("")
   const [zeroData, setZeroData] = useState(false)
+  // Si no hay máquina libre: dejar una petición que se reintenta sola.
+  const [queueIfBusy, setQueueIfBusy] = useState(false)
+  const [alternatives, setAlternatives] = useState<string[]>([])
+  const [waitHours, setWaitHours] = useState(6)
 
   useEffect(() => {
     if (!open) return
@@ -396,10 +401,11 @@ function LaunchDialog({
         (g) =>
           (effectiveCloud === "COMMUNITY" ? g.community : g.secure) &&
           (effectiveCloud === "COMMUNITY" ? g.price_community : g.price_secure) != null &&
-          g.availability !== "NONE" &&
+          // Encolando se puede pedir una GPU agotada ahora mismo: se esperará.
+          (queueIfBusy || g.availability !== "NONE") &&
           (!dcGpus || dcGpus.has(g.id)),
       ),
-    [gpus, effectiveCloud, dcGpus],
+    [gpus, effectiveCloud, dcGpus, queueIfBusy],
   )
   const chosen = offered.find((g) => g.id === gpuId)
   const hourly = chosen ? (priceOf(chosen) ?? 0) * count : 0
@@ -542,6 +548,41 @@ function LaunchDialog({
             />
           </div>
 
+          <div className="mt-3 rounded-md border border-border px-3 py-2 text-sm">
+            <label className="flex items-start gap-2">
+              <input type="checkbox" className="mt-1" checked={queueIfBusy} onChange={(e) => setQueueIfBusy(e.target.checked)} />
+              <span>
+                <span className="font-medium">Si no hay máquina libre, seguir intentándolo</span>
+                <span className="block text-xs text-muted-foreground">Deja una petición que se reintenta cada 2 minutos con esta GPU y las alternativas, por orden, hasta que haya una o pase el plazo.</span>
+              </span>
+            </label>
+            {queueIfBusy && (
+              <div className="mt-2 space-y-2 pl-6">
+                <div className="flex flex-wrap gap-1">
+                  {offered.filter((g) => g.id !== gpuId).map((g) => {
+                    const on = alternatives.includes(g.id)
+                    return (
+                      <button
+                        key={g.id}
+                        type="button"
+                        onClick={() => setAlternatives((cur) => (on ? cur.filter((x) => x !== g.id) : [...cur, g.id]))}
+                        className={`rounded-full border px-2 py-0.5 text-xs ${on ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}
+                        title={`Disponibilidad ahora: ${g.availability}`}
+                      >
+                        {on ? `${alternatives.indexOf(g.id) + 2}. ` : ""}{g.name}
+                      </button>
+                    )
+                  })}
+                </div>
+                <label className="flex items-center gap-2 text-xs">
+                  Esperar como mucho
+                  <input type="number" min={1} max={168} value={waitHours} onChange={(e) => setWaitHours(Math.max(1, Math.min(168, Number(e.target.value) || 1)))} className="w-16 rounded border border-border bg-background px-2 py-0.5" />
+                  horas
+                </label>
+              </div>
+            )}
+          </div>
+
           <div className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
             {chosen ? (
               <>
@@ -566,7 +607,7 @@ function LaunchDialog({
               onClick={async () => {
                 setBusy(true)
                 try {
-                  const node = await api.federation.cloud.launch({
+                  const spec = {
                     gpu_type_id: gpuId,
                     gpu_count: count,
                     cloud_type: effectiveCloud,
@@ -579,8 +620,20 @@ function LaunchDialog({
                     recipes: picked.recipes,
                     download_only: picked.downloadOnly,
                     backends: picked.backends,
-                  })
-                  toast.success(`${node.name} lanzado: tardará unos minutos en unirse`)
+                  } as const
+                  if (queueIfBusy) {
+                    const req = await api.federation.cloud.requests.create({
+                      ...spec,
+                      alternatives: alternatives.filter((g) => g !== gpuId),
+                      wait_minutes: waitHours * 60,
+                    })
+                    if (req.status === "launched") toast.success(`Lanzado con ${req.launchedGpuTypeId}: tardará unos minutos en unirse`)
+                    else if (req.status === "waiting") toast.info("No hay máquina libre: la petición queda en espera y se reintentará sola")
+                    else toast.error(req.lastError ?? "La petición no salió")
+                  } else {
+                    const node = await api.federation.cloud.launch(spec)
+                    toast.success(`${node.name} lanzado: tardará unos minutos en unirse`)
+                  }
                   onOpenChange(false)
                   onLaunched()
                 } catch (err) {
@@ -590,7 +643,7 @@ function LaunchDialog({
                 }
               }}
             >
-              {busy ? <Loader2 size={14} className="animate-spin" /> : <Rocket size={14} />} Lanzar
+              {busy ? <Loader2 size={14} className="animate-spin" /> : <Rocket size={14} />} {queueIfBusy ? "Pedir máquina" : "Lanzar"}
             </button>
           </div>
         </Dialog.Content>
@@ -758,12 +811,18 @@ export function CloudSection() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showOld, setShowOld] = useState(false)
   const [addingTo, setAddingTo] = useState<CloudNode | null>(null)
+  const [requests, setRequests] = useState<CloudLaunchRequest[]>([])
 
   const load = useCallback(async () => {
     try {
-      const [i, n] = await Promise.all([api.federation.cloud.getRunpod(), api.federation.cloud.nodes()])
+      const [i, n, r] = await Promise.all([
+        api.federation.cloud.getRunpod(),
+        api.federation.cloud.nodes(),
+        api.federation.cloud.requests.list().catch(() => [] as CloudLaunchRequest[]),
+      ])
       setInfo(i)
       setNodes(n)
+      setRequests(r)
     } catch {
       // Federation off or cloud not reachable: the page already says so.
     }
@@ -866,6 +925,7 @@ export function CloudSection() {
                 ))}
               </div>
             )}
+            <PendingRequests requests={requests} onChanged={() => void load()} />
             <div className="divide-y divide-border border-t border-border">
               {live.length === 0 ? (
                 <div className="px-4 py-4 text-sm text-muted-foreground">No hay nodos en la nube en marcha.</div>
@@ -919,5 +979,53 @@ export function CloudSection() {
         </>
       )}
     </section>
+  )
+}
+
+
+/** Peticiones de máquina en espera de capacidad, y las que acabaron sin salir. */
+function PendingRequests({ requests, onChanged }: { requests: CloudLaunchRequest[]; onChanged: () => void }) {
+  const waiting = requests.filter((r) => r.status === "waiting")
+  const recent = requests.filter((r) => r.status === "expired" || r.status === "failed").slice(0, 3)
+  if (waiting.length === 0 && recent.length === 0) return null
+  return (
+    <div className="divide-y divide-border border-t border-border">
+      {[...waiting, ...recent].map((r) => (
+        <div key={r.id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-sm">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Clock size={13} className={r.status === "waiting" ? "text-sky-400" : "text-destructive"} />
+              <span className="font-medium">{r.name || "Petición de máquina"}</span>
+              <span className="text-xs text-muted-foreground">
+                {r.gpuCount}× {r.gpuTypeIds.join(" → ")}
+                {r.purpose === "benchmark" ? " · para un benchmark" : ""}
+              </span>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {r.status === "waiting"
+                ? `Esperando capacidad · ${r.attempts} intentos · caduca ${r.expiresAt ? new Date(r.expiresAt).toLocaleString() : "—"}`
+                : r.status === "expired" ? "Caducó sin máquina libre" : `Falló: ${r.lastError ?? ""}`}
+              {r.status === "waiting" && r.lastError ? ` · ${r.lastError}` : ""}
+            </div>
+          </div>
+          {r.status === "waiting" && (
+            <button
+              type="button"
+              className={btnCls}
+              onClick={async () => {
+                try {
+                  await api.federation.cloud.requests.cancel(r.id)
+                  onChanged()
+                } catch (err) {
+                  toast.error(errMsg(err))
+                }
+              }}
+            >
+              <Ban size={12} /> Cancelar
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
   )
 }
