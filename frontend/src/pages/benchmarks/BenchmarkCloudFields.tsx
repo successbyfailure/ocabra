@@ -5,6 +5,15 @@ import type { BenchmarkCloudSpec, CloudGpuType } from "@/types"
 /** Valor del selector de nodo que significa «lanzar un pod propio». */
 export const CLOUD_NODE = "__cloud__"
 
+function offersFor(gpu: CloudGpuType, cloud: BenchmarkCloudSpec["cloud_type"]) {
+  const offers: string[] = []
+  if (cloud !== "SECURE" && gpu.community && gpu.price_community != null)
+    offers.push(`${cloud === "BOTH" ? "Community " : ""}${gpu.price_community.toFixed(2)} $/h`)
+  if (cloud !== "COMMUNITY" && gpu.secure && gpu.price_secure != null)
+    offers.push(`${cloud === "BOTH" ? "Secure " : ""}${gpu.price_secure.toFixed(2)} $/h`)
+  return offers
+}
+
 export const DEFAULT_CLOUD_SPEC: BenchmarkCloudSpec = {
   gpu_type_ids: [],
   gpu_count: 1,
@@ -28,32 +37,34 @@ export function BenchmarkCloudFields({
 }) {
   const [gpus, setGpus] = useState<CloudGpuType[] | null>(null)
   const [backends, setBackends] = useState<string[]>([])
-  const [defaultCloud, setDefaultCloud] = useState<"COMMUNITY" | "SECURE">("COMMUNITY")
+  const [minVram, setMinVram] = useState("")
+  const [defaultCloud, setDefaultCloud] = useState<"COMMUNITY" | "SECURE" | null>(null)
 
   useEffect(() => {
     api.federation.cloud.gpuTypes().then(setGpus).catch(() => setGpus([]))
     api.federation.cloud.getRunpod()
       .then((info) => setDefaultCloud(info.settings.cloud_type))
-      .catch(() => undefined)
+      .catch(() => setDefaultCloud("COMMUNITY"))
     api.backends.list()
       .then((items) => setBackends(items.map((item) => item.backendType).sort()))
       .catch(() => setBackends([]))
   }, [])
 
   // Solo lo que RunPod ofrece ahora en esa nube (precio y stock), como al lanzar un nodo.
-  const cloud = value.volume_id || value.privacy_mode === "zero_data" ? "SECURE" : value.cloud_type ?? defaultCloud
+  const secureOnly = Boolean(value.volume_id) || value.privacy_mode === "zero_data"
+  const cloud = secureOnly ? "SECURE" : value.cloud_type ?? defaultCloud
   const offered = useMemo(
     () =>
       (gpus ?? []).filter((gpu) =>
-        (cloud === "COMMUNITY" ? gpu.community : gpu.secure) &&
-        (cloud === "COMMUNITY" ? gpu.price_community : gpu.price_secure) != null &&
+        offersFor(gpu, cloud).length > 0 &&
+        (minVram === "" || (gpu.memory_gb != null && gpu.memory_gb > Number(minVram))) &&
         gpu.availability !== "NONE",
       ),
-    [gpus, cloud],
+    [gpus, cloud, minVram],
   )
   // Al cambiar de nube se caen las elegidas que esa nube no ofrece.
   useEffect(() => {
-    if (gpus === null) return
+    if (gpus === null || cloud === null) return
     const ids = new Set(offered.map((gpu) => gpu.id))
     const kept = value.gpu_type_ids.filter((id) => ids.has(id))
     if (kept.length !== value.gpu_type_ids.length) onChange({ ...value, gpu_type_ids: kept })
@@ -72,19 +83,25 @@ export function BenchmarkCloudFields({
       <div>
         <span className="font-medium">GPUs aceptables</span>
         <span className="ml-1 text-xs text-muted-foreground">(por orden: se prueba la primera y luego las demás)</span>
+        <label className="mt-2 flex items-center gap-2 text-xs">
+          VRAM por GPU mayor que (GB)
+          <input type="number" min="0" step="any" placeholder="Sin filtro" value={minVram}
+            onChange={(e) => setMinVram(e.target.value)}
+            className="w-24 rounded-md border border-border bg-background px-2 py-1" />
+        </label>
         <div className="mt-1 flex max-h-32 flex-wrap gap-1 overflow-y-auto">
-          {gpus === null ? <span className="text-xs text-muted-foreground">Cargando…</span> : offered.length === 0 ? <span className="text-xs text-muted-foreground">RunPod no ofrece ahora mismo ninguna GPU en {cloud === "COMMUNITY" ? "Community" : "Secure"} Cloud.</span> : offered.map((gpu) => {
-            const price = cloud === "COMMUNITY" ? gpu.price_community : gpu.price_secure
+          {gpus === null || cloud === null ? <span className="text-xs text-muted-foreground">Cargando…</span> : offered.length === 0 ? <span className="text-xs text-muted-foreground">Ninguna GPU disponible cumple los filtros.</span> : offered.map((gpu) => {
+            const prices = offersFor(gpu, cloud).join(" / ")
             const position = value.gpu_type_ids.indexOf(gpu.id)
             return (
               <button
                 key={gpu.id}
                 type="button"
                 onClick={() => set({ gpu_type_ids: toggle(value.gpu_type_ids, gpu.id) })}
-                title={`Disponibilidad ahora: ${gpu.availability}${gpu.memory_gb ? ` · ${gpu.memory_gb} GB` : ""}${price != null ? ` · ${price.toFixed(2)} $/h` : ""}`}
+                title={`Disponibilidad ahora: ${gpu.availability} · ${prices}`}
                 className={`rounded-full border px-2 py-0.5 text-xs ${position >= 0 ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}
               >
-                {position >= 0 ? `${position + 1}. ` : ""}{gpu.name}{gpu.memory_gb ? ` · ${gpu.memory_gb} GB` : ""}{price != null ? ` · ${price.toFixed(2)} $/h` : ""}
+                {position >= 0 ? `${position + 1}. ` : ""}{gpu.name}{gpu.memory_gb ? ` · ${gpu.memory_gb} GB` : ""} · {prices}
               </button>
             )
           })}
@@ -95,10 +112,11 @@ export function BenchmarkCloudFields({
           <input type="number" min={1} max={8} value={value.gpu_count} onChange={(e) => set({ gpu_count: Math.max(1, Math.min(8, Number(e.target.value) || 1)) })} className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1" />
         </label>
         <label className="text-xs">Nube
-          <select value={value.cloud_type ?? ""} onChange={(e) => set({ cloud_type: (e.target.value || null) as BenchmarkCloudSpec["cloud_type"] })} className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1">
+          <select disabled={secureOnly} value={secureOnly ? "SECURE" : value.cloud_type ?? ""} onChange={(e) => set({ cloud_type: (e.target.value || null) as BenchmarkCloudSpec["cloud_type"] })} className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1">
             <option value="">La de los ajustes ({defaultCloud === "COMMUNITY" ? "Community" : "Secure"})</option>
             <option value="COMMUNITY">Community</option>
             <option value="SECURE">Secure</option>
+            <option value="BOTH">Community y Secure</option>
           </select>
         </label>
         <label className="text-xs">Esperar máquina (h)

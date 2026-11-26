@@ -16,6 +16,16 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.143.0 — Selección de GPU para benchmarks en pod
+
+Las ejecuciones y planes de benchmark aceptan `cloud.cloud_type: "BOTH"`.
+Para cada GPU elegida, por orden de preferencia, se prueba Community y luego
+Secure si hay oferta. En modo `zero_data` o con volumen de red solo se usa Secure.
+El selector también permite limitar las tarjetas a las que superan un umbral
+de VRAM por GPU.
+
+---
+
 ## 0.142.0 — Benchmarks multimodelo en pod
 
 Los pods propios preparan hasta dos modelos en paralelo y empiezan a medir el

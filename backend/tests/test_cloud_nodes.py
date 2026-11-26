@@ -838,6 +838,38 @@ async def test_la_peticion_prueba_las_gpu_por_orden(hub):
 
 
 @requires_db
+async def test_ambas_nubes_respeta_gpu_preferida_y_solo_crea_un_pod(hub, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from ocabra.core.cloud.manager import CloudCapacityError
+
+    fm, fake = hub
+    catalog = [
+        {"id": id_, "community": True, "secure": True, "price_community": 1, "price_secure": 2}
+        for id_ in ("4090", "3090")
+    ]
+    monkeypatch.setattr(fake, "gpu_types", AsyncMock(return_value=catalog))
+    create = fake.create_pod
+    attempts = []
+
+    async def try_pod(spec):
+        attempts.append((spec.gpu_type_id, spec.cloud_type))
+        if spec.cloud_type == "COMMUNITY":
+            raise CloudCapacityError("agotada")
+        return await create(spec)
+
+    monkeypatch.setattr(fake, "create_pod", try_pod)
+    req = await fm.cloud.requests.create(
+        gpu_type_ids=["4090", "3090"],
+        launch={"cloud_type": "BOTH"},
+        wait_minutes=60,
+        retry_interval_s=120,
+    )
+    assert req["status"] == "launched" and len(fake.created) == 1
+    assert attempts == [("4090", "COMMUNITY"), ("4090", "SECURE")]
+
+
+@requires_db
 async def test_sin_capacidad_espera_y_reintenta_cuando_toca(hub):
     fm, fake = hub
     fake.no_capacity = {"4090"}

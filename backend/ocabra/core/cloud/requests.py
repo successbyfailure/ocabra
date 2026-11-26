@@ -181,6 +181,25 @@ class LaunchRequestQueue:
         for request_id in due:
             await self._attempt(request_id)
 
+    async def _launch_gpu(self, gpu: str, launch: dict[str, Any]) -> dict[str, Any]:
+        if launch.get("cloud_type") != "BOTH":
+            return await self._cloud.launch(**launch, gpu_type_id=gpu)
+        if launch.get("volume_id") or launch.get("privacy_mode") == "zero_data":
+            return await self._cloud.launch(**{**launch, "cloud_type": "SECURE"}, gpu_type_id=gpu)
+
+        catalog = await self._cloud.gpu_types()
+        offer = next((item for item in catalog if item["id"] == gpu), {})
+        for market in ("community", "secure"):
+            if not offer.get(market) or offer.get(f"price_{market}") is None:
+                continue
+            try:
+                return await self._cloud.launch(
+                    **{**launch, "cloud_type": market.upper()}, gpu_type_id=gpu
+                )
+            except CloudCapacityError:
+                continue
+        raise CloudCapacityError(f"Sin capacidad en Community ni Secure para {gpu}")
+
     async def _attempt(self, request_id: uuid.UUID) -> None:
         """Prueba cada GPU aceptable, por orden, hasta lanzar o agotarlas."""
         from ocabra.db.cloud import CloudLaunchRequest
@@ -201,7 +220,7 @@ class LaunchRequestQueue:
         fatal: str | None = None
         for gpu in gpus:
             try:
-                result = await self._cloud.launch(**launch, gpu_type_id=gpu)
+                result = await self._launch_gpu(gpu, launch)
                 launched_gpu = gpu
                 break
             except CloudCapacityError as exc:

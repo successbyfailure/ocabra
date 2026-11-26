@@ -557,6 +557,11 @@ El orden de `models` refleja la ejecución efectiva. El cursor conserva el prefi
 procesado y los resultados siguen identificados por perfil. Las suites de una
 batería comparten las descargas y el pod.
 
+En la especificación del benchmark, `cloud.cloud_type` admite `null` (ajustes
+del proveedor), `COMMUNITY`, `SECURE` o `BOTH`. Con `BOTH` se conserva el orden
+de `gpu_type_ids`: para cada tarjeta se prueba primero Community y después Secure
+si ofrecen esa GPU. Los volúmenes de red y `zero_data` requieren Secure.
+
 Cada `benchmark_attempt` conserva `environment`: versión de oCabra, Python,
 scorer cuando existe, commit real del dataset, revisión solicitada, perfil,
 backend y versión instalada del módulo (o commit exacto de fuentes para

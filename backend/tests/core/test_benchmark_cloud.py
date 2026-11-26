@@ -22,6 +22,10 @@ def test_la_api_valida_el_pod_propio() -> None:
     run = BenchmarkRunCreate(app="ifeval", suite="quick", models=["m"], cloud=SPEC)
     assert run.cloud is not None and run.cloud.gpu_type_ids == ["4090", "3090"]
     assert run.cloud.terminate_after is True and run.cloud.wait_minutes == 360
+    both = BenchmarkRunCreate(
+        app="ifeval", suite="quick", models=["m"], cloud={**SPEC, "cloud_type": "BOTH"}
+    )
+    assert both.cloud.cloud_type == "BOTH"
     with pytest.raises(ValidationError):
         BenchmarkRunCreate(app="ifeval", suite="quick", models=["m"], cloud=SPEC, node="Mapache")
     with pytest.raises(ValidationError):

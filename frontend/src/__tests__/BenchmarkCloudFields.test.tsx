@@ -11,6 +11,7 @@ vi.mock("@/api/client", () => ({
           { id: "4090", name: "RTX 4090", memory_gb: 24, availability: "HIGH", community: true, secure: true, price_community: 0.34, price_secure: 0.69 },
           { id: "3090", name: "RTX 3090", memory_gb: 24, availability: "LOW", community: true, secure: false, price_community: 0.22, price_secure: null },
           { id: "A100", name: "A100", memory_gb: 80, availability: "NONE", community: true, secure: true, price_community: 1.2, price_secure: 1.6 },
+          { id: "L40", name: "L40", memory_gb: 48, availability: "HIGH", community: false, secure: true, price_community: null, price_secure: 0.75 },
         ]),
         getRunpod: vi.fn().mockResolvedValue({ settings: { cloud_type: "COMMUNITY" } }),
       },
@@ -31,6 +32,20 @@ function Harness() {
 }
 
 describe("BenchmarkCloudFields", () => {
+  it("combina ambas nubes y excluye del pedido las GPU que no superan el umbral", async () => {
+    render(<Harness />)
+    fireEvent.click(await screen.findByText(/RTX 3090/))
+    fireEvent.change(screen.getByLabelText("Nube"), { target: { value: "BOTH" } })
+    expect(screen.getByText(/RTX 4090.*Community 0.34.*Secure 0.69/)).toBeTruthy()
+    fireEvent.click(screen.getByText(/L40.*Secure/))
+    expect(latest.cloud_type).toBe("BOTH")
+    expect(latest.gpu_type_ids).toEqual(["3090", "L40"])
+    fireEvent.change(screen.getByLabelText(/VRAM por GPU/), { target: { value: "24" } })
+    expect(screen.queryByText(/RTX 3090/)).toBeNull()
+    expect(screen.queryByText(/RTX 4090/)).toBeNull()
+    expect(latest.gpu_type_ids).toEqual(["L40"])
+  })
+
   it("solo ofrece lo que RunPod tiene ahora y respeta el orden de preferencia", async () => {
     render(<Harness />)
     await waitFor(() => expect(screen.getByText(/RTX 3090/)).toBeTruthy())

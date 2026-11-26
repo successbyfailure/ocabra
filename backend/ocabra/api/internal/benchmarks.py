@@ -43,7 +43,7 @@ class BenchmarkCloudSpec(BaseModel):
         ..., min_length=1, max_length=8, description="GPUs aceptables, por orden de preferencia"
     )
     gpu_count: int = Field(default=1, ge=1, le=8)
-    cloud_type: Literal["COMMUNITY", "SECURE"] | None = None
+    cloud_type: Literal["COMMUNITY", "SECURE", "BOTH"] | None = None
     backends: list[str] = Field(default_factory=list, max_length=20)
     recipes: list[str] = Field(default_factory=list, max_length=10)
     volume_id: str | None = Field(default=None, max_length=64)

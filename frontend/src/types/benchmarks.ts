@@ -254,7 +254,7 @@ export interface BenchmarkCloudSpec {
   /** GPUs aceptables, por orden de preferencia. */
   gpu_type_ids: string[];
   gpu_count: number;
-  cloud_type: "COMMUNITY" | "SECURE" | null;
+  cloud_type: "COMMUNITY" | "SECURE" | "BOTH" | null;
   backends: string[];
   recipes: string[];
   volume_id?: string | null;
