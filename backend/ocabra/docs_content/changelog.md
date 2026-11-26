@@ -16,6 +16,18 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.136.0 — 2026-11-26
+
+Sin cambios en la API de inferencia. La sección de administración Benchmarks
+gana la suite `fulcrum/orquestacion`: mide si un modelo sabe coordinar
+varias sesiones de agentes durante muchos turnos (despacho, textos fijos,
+máximo simultáneo, orden de fases, cola, honestidad), y entra en el ranking
+global de modelos.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.135.2 — 2026-11-24
 
 ### Arreglos
