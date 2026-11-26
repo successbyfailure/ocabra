@@ -206,3 +206,39 @@ async def test_los_detalles_del_nodo_llevan_cuda_y_version():
     assert details["cuda"] == {"ok": True, "driver_cuda": "13.0", "devices": 1}
     assert details["ocabraAtEnd"] == "0.138.0"
     assert details["cloud"] is None  # no es un pod (peer_id no es un UUID de cloud)
+
+
+@pytest.mark.asyncio
+async def test_las_consultas_al_nodo_respetan_el_tope_del_endpoint():
+    """/ocabra/stats/recent admite limit ≤ 200: pedir más da 422 y deja el intento sin datos."""
+    from ocabra.api.internal.stats import router as stats_router
+
+    route = next(item for item in stats_router.routes if item.path.endswith("/stats/recent"))
+    limit = next(param for param in route.dependant.query_params if param.name == "limit")
+    cap = next(meta.le for meta in limit.field_info.metadata if hasattr(meta, "le"))
+    manager = _manager_with_peer({"requests": []})
+    await manager._node_served("Mapache", "m", datetime.now(UTC), datetime.now(UTC), {})
+    await manager._node_local_requests("Mapache", datetime.now(UTC), datetime.now(UTC))
+    for call in manager._app.state.federation_manager.proxy_raw.await_args_list:
+        path = call.args[2]
+        if "stats/recent" in path:
+            assert int(path.split("limit=")[1]) <= cap
+
+
+@pytest.mark.asyncio
+async def test_un_nodo_de_una_sola_gpu_sin_indices_usa_esa_gpu():
+    start = datetime(2026, 11, 26, 10, 0, tzinfo=UTC)
+    rows = [
+        {"modelId": "m", "requestedModel": "m", "startedAt": (start + timedelta(seconds=5)).isoformat(),
+         "durationMs": 100, "inboundFrom": "MakeSpace", "backendType": "llamacpp_mks",
+         "runtimeTelemetry": {"prefill_ms": 30}},
+    ]  # fmt: skip
+    manager = _manager_with_peer({"requests": rows})
+    one = {0: SimpleNamespace(name="GTX 1660", total_vram_mb=6144)}
+    served = await manager._node_served("Mapache", "m", start, start + timedelta(minutes=1), one)
+    assert served["gpus"] == [
+        {"index": 0, "name": "GTX 1660", "totalVramMb": 6144, "inferred": True}
+    ]
+    two = {0: one[0], 1: SimpleNamespace(name="RTX 3090", total_vram_mb=24576)}
+    served = await manager._node_served("Mapache", "m", start, start + timedelta(minutes=1), two)
+    assert served["gpus"] == []

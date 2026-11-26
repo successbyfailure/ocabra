@@ -827,7 +827,7 @@ function ExecutionEnvironment({ attempt }: { attempt?: BenchmarkAttempt }) {
           ...(model.effectiveContexts ?? []).map((context) => `Contexto ${context.toLocaleString()}`),
         ]} />
         <EnvironmentBlock icon={<Server size={13} />} title="Hardware" lines={[
-          ...gpus.map((gpu) => `GPU ${gpu.index}: ${gpu.name ?? "desconocida"}${gpu.totalVramMb ? ` · ${(gpu.totalVramMb / 1024).toFixed(0)} GB` : ""}`),
+          ...gpus.map((gpu) => `GPU ${gpu.index}: ${gpu.name ?? "desconocida"}${gpu.totalVramMb ? ` · ${(gpu.totalVramMb / 1024).toFixed(0)} GB` : ""}${"inferred" in gpu && gpu.inferred ? " (deducida: el nodo tiene una sola)" : ""}`),
           ...(hardware.nodes ?? []).map((node) => `Nodo ${node}`),
           environment.node?.ocabra ? `oCabra del nodo ${environment.node.ocabra}${environment.node.ocabraAtEnd && environment.node.ocabraAtEnd !== environment.node.ocabra ? ` → ${environment.node.ocabraAtEnd} al terminar` : ""}` : null,
           environment.node?.cuda?.driver_cuda ? `CUDA del driver ${environment.node.cuda.driver_cuda}${environment.node.cuda.ok === false ? " (con errores)" : ""}` : null,

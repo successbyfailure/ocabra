@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.139.1 — 2026-11-26
+
+### Arreglos
+
+- **Benchmarks en nodos remotos: el backend y la GPU del nodo no llegaban.**
+  Las estadísticas del nodo se pedían con un límite que el endpoint no admite
+  (500 > 200) y se quedaban sin leer, así que el intento volvía a usar las del
+  hub. Ahora se leen; en nodos antiguos que no publican el índice de GPU y
+  tienen una sola, se toma esa y se marca como deducida.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.139.0 — 2026-11-26
 
 ### Nuevo (administración)

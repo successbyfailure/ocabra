@@ -63,7 +63,7 @@ export interface BenchmarkAttempt {
       effectiveContexts?: number[];
     };
     hardware?: {
-      gpus?: Array<{ index: number; name?: string | null; totalVramMb?: number | null }>;
+      gpus?: Array<{ index: number; name?: string | null; totalVramMb?: number | null; inferred?: boolean }>;
       nodes?: string[];
       /** Nodo remoto: si se pudo leer su tráfico propio durante la medida. */
       nodeTrafficVerified?: boolean;

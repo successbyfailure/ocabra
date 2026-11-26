@@ -1327,7 +1327,7 @@ class BenchmarkManager:
         Se leen de las estadísticas del propio nodo (las que le llegaron por la
         federación desde aquí), que son las únicas que conocen su worker.
         """
-        payload = await self._peer_json(self._peer(node), "/ocabra/stats/recent?limit=500")
+        payload = await self._peer_json(self._peer(node), "/ocabra/stats/recent?limit=200")
         rows = payload.get("requests") if isinstance(payload, dict) else None
         backends: set[str] = set()
         indices: set[int] = set()
@@ -1353,11 +1353,17 @@ class BenchmarkManager:
             for index in telemetry.get("gpu_indices") or []:
                 if isinstance(index, int):
                     indices.add(index)
+        inferred = False
+        if count and not indices and len(gpu_states) == 1:
+            # Nodos antiguos no publican los índices; con una sola GPU no hay duda.
+            indices = set(gpu_states)
+            inferred = True
         gpus = [
             {
                 "index": index,
                 "name": getattr(gpu_states.get(index), "name", None),
                 "totalVramMb": getattr(gpu_states.get(index), "total_vram_mb", None),
+                **({"inferred": True} if inferred else {}),
             }
             for index in sorted(indices)
         ]
