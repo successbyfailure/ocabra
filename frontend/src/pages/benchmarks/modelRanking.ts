@@ -184,8 +184,13 @@ function observationQuality(run: BenchmarkRun, profile: string, dimension: Ranki
     })
     return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null
   }
+  // BFCL: la métrica principal que declara el runner. En simple_python,
+  // non_live_accuracy promedia categorías que no se midieron (sale ~0,08).
+  const declared = typeof result.primary_metric === "string" ? [result.primary_metric] : []
   const keys = dimension === "bfcl"
-    ? ["non_live_accuracy", "simple_accuracy", "multiple_accuracy"]
+    ? run.suite === "simple_python"
+      ? [...declared, "simple_accuracy"]
+      : [...declared, "non_live_accuracy", "simple_accuracy", "multiple_accuracy"]
     : dimension === "fulcrum"
       ? ["capability_rate", "perfect_rate"]
       : ["strict_prompt_accuracy", "strict_instruction_accuracy", "loose_prompt_accuracy"]

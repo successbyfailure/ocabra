@@ -184,3 +184,14 @@ describe("hardware en la nube", () => {
     expect(options.hardware).toEqual(["RTX 4090 · Community Cloud", "RTX 4090 · Secure Cloud"])
   })
 })
+
+
+describe("BFCL simple_python", () => {
+  it("puntúa por la precisión simple, no por la media non-live", () => {
+    const simple = run("bfcl", "simple_python", "g", 0.93)
+    simple.result.g = { benchmark: "bfcl_v4", model: "g", status: "completed", primary_metric: "simple_accuracy",
+      metrics: { simple_accuracy: 0.93, non_live_accuracy: 0.077, latency_s_p50: 2 } }
+    const ranking = buildModelRanking([simple, run("ifeval", "full", "g", 0.9)], balanced)
+    expect(ranking[0].sources.find((source) => source.dimension === "bfcl")?.quality).toBeCloseTo(93)
+  })
+})

@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.141.1 — 2026-11-26
+
+### Arreglos
+
+- **El ranking puntuaba BFCL simple_python con la media non-live.** Esa media
+  incluye categorías que la suite no mide y salía ~0,08 aunque el modelo
+  acertase el 93 %. Ahora se usa la métrica principal que declara el runner
+  (`primary_metric`, la precisión simple), también para ejecuciones antiguas, y
+  el runner deja de guardar esa media en `simple_python`.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.141.0 — 2026-11-26
 
 ### Nuevo (administración de benchmarks)

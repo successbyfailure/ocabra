@@ -223,6 +223,10 @@ def main() -> int:
         if (number := _number(row.get(column))) is not None
     }
     primary = "simple_accuracy" if categories == ["simple_python"] else "non_live_accuracy"
+    if categories == ["simple_python"]:
+        # La media non-live de BFCL incluye categorías que esta suite no mide:
+        # con solo simple_python sale ~0,08 y engaña a quien la mire.
+        metrics.pop("non_live_accuracy", None)
     output = project / f"ocabra_results_{_safe_model(model)}"
     output.mkdir(parents=True, exist_ok=True)
     result = {
