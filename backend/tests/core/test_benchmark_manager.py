@@ -319,7 +319,8 @@ def test_run_payload_exposes_phase_and_reproducible_attempt_environment() -> Non
 
 
 def test_run_payload_reads_bounded_progress_from_current_workspace(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     now = datetime.now(UTC)
     workspace = tmp_path / "attempt-1"
@@ -329,16 +330,41 @@ def test_run_payload_reads_bounded_progress_from_current_workspace(
     )
     monkeypatch.setattr("ocabra.api.internal.benchmarks.settings.benchmark_dir", str(tmp_path))
     attempt = SimpleNamespace(
-        id=uuid.uuid4(), model="model", attempt_number=1, status="running",
-        workspace_path=str(workspace), environment={}, return_code=None,
-        external_requests=[], error=None, started_at=now, finished_at=None, result=None,
+        id=uuid.uuid4(),
+        model="model",
+        attempt_number=1,
+        status="running",
+        workspace_path=str(workspace),
+        environment={},
+        return_code=None,
+        external_requests=[],
+        error=None,
+        started_at=now,
+        finished_at=None,
+        result=None,
     )
     run = SimpleNamespace(
-        id=uuid.uuid4(), app="ifeval", suite="quick", revision="abc", models=["model"],
-        suite_args=[], status="running", phase="running", auto_pause=True,
-        schedule_id=None, is_baseline=False, pause_reason=None, current_model_index=0,
-        current_model="model", result={}, contaminated_attempts=0, error=None,
-        external_activity_at=None, created_at=now, started_at=now, finished_at=None,
+        id=uuid.uuid4(),
+        app="ifeval",
+        suite="quick",
+        revision="abc",
+        models=["model"],
+        suite_args=[],
+        status="running",
+        phase="running",
+        auto_pause=True,
+        schedule_id=None,
+        is_baseline=False,
+        pause_reason=None,
+        current_model_index=0,
+        current_model="model",
+        result={},
+        contaminated_attempts=0,
+        error=None,
+        external_activity_at=None,
+        created_at=now,
+        started_at=now,
+        finished_at=None,
         attempts=[attempt],
     )
 
@@ -536,3 +562,82 @@ async def test_contaminated_attempt_requeues_same_model_without_accepting_result
         assert persisted.contaminated_attempts == 1
         await session.delete(persisted)
         await session.commit()
+
+
+async def _run_with(tmp_path: Path, models: list[str], index: int, result: dict) -> BenchmarkRun:
+    run = BenchmarkRun(
+        app="fulcrum",
+        suite="orquestacion",
+        revision="abc",
+        models=models,
+        suite_args=[],
+        status="running",
+        phase="finalizing",
+        current_model_index=index,
+        current_model=models[index],
+        workspace_path=str(tmp_path),
+        result=result,
+    )
+    async with AsyncSessionLocal() as session:
+        session.add(run)
+        await session.commit()
+    return run
+
+
+async def _persisted(run_id) -> BenchmarkRun:
+    async with AsyncSessionLocal() as session:
+        persisted = await session.get(BenchmarkRun, run_id)
+        assert persisted is not None
+        await session.delete(persisted)
+        await session.commit()
+        return persisted
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_un_modelo_que_falla_no_tumba_a_los_siguientes(tmp_path: Path) -> None:
+    # flint:40b salía con código 1 y la ejecución entera se daba por fallida:
+    # los tres modelos que venían detrás nunca se medían.
+    run = await _run_with(tmp_path, ["a", "flint", "c"], 1, {"a": {"score": 1}})
+    manager = BenchmarkManager(SimpleNamespace(state=SimpleNamespace()))
+    await manager._model_failed(run.id, "flint", "El runner terminó con código 1")
+
+    persisted = await _persisted(run.id)
+    assert persisted.status == "queued"
+    assert persisted.current_model_index == 2
+    assert persisted.error == "flint: El runner terminó con código 1"
+    assert persisted.result == {"a": {"score": 1}}
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_si_falla_el_ultimo_con_resultados_previos_la_ejecucion_se_completa(
+    tmp_path: Path,
+) -> None:
+    run = await _run_with(tmp_path, ["a", "b"], 1, {"a": {"score": 1}})
+    manager = BenchmarkManager(SimpleNamespace(state=SimpleNamespace()))
+    await manager._model_failed(run.id, "b", "boom")
+
+    persisted = await _persisted(run.id)
+    assert persisted.status == "completed"
+    assert persisted.finished_at is not None
+    assert persisted.error == "b: boom"
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_si_no_sale_ninguno_falla_y_reintentar_retoma_el_ultimo(tmp_path: Path) -> None:
+    run = await _run_with(tmp_path, ["a", "b"], 0, {})
+    manager = BenchmarkManager(SimpleNamespace(state=SimpleNamespace()))
+    await manager._model_failed(run.id, "a", "primero")
+    async with AsyncSessionLocal() as session:
+        mid = await session.get(BenchmarkRun, run.id)
+        assert mid is not None and mid.status == "queued" and mid.current_model_index == 1
+        mid.status = "running"
+        await session.commit()
+    await manager._model_failed(run.id, "b", "segundo")
+
+    persisted = await _persisted(run.id)
+    assert persisted.status == "failed"
+    assert persisted.current_model_index == 1
+    assert "a: primero" in (persisted.error or "") and "segundo" in (persisted.error or "")

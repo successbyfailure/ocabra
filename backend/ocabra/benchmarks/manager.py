@@ -600,7 +600,7 @@ class BenchmarkManager:
                 f"{', '.join(served_elsewhere)}: el resultado no corresponde a ese nodo"
             )
             await self._finish_failed_attempt(attempt.id, outcome.return_code, message, environment)
-            await self._fail_run(run_id, message)
+            await self._model_failed(run_id, model, message)
             return
         result_path = self._changed_result(dataset_root, suite.result_glob, before)
         result = await asyncio.to_thread(self._read_result, result_path) if result_path else None
@@ -611,7 +611,7 @@ class BenchmarkManager:
                 else f"No generó un resultado que coincida con {suite.result_glob}"
             )
             await self._finish_failed_attempt(attempt.id, outcome.return_code, message, environment)
-            await self._fail_run(run_id, message)
+            await self._model_failed(run_id, model, message)
             return
         if external:
             await self._finish_contaminated_attempt(attempt.id, result, external, environment)
@@ -1469,6 +1469,36 @@ class BenchmarkManager:
                 run.phase = "queued"
             await session.commit()
         self.notify()
+
+    async def _model_failed(self, run_id: uuid.UUID, model: str, error: str) -> None:
+        """Un modelo que falla no tumba a los que le siguen en la misma ejecución.
+
+        Se anota en ``run.error`` y se pasa al siguiente. Solo falla la ejecución
+        entera si era el último y ninguno ha dado resultado: así «Reintentar»
+        sigue retomando ese modelo con su checkpoint.
+        """
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            last = run.current_model_index + 1 >= len(run.models)
+            if last and not run.result:
+                failed_before = run.error
+            else:
+                note = f"{model}: {error}"
+                run.error = f"{run.error}\n{note}"[:4000] if run.error else note[:4000]
+                run.current_model_index += 1
+                run.current_model = None
+                if last:
+                    run.status = "completed"
+                    run.phase = "completed"
+                    run.finished_at = datetime.now(UTC)
+                else:
+                    run.status = "queued"
+                    run.phase = "queued"
+                await session.commit()
+                self.notify()
+                return
+        message = f"{failed_before}\n{model}: {error}" if failed_before else error
+        await self._fail_run(run_id, message)
 
     async def _retry_contaminated(self, run_id: uuid.UUID) -> None:
         """Repeat the same model immediately when automatic pausing is disabled."""
