@@ -69,7 +69,33 @@ def note_federation(**fields: Any) -> None:
 
 
 def note_federation_fallback(peer: Any = None, detail: Any = None) -> None:
-    """A peer was chosen but failed: the request is being served here instead."""
+    """A peer was chosen but failed: the request is being served here instead.
+
+    Not for a request pinned by URL (``/_node/<nodo>/``, the benchmarks): served
+    here it would measure another machine. It gets the peer's own error, or a
+    503 with ``Retry-After`` when the peer did not answer (a tunnel
+    reconnecting), and the client retries.
+    """
+    if (federation_request_info.get() or {}).get("force_strict"):
+        from fastapi import HTTPException
+
+        name = getattr(peer, "name", None) or "?"
+        note_federation(forced_unavailable=str(name)[:64])
+        status = detail if isinstance(detail, int) and 400 <= detail < 600 else 503
+        raise HTTPException(
+            status_code=status,
+            detail={
+                "error": {
+                    "message": (
+                        f"The node '{name}' this request is pinned to failed "
+                        f"({str(detail)[:200]}); it is not served elsewhere"
+                    ),
+                    "type": "service_unavailable" if status == 503 else "upstream_error",
+                    "code": "pinned_node_failed",
+                }
+            },
+            headers={"Retry-After": "15"} if status == 503 else None,
+        )
     note_federation(
         fallback=True,
         fallback_peer=getattr(peer, "name", None),

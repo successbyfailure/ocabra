@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.7 — 2026-11-27
+
+### Arreglos
+
+- **`/_node/<nodo>/` se servía aquí si el nodo fallaba a mitad.** Con el nodo
+  ya conectado, si fallaba al atender la petición (un túnel reconectándose),
+  el hub la servía en local como «respaldo». Para un benchmark eso es medir
+  otra máquina. Ahora recibe el error del nodo tal cual, o un 503 con
+  `Retry-After: 15` y código `pinned_node_failed` si el nodo no contestó.
+  Con `X-Ocabra-Node` y con el reparto normal, el respaldo local sigue como
+  antes.
+
+**Acción:** si llamas por `/_node/<nodo>/`, reintenta los 503 respetando
+`Retry-After`.
+
+---
+
 ## 0.145.6 — 2026-11-27
 
 ### Arreglos

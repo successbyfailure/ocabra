@@ -206,3 +206,23 @@ async def test_federation_stats_both_ways_with_cost():
             await s.execute(sa.delete(RequestStat).where(RequestStat.model_id.like(f"{tag}%")))
             await s.execute(sa.delete(CloudNode).where(CloudNode.name.like(f"{tag}%")))
             await s.commit()
+
+
+async def test_lo_fijado_por_url_nunca_se_sirve_aqui_si_el_nodo_falla(_ctx):
+    from fastapi import HTTPException
+
+    peer = SimpleNamespace(name="ocabra-bench-ifeval-df3a7d")
+    _ctx.update(force_node=peer.name, force_strict=True)
+    # Túnel reconectando: 503 para que el runner reintente.
+    with pytest.raises(HTTPException) as exc:
+        note_federation_fallback(peer, ConnectionError("federation tunnel closed"))
+    assert exc.value.status_code == 503 and exc.value.headers["Retry-After"] == "15"
+    # El nodo contestó con un error: se devuelve ese, no se sirve aquí.
+    with pytest.raises(HTTPException) as exc:
+        note_federation_fallback(peer, 409)
+    assert exc.value.status_code == 409
+    assert _ctx.get("fallback") is None
+    # Sin fijar por URL (X-Ocabra-Node o reparto normal): como siempre.
+    _ctx.clear()
+    note_federation_fallback(peer, 502)
+    assert _ctx["fallback"] is True
