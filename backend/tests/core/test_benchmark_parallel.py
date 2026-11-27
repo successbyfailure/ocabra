@@ -364,3 +364,74 @@ def test_el_panel_remoto_puede_leer_la_cpu_del_nodo() -> None:
     assert path_allowed("/ocabra/host/stats", "full", "GET")
     assert not path_allowed("/ocabra/host/stats", "full", "POST")
     assert not path_allowed("/ocabra/host/stats", "inference", "GET")
+
+
+def test_las_peticiones_forzadas_a_otro_nodo_son_de_otra_ejecucion() -> None:
+    from ocabra.benchmarks.manager import belongs_to_run
+
+    def row(route, node):
+        return SimpleNamespace(federation_route=route, remote_node_name=node)
+
+    # IFEval en el pod de BFCL mientras Fulcrum mide el mismo modelo en el suyo.
+    assert belongs_to_run(row("forced", "ocabra-bench-bfcl-df2426"), "ocabra-bench-bfcl-df2426")
+    assert not belongs_to_run(
+        row("forced", "ocabra-bench-fulcrum-af0679"), "ocabra-bench-bfcl-df2426"
+    )
+    # Servida en otro sitio sin forzar: cuenta (es lo que hay que detectar).
+    assert belongs_to_run(row("no_peer_has_model", None), "ocabra-bench-bfcl-df2426")
+    # Una medida local no ve las de los pods.
+    assert not belongs_to_run(row("forced", "Mapache"), None)
+    assert belongs_to_run(row(None, None), None)
+
+
+@pytest.mark.asyncio
+async def test_la_bateria_no_baja_mas_modelos_de_los_que_caben_a_la_vez(monkeypatch) -> None:
+    from ocabra.core.cloud import preload
+
+    started: list[str] = []
+
+    async def drive_item(fm, peer, item, tasks):
+        started.append(item["model_id"])
+        item["status"] = "downloading"
+
+    monkeypatch.setattr(preload, "_drive_item", drive_item)
+    items = [
+        {"model_id": "a", "status": "loaded", "benchmark_prefetch": True},
+        {"model_id": "b", "status": "ready", "benchmark_prefetch": True},
+        {"model_id": "c", "status": "pending", "benchmark_prefetch": True},
+        {"model_id": "d", "status": "pending", "benchmark_prefetch": True},
+    ]
+    out = await preload.drive(None, SimpleNamespace(peer_id="p"), items, {})
+    assert started == ["c"]  # el medido + 2 en disco: d espera
+    # Al borrarse el ya medido entra el siguiente.
+    out[0]["status"] = "removed"
+    started.clear()
+    await preload.drive(None, SimpleNamespace(peer_id="p"), out, {})
+    assert started == ["c", "d"]
+
+
+@pytest.mark.asyncio
+async def test_si_el_disco_se_llena_a_mitad_la_descarga_espera() -> None:
+    import httpx
+
+    from ocabra.core.cloud import preload
+
+    item = {
+        "model_id": "llamacpp_mks/m",
+        "status": "downloading",
+        "benchmark_prefetch": True,
+        "steps": [{"kind": "download", "body": {}}, {"kind": "load"}],
+        "step": 0,
+        "job_id": "j1",
+        "node_model_id": "llamacpp_mks/m",
+    }
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        return httpx.Response(
+            200, json={"status": "failed", "error": "[Errno 28] No space left on device"}
+        )
+
+    await preload._drive_item(
+        SimpleNamespace(proxy_get=proxy_get), SimpleNamespace(peer_id="p"), item, {}
+    )
+    assert item["status"] == "pending" and item["waiting_disk"] is True

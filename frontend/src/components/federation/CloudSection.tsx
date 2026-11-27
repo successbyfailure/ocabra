@@ -680,6 +680,7 @@ function PreloadChip({ item, seconds }: { item: CloudPreloadItem; seconds?: numb
     loaded: `listo${took}`,
     ready: `${item.kind === "backend" ? "instalado" : "descargado"}${took}`,
     error: `error${took}`,
+    removed: "medido y borrado",
   }[item.status]
   const cls = {
     pending: "border-border text-muted-foreground",
@@ -690,10 +691,11 @@ function PreloadChip({ item, seconds }: { item: CloudPreloadItem; seconds?: numb
     loaded: "border-emerald-500/40 text-emerald-600 dark:text-emerald-300",
     ready: "border-emerald-500/30 text-muted-foreground",
     error: "border-red-500/40 text-red-600 dark:text-red-300",
+    removed: "border-border text-muted-foreground line-through",
   }[item.status]
   return (
     <span title={item.error ?? item.phase ?? undefined} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${cls}`}>
-      {item.status !== "pending" && item.status !== "loaded" && item.status !== "ready" && item.status !== "error" && (
+      {item.status !== "pending" && item.status !== "loaded" && item.status !== "ready" && item.status !== "error" && item.status !== "removed" && (
         <Loader2 size={10} className="animate-spin" />
       )}
       <span className="font-mono">

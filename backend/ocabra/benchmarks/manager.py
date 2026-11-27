@@ -176,6 +176,22 @@ def external_active_requests(model_manager, identity: BenchmarkIdentity) -> list
     return external
 
 
+def belongs_to_run(row, node: str | None) -> bool:
+    """Si una petición del benchmark es de la ejecución que mide en *node*.
+
+    Varias ejecuciones miden a la vez en máquinas distintas con la misma
+    identidad de servicio (y a menudo el mismo modelo). Las del runner van
+    forzadas a su nodo (``/_node/<nodo>/`` → ruta ``forced``): una forzada a
+    otro nodo es de otra ejecución. Una que se sirvió en otro sitio sin
+    forzarse sí cuenta: es justo lo que hay que detectar.
+    """
+    route = getattr(row, "federation_route", None)
+    target = (getattr(row, "remote_node_name", None) or "").lower()
+    if route != "forced":
+        return True
+    return bool(node) and target == node.lower()
+
+
 def execution_observations(rows, gpu_states: dict[int, object]) -> dict[str, object]:
     """Summarize persisted benchmark requests into reproducible runtime facts."""
     gpu_indices: set[int] = set()
@@ -856,7 +872,7 @@ class BenchmarkManager:
             await self._finish_failed_attempt(attempt.id, outcome.return_code, message, environment)
             await self._model_failed(run_id, model, message)
             return
-        failed_requests = await self._measured_failures(started_at, finished_at, model)
+        failed_requests = await self._measured_failures(started_at, finished_at, model, node=node)
         if failed_requests is not None:
             await self._finish_failed_attempt(
                 attempt.id, outcome.return_code, failed_requests, environment
@@ -1166,7 +1182,7 @@ class BenchmarkManager:
         return value
 
     async def _measured_failures(
-        self, started_at: datetime, finished_at: datetime, model: str
+        self, started_at: datetime, finished_at: datetime, model: str, *, node: str | None = None
     ) -> str | None:
         """Por qué el resultado no vale si el modelo medido no llegó a responder.
 
@@ -1183,7 +1199,12 @@ class BenchmarkManager:
         async with AsyncSessionLocal() as session:
             rows = (
                 await session.execute(
-                    select(RequestStat.status_code, RequestStat.error).where(
+                    select(
+                        RequestStat.status_code,
+                        RequestStat.error,
+                        RequestStat.federation_route,
+                        RequestStat.remote_node_name,
+                    ).where(
                         RequestStat.user_id == self._identity.user_id,
                         RequestStat.started_at >= started_at,
                         RequestStat.started_at <= finished_at,
@@ -1194,7 +1215,11 @@ class BenchmarkManager:
                     )
                 )
             ).all()
-        counted = [(code, error) for code, error in rows if code not in _TRANSIENT_STATUS]
+        counted = [
+            (row.status_code, row.error)
+            for row in rows
+            if row.status_code not in _TRANSIENT_STATUS and belongs_to_run(row, node)
+        ]
         failed = [(code, error) for code, error in counted if code is not None and code >= 400]
         if not failed or len(failed) * 2 < len(counted):
             return None
@@ -1330,6 +1355,7 @@ class BenchmarkManager:
             row
             for row in rows
             if row.started_at + timedelta(milliseconds=row.duration_ms or 0) >= started_at
+            and belongs_to_run(row, node)
         ]
         auxiliary_nodes: list[str] = []
         if node:
@@ -2150,6 +2176,7 @@ class BenchmarkManager:
             by_id = {item["model_id"]: item for item in items}
             prerequisites = [item for item in items if item.get("kind") == "backend"]
             relevant = []
+            relevant_index: list[int] = []
             skipped = spec.get("skipped") or {}
             for index in range(cursor, len(models)):
                 if models[index] in skipped:
@@ -2158,13 +2185,25 @@ class BenchmarkManager:
                 if item is None:
                     await self._fail_run(run_id, f"Falta la precarga de {models[index]}")
                     return
+                if item["status"] == "removed":
+                    # Ya se borró al acabar sus pruebas (un «Reintentar» tardío).
+                    item = {**item, "status": "error", "error": "ya se borró del pod"}
                 relevant.append(item)
+                relevant_index.append(index)
                 if item["status"] in ("ready", "loaded"):
                     selected = index
                     relevant = [item]
                     break
             # Un fallo ajeno no impide medir los modelos aún en preparación.
             waiting = [i for i in relevant if i["status"] != "error"]
+            if relevant and not waiting:
+                # Lo que queda no se pudo preparar: el primero se da por
+                # fallido con su motivo y se sigue con el siguiente, en vez de
+                # tumbar la ejecución entera (y la medida de los demás).
+                await self._fail_unprepared_model(
+                    run_id, models, cursor, relevant_index[0], relevant[0]
+                )
+                return
             items = prerequisites + (waiting or relevant)
         broken = [item for item in items if item.get("status") == "error"]
         if broken:
@@ -2377,6 +2416,9 @@ class BenchmarkManager:
                     await response.aclose()
                 if response.status_code < 400 or response.status_code == 404:
                     self._freed_pod_models.add((str(node_id), mid))
+                    mark = getattr(getattr(fm, "cloud", None), "mark_preload_removed", None)
+                    if callable(mark):
+                        mark(str(node_id), [mid])
                     logger.info("benchmark_pod_model_freed", node=peer.name, model=mid)
                 else:
                     logger.warning(
@@ -2401,6 +2443,23 @@ class BenchmarkManager:
         if not name:
             return None
         return next((p for p in fm.get_online_peers() if p.name.lower() == str(name).lower()), None)
+
+    async def _fail_unprepared_model(
+        self, run_id: uuid.UUID, models: list[str], cursor: int, index: int, item: dict
+    ) -> None:
+        """Da por fallido un modelo que el pod no pudo preparar y sigue con el resto."""
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            if run.status != "queued" or run.node is not None:
+                return
+            if index != cursor:
+                # El cursor apunta siempre al modelo del que se habla.
+                models.insert(cursor, models.pop(index))
+                run.models = models
+                await session.commit()
+        model = models[cursor]
+        reason = f"no se pudo preparar en el pod: {item.get('error') or 'error'}"
+        await self._model_failed(run_id, model, reason[:1000])
 
     async def _mark_skipped(self, run_id: uuid.UUID, skipped: dict[str, str]) -> None:
         """Anota en la ejecución (y su batería) los modelos que no irán al pod."""

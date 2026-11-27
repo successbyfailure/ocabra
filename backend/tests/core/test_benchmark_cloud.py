@@ -361,3 +361,58 @@ async def test_una_bateria_con_pod_comparte_maquina_y_se_apaga_con_la_ultima(
     finally:
         await _delete(first.id)
         await _delete(second.id)
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_un_modelo_que_el_pod_no_pudo_bajar_falla_solo_y_se_sigue(
+    tmp_path, monkeypatch
+) -> None:
+    cloud = FakeCloud()
+    manager = _manager(cloud)
+    run = await _new_run(tmp_path, models=["bueno", "sin-disco", "otro"])
+    measured = []
+
+    async def measure(run_id, app, suite, model):
+        measured.append(model)
+        await manager._advance_run(run_id, model, {"score": 1})
+
+    monkeypatch.setattr(manager, "_execute_model", measure)
+    try:
+        await manager._provision(run.id)
+        rid = str((await _load(run.id)).cloud_request_id)
+        node_id = str(uuid.uuid4())
+        cloud.requests.rows[rid].update(status="launched", cloudNodeId=node_id)
+        items = [
+            {"model_id": "llamacpp_mks/bueno", "status": "ready", "benchmark_prefetch": True},
+            {"model_id": "llamacpp_mks/sin-disco", "status": "error",
+             "error": "La descarga falló: [Errno 28] No space left on device",
+             "benchmark_prefetch": True},
+            {"model_id": "llamacpp_mks/otro", "status": "pending", "benchmark_prefetch": True},
+        ]  # fmt: skip
+        cloud.nodes.append(
+            dict(id=node_id, status="running", peer_online=True, peer_name="pod",
+                 preload_models=items)
+        )  # fmt: skip
+        await manager._provision(run.id)
+        await manager._execute_run(run.id)
+        # Al modelo sin disco le toca pero «otro» aún se prepara: esperar a otro,
+        # no fallar la ejecución.
+        await manager._provision(run.id)
+        waiting = await _load(run.id)
+        assert waiting.status == "queued" and waiting.node is None
+        # Ya no queda nada en preparación: falla solo ese modelo, con su motivo.
+        items[2]["status"] = "error"
+        items[2]["error"] = "Ollama tag not found in the registry"
+        await manager._provision(run.id)
+        after = await _load(run.id)
+        assert after.status == "queued" and after.current_model_index == 2
+        assert "sin-disco: no se pudo preparar en el pod" in after.error
+        assert "No space left" in after.error
+        await manager._provision(run.id)
+        done = await _load(run.id)
+        assert done.status == "completed"
+        assert "otro: no se pudo preparar en el pod" in done.error
+        assert measured == ["bueno"]
+    finally:
+        await _delete(run.id)

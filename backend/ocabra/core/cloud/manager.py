@@ -209,6 +209,10 @@ class CloudNodeManager:
         self._lock = asyncio.Lock()
         # Background model loads started by the preload driver.
         self._preload_tasks: dict = {}
+        # Modelos que un benchmark ya borró del pod (node_id → ids): se marcan
+        # «removed» en su precarga en la siguiente pasada del bucle (que es quien
+        # escribe esa lista; hacerlo desde fuera pisaría su escritura).
+        self._removed_preload: dict[str, set[str]] = {}
         # node id → when it was restarted with a new image and has to join
         # again (update_image): the join timeout counts from here, not from
         # the pod's start. In memory: after a hub restart it counts from the
@@ -708,6 +712,10 @@ class CloudNodeManager:
         ]
         return backend_items + items
 
+    def mark_preload_removed(self, node_id: str, model_ids: list[str]) -> None:
+        """Note models a benchmark deleted from a pod (applied on the next tick)."""
+        self._removed_preload.setdefault(str(node_id), set()).update(model_ids)
+
     async def replication_problems(self, models: list[str]) -> dict[str, str]:
         """``{model_id: why}`` for the models that couldn't be copied to a pod."""
         from ocabra.core.cloud import preload
@@ -1034,6 +1042,15 @@ class CloudNodeManager:
                         )
                     from ocabra.core.cloud import preload
 
+                    removed = self._removed_preload.pop(str(row.id), None)
+                    if removed and row.preload_models:
+                        row.preload_models = [
+                            {**i, "status": "removed", "phase": None}
+                            if i.get("node_model_id", i.get("model_id")) in removed
+                            or i.get("model_id") in removed
+                            else i
+                            for i in row.preload_models
+                        ]
                     if (
                         peer is not None
                         and peer.online

@@ -479,8 +479,10 @@ def _node_version(peer: Any) -> tuple[int, ...] | None:
 
 ACTIVE = ("installing", "downloading", "registering", "loading")
 # Lo que dice el nodo cuando no queda el mínimo libre para empezar una descarga
-# (api/internal/downloads.py).
-DISK_FULL_MARK = "insufficient disk space"
+# (api/internal/downloads.py), o cuando el disco se llena a mitad.
+DISK_FULL_MARKS = ("insufficient disk space", "No space left on device")
+# Benchmark: modelos a la vez en el disco del pod (el que se mide y los siguientes).
+PREFETCH_ON_DISK = 3
 # Cortes de transporte seguidos (túnel, conexión) antes de dar un elemento por fallido.
 MAX_TRANSIENT_FAILURES = 5
 
@@ -614,11 +616,22 @@ async def drive(
     items = [dict(i) for i in items]
     running = [i for i in items if i["status"] in ACTIVE]
     pending = [i for i in items if i["status"] == "pending"]
+    # Benchmark: no more models on the pod's disk than the one being measured
+    # and the next ones. Downloading the whole battery ahead filled a 100 GB
+    # pod before the first model was measured (and freed).
+    on_disk = sum(
+        1 for i in items if i.get("benchmark_prefetch") and i["status"] in ("ready", "loaded")
+    )
+    in_flight = sum(1 for i in running if i.get("benchmark_prefetch"))
     occupied = 0
     for item in running + pending:
         parallel = item.get("benchmark_prefetch")
         if occupied and (not parallel or occupied >= 2):
             break
+        if parallel and item["status"] == "pending":
+            if on_disk + in_flight >= PREFETCH_ON_DISK:
+                break
+            in_flight += 1
         await _drive_item(fm, peer, item, tasks)
         if not parallel:
             break
@@ -700,10 +713,10 @@ async def _drive_item(fm: Any, peer: Any, active: dict, tasks: dict) -> None:
         return
     except Exception as exc:  # noqa: BLE001 — one model failing must not stop the rest
         tasks.pop(key, None)
-        if active.get("benchmark_prefetch") and DISK_FULL_MARK in str(exc):
-            # El nodo rechaza la descarga antes de empezarla (no deja nada a
-            # medias): en una batería se borran los modelos ya medidos, así
-            # que se vuelve a intentar cuando haya sitio.
+        if active.get("benchmark_prefetch") and any(m in str(exc) for m in DISK_FULL_MARKS):
+            # En una batería se borran los modelos ya medidos, así que se
+            # vuelve a intentar cuando haya sitio (lo que quedó a medias lo
+            # retoma o lo pisa la descarga siguiente).
             active.clear()
             active.update(
                 {k: v for k, v in before.items() if k not in ("steps", "step", "job_id")},

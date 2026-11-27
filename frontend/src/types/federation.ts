@@ -216,7 +216,8 @@ export interface CloudReplicableModel {
 export interface CloudPreloadItem {
   model_id: string;
   /** ready: downloaded and registered, not loaded («solo descargar»). */
-  status: "pending" | "installing" | "downloading" | "registering" | "loading" | "loaded" | "ready" | "error";
+  /** removed: a benchmark battery deleted it from the pod once all its tests ended. */
+  status: "pending" | "installing" | "downloading" | "registering" | "loading" | "loaded" | "ready" | "error" | "removed";
   progress?: number;
   /** A model captured from an earlier pod (not one of ours). */
   recipe_id?: string;

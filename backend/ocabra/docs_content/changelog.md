@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.4 — 2026-11-27
+
+### Arreglos
+
+- **Un benchmark descartaba su medida si otra ejecución medía el mismo
+  modelo en otro pod.** La comprobación «¿se sirvió donde se pidió?» miraba
+  todas las peticiones de benchmarks a ese modelo, también las de otras
+  ejecuciones en paralelo, y daba «se sirvieron en otro nodo» a medidas
+  buenas. Ahora solo cuenta las suyas: las forzadas a otro nodo son de otra
+  ejecución.
+- **Una batería con pod llenaba el disco bajando todos los modelos por
+  adelantado.** Ahora en el disco del pod caben a la vez el modelo que se mide
+  y los dos siguientes. Los demás esperan a que se borren los ya medidos. Si
+  el disco se llena a mitad de una descarga, el modelo queda «esperando disco»
+  y se vuelve a intentar.
+- **Un modelo que el pod no pudo preparar tumbaba la ejecución.** Ahora falla
+  solo ese modelo, con su motivo en `error`, y la ejecución sigue con los
+  demás.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.3 — 2026-11-27
 
 ### Arreglos
