@@ -180,11 +180,11 @@ def replication_request(
         # el listado de modelos (y no la usa nadie).
         "backends": [],
     }
-    if gpus and target in LLAMA_CPP_FAMILY:
-        # Como al descargar en el hub: el nodo planea sus perfiles (el mayor
-        # contexto que cabe) con llama-fit sobre sus propias GPUs, en vez de
-        # cargar con nuestro contexto, pensado para otras tarjetas.
-        body["register_config"]["placement"] = {"gpus": list(gpus), "cpu": False}
+    # Sin ``placement``: el plan automático del nodo (el mayor contexto que
+    # cabe según llama-fit) se pasaba (inkling, 270 336 tokens que no llegaba a
+    # crear) o se quedaba corto (qwen3-coder para Corrala). El contexto del pod
+    # lo fija el preset que se añade antes de cargar (``pod_preset``).
+    del gpus
     return build_model_ref(target, model_key), body
 
 
@@ -451,14 +451,18 @@ async def hub_request_defaults(session_factory: Any, model_id: str) -> dict[str,
     return None
 
 
-def pod_preset(model_row: Any) -> dict[str, Any] | None:
-    """Preset para un perfil del pod que se quedó sin ninguno (llama.cpp).
+def pod_preset(model_row: Any) -> list[dict[str, Any]] | None:
+    """Presets a probar, por orden, en un perfil del pod que no tiene ninguno.
 
     Nuestros perfiles fijan contextos medidos en nuestras GPUs (gemma4:26b,
     262 144 tokens × 4 en una 3090, validado con sondas). El pod no tiene esos
     presets ni esas medidas: con la configuración base, su planificador decía
-    que no cabía y rechazaba todo («no enabled runtime preset that fits»). Con
-    ``max`` el contexto se ajusta a lo que quepa en su GPU, con nuestros slots.
+    que no cabía y rechazaba todo («no enabled runtime preset that fits»).
+
+    Primero un contexto fijo y moderado (``POD_CONTEXT``, o el nuestro si es
+    menor), que sobra para las suites y que las estimaciones no inflan (con
+    ``max``, inkling salía a 736 320 tokens y luego pedía 33 GB en una de 24).
+    Si eso no cabe en su GPU, ``max``.
     """
     from ocabra.core.model_ref import LLAMA_CPP_FAMILY
 
@@ -468,14 +472,19 @@ def pod_preset(model_row: Any) -> dict[str, Any] | None:
     cfg = extra.get("llama_cpp") if isinstance(extra.get("llama_cpp"), dict) else {}
     slots = cfg.get("parallel_slots")
     kv = str(cfg.get("cache_type_k") or "q8_0")
-    return {
+    ours = cfg.get("ctx_size")
+    context = min(POD_CONTEXT, int(ours)) if isinstance(ours, int) and ours > 0 else POD_CONTEXT
+    base = {
         "preset_key": "pod",
-        "label": "Pod (contexto máximo)",
-        "context_mode": "max",
         "parallelism": int(slots) if isinstance(slots, int) and slots > 0 else 4,
         "kv_cache_dtype": "q8" if kv.startswith("q8") else "q4" if kv.startswith("q4") else "fp16",
         "is_default": True,
     }
+    return [
+        {**base, "label": f"Pod ({context // 1024}k)", "context_mode": "fixed",
+         "context_tokens": context},
+        {**base, "label": "Pod (contexto máximo)", "context_mode": "max"},
+    ]  # fmt: skip
 
 
 def with_defaults_step(
@@ -581,6 +590,9 @@ ACTIVE = ("installing", "downloading", "registering", "loading")
 DISK_FULL_MARKS = ("insufficient disk space", "No space left on device")
 # Benchmark: modelos a la vez en el disco del pod (el que se mide y los siguientes).
 PREFETCH_ON_DISK = 3
+# Contexto (total) de los perfiles de un pod: sobra para las suites de
+# benchmark y no depende de estimaciones de memoria que fallan con algunos modelos.
+POD_CONTEXT = 65536
 # Una descarga sin avanzar este tiempo se cancela y se vuelve a pedir (tantas veces).
 DOWNLOAD_STALL_S = 20 * 60
 DOWNLOAD_STALL_RETRIES = 2
@@ -682,14 +694,23 @@ async def _start_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) -
                 presets = profile.get("runtime_presets") or []
             if presets:
                 continue
-            try:
-                await _node_json(
-                    fm, peer, "POST", f"/ocabra/profiles/{pid}/runtime-presets", preset
-                )
-            except CloudError as exc:
-                # Sin preset el modelo puede no caber, pero eso lo dirá al
-                # medirlo; no se pierde por esto el resto de su preparación.
-                logger.warning("cloud_preload_pod_preset_failed", profile=pid, error=str(exc))
+            candidates = preset if isinstance(preset, list) else [preset]
+            for candidate in candidates:
+                try:
+                    await _node_json(
+                        fm, peer, "POST", f"/ocabra/profiles/{pid}/runtime-presets", candidate
+                    )
+                    break
+                except CloudError as exc:
+                    # No cabe (400) o el nodo lo rechaza: se prueba el siguiente.
+                    # Sin ninguno el modelo puede no caber, pero eso lo dirá al
+                    # medirlo; no se pierde por esto el resto de su preparación.
+                    logger.warning(
+                        "cloud_preload_pod_preset_failed",
+                        profile=pid,
+                        preset=candidate.get("context_mode"),
+                        error=str(exc),
+                    )
         return True
     raise CloudError(f"Paso desconocido: {kind}", 500)
 

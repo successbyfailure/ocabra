@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.16 — 2026-11-27
+
+### Arreglos
+
+- **El contexto de un modelo copiado a un pod ya no depende de estimaciones
+  que fallan.** El plan automático del pod (por `llama-fit`) se pasaba con
+  algunos modelos (a inkling le dio 270 336 tokens que luego no podía crear) o
+  se quedaba corto para las suites largas. El contexto máximo calculado por
+  oCabra también se pasaba (736 320 tokens para inkling, que luego pedía 33 GB
+  en una GPU de 24). Ahora cada perfil del pod recibe un contexto fijo de
+  65 536 tokens, o el nuestro si es menor, con nuestros slots. Si eso no cabe
+  en su GPU, se usa el máximo que quepa.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.15 — 2026-11-27
 
 ### Arreglos

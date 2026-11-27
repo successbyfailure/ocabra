@@ -258,7 +258,8 @@ async def test_preload_downloads_then_loads_on_the_node(hub, our_model):  # noqa
     assert ("POST", f"/ocabra/models/{MID}/load", {}) in calls
     # Antes de cargar, el perfil del pod (sin presets) recibió uno de contexto máximo.
     preset = next(c for c in calls if c[0] == "POST" and c[1].endswith("/runtime-presets"))
-    assert preset[2]["context_mode"] == "max"
+    # Nuestro contexto (8192) es menor que el del pod: se respeta.
+    assert preset[2]["context_mode"] == "fixed" and preset[2]["context_tokens"] == 8192
 
 
 @requires_db
@@ -1138,7 +1139,10 @@ def test_un_gguf_partido_lo_dice_en_vez_de_bajar_media_parte():
         download_source(art)
 
 
-def test_el_pod_planea_su_contexto_con_sus_gpus():
+def test_el_pod_no_usa_el_plan_automatico_del_nodo():
+    """El plan de llama-fit en el pod se pasaba (inkling, 270 336 tokens que no
+    llegaba a crear) o se quedaba corto (qwen3-coder en Corrala): el contexto del
+    pod lo fija el preset que se le añade (pod_preset)."""
     row = SimpleNamespace(
         backend_type="llamacpp_mks",
         artifact={"source": "ollama", "ref": "nemotron-3-nano:30b"},
@@ -1147,9 +1151,6 @@ def test_el_pod_planea_su_contexto_con_sus_gpus():
         extra_config={"llama_cpp": {"ctx_size": 131072}},
     )
     _node_id, body = replication_request(row, 24564, None, [0])
-    assert body["register_config"]["placement"] == {"gpus": [0], "cpu": False}
-    # Sin GPUs conocidas (nodo antiguo), como antes.
-    _node_id, body = replication_request(row, 24564)
     assert "placement" not in body["register_config"]
 
 
@@ -1320,8 +1321,12 @@ async def test_un_perfil_del_pod_sin_presets_recibe_uno_de_contexto_maximo():
         },
     )
     preset = preload.pod_preset(row)
-    assert preset["context_mode"] == "max" and preset["parallelism"] == 4
-    assert preset["kv_cache_dtype"] == "q8" and preset["is_default"] is True
+    # Primero fijo y moderado; si no cabe, el máximo que quepa.
+    assert [(p["context_mode"], p.get("context_tokens")) for p in preset] == [
+        ("fixed", preload.POD_CONTEXT),
+        ("max", None),
+    ]
+    assert all(p["parallelism"] == 4 and p["kv_cache_dtype"] == "q8" for p in preset)
     assert preload.pod_preset(SimpleNamespace(backend_type="ollama", extra_config={})) is None
     item = {
         "model_id": "llamacpp_mks/gemma4:26b",
@@ -1338,7 +1343,7 @@ async def test_un_perfil_del_pod_sin_presets_recibe_uno_de_contexto_maximo():
         ("POST", "/ocabra/profiles/gemma4:26b/runtime-presets"),
         ("PATCH", "/ocabra/profiles/ya-planificado"),
     ]
-    assert calls[1][2]["preset_key"] == "pod"
+    assert calls[1][2]["preset_key"] == "pod" and calls[1][2]["context_mode"] == "fixed"
 
 
 async def test_con_la_cache_del_nodo_desfasada_no_se_duplica_el_preset():
@@ -1393,3 +1398,32 @@ def test_el_reparto_de_nuestras_gpus_no_viaja_al_pod():
     _node_id, body = replication_request(row, 24564)
     cfg = body["register_config"]["extra_config"].get("llama_cpp") or {}
     assert not {"split_mode", "main_gpu", "tensor_split"} & set(cfg)
+
+
+async def test_si_el_contexto_fijo_no_cabe_se_prueba_el_maximo():
+    from ocabra.core.cloud import preload
+
+    calls = []
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        return httpx.Response(200, json=[{"profile_id": "m", "runtime_presets": []}])
+
+    async def proxy_raw(peer, method, path, content, headers=None):
+        body = json.loads(content)
+        calls.append((method, body.get("context_mode")))
+        if method == "PATCH":
+            return httpx.Response(200, json={"runtime_presets": []})
+        if body.get("context_mode") == "fixed":
+            return httpx.Response(400, json={"detail": "no cabe"})
+        return httpx.Response(201, json={})
+
+    row = SimpleNamespace(backend_type="llamacpp_mks", extra_config={"llama_cpp": {}})
+    item = {
+        "model_id": "llamacpp_mks/m",
+        "node_model_id": "llamacpp_mks/m",
+        "steps": preload.with_defaults_step([], None, preload.pod_preset(row)),
+        "step": 0,
+    }
+    fm = SimpleNamespace(proxy_get=proxy_get, proxy_raw=proxy_raw)
+    assert await preload._start_step(fm, SimpleNamespace(), item, {}, ("p", "m")) is True
+    assert calls == [("PATCH", None), ("POST", "fixed"), ("POST", "max")]
