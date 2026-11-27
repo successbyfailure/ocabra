@@ -2267,6 +2267,17 @@ class BenchmarkManager:
         timeout = int(spec.get("ready_timeout_minutes") or 90)
         since = waiting_since or (datetime.fromisoformat(launched_at) if launched_at else None)
         if since and datetime.now(UTC) - since > timedelta(minutes=timeout):
+            if waiting_since is not None and cursor < len(models):
+                # Ya se midió algo en este pod: el que no llega falla solo y se
+                # sigue con los demás (antes se perdía el resto de la batería).
+                await self._fail_unprepared_model(
+                    run_id,
+                    models,
+                    cursor,
+                    cursor,
+                    {"error": f"no estuvo listo en {timeout} min"},
+                )
+                return
             await self._fail_run(run_id, f"El pod no estuvo listo en {timeout} min")
             return
         await self._set_phase(run_id, "preparing_pod")

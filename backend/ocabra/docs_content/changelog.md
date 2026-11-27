@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.10 — 2026-11-27
+
+### Arreglos
+
+- **Una descarga de un pod que no avanzaba dejaba la batería esperando hasta
+  agotar el tiempo.** Dos descargas se quedaron al 0 % más de 90 minutos, y
+  la ejecución acabó con «El pod no estuvo listo» y sin medir los modelos que
+  faltaban. Ahora una descarga que no avanza en 20 minutos se cancela y se
+  vuelve a pedir, hasta dos veces. Lo que decía el nodo de ella queda anotado
+  para diagnosticarlo.
+- **Un modelo que no llegaba a estar listo tumbaba la ejecución.** Si ya se
+  midió algo en ese pod, ahora falla solo ese modelo, con su motivo, y se
+  sigue con el resto.
+- **Un modelo de Hugging Face con visión no cargaba en el pod.** Su
+  proyector de imagen es un fichero aparte que solo está aquí, y el pod no
+  podía arrancarlo. Ahora se copia sin visión, lo que no afecta a medidas de
+  texto. Los que vienen de un tag de Ollama llevan el proyector dentro y se
+  copian como antes.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.9 — 2026-11-27
 
 ### Arreglos

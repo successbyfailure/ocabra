@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -463,5 +463,50 @@ async def test_si_toca_una_gpu_averiada_se_espera_y_a_la_tercera_se_deja(
         await manager._advance_provisioning()
         assert cloud.requests.created[-1]["gpu_type_ids"] == ["3090"]
         assert len(cloud.requests.created) == 4
+    finally:
+        await _delete(run.id)
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_un_modelo_que_no_llega_a_tiempo_falla_solo(tmp_path, monkeypatch) -> None:
+    import sqlalchemy as sa
+
+    cloud = FakeCloud()
+    manager = _manager(cloud)
+    run = await _new_run(tmp_path, models=["medido", "atascado", "otro"])
+
+    async def measure(run_id, app, suite, model):
+        await manager._advance_run(run_id, model, {"score": 1})
+
+    monkeypatch.setattr(manager, "_execute_model", measure)
+    try:
+        await manager._provision(run.id)
+        rid = str((await _load(run.id)).cloud_request_id)
+        node_id = str(uuid.uuid4())
+        cloud.requests.rows[rid].update(status="launched", cloudNodeId=node_id)
+        items = [
+            {"model_id": "llamacpp_mks/medido", "status": "ready", "benchmark_prefetch": True},
+            {"model_id": "llamacpp_mks/atascado", "status": "downloading", "benchmark_prefetch": True},
+            {"model_id": "llamacpp_mks/otro", "status": "pending", "benchmark_prefetch": True},
+        ]  # fmt: skip
+        cloud.nodes.append(
+            dict(id=node_id, status="running", peer_online=True, peer_name="pod",
+                 preload_models=items)
+        )  # fmt: skip
+        await manager._provision(run.id)
+        await manager._execute_run(run.id)
+        # Lleva más del tope esperando al siguiente.
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                sa.update(BenchmarkRun)
+                .where(BenchmarkRun.id == run.id)
+                .values(updated_at=datetime.now(UTC) - timedelta(hours=3))
+            )
+            await session.commit()
+        await manager._provision(run.id)
+        after = await _load(run.id)
+        assert after.status == "queued" and after.current_model_index == 2
+        assert "atascado: no se pudo preparar en el pod: no estuvo listo en 90 min" in after.error
     finally:
         await _delete(run.id)

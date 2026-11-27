@@ -27,12 +27,16 @@ import copy
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
 import httpx
+import structlog
 
 from ocabra.core.cloud.manager import CloudError
+
+logger = structlog.get_logger(__name__)
 
 # Settings tied to *our* GPU layout: meaningless (or harmful) on another box.
 _HOST_SPECIFIC = ("disabled_gpus", "main_gpu", "tensor_split", "preferred_gpus", "gpu_indices")
@@ -150,6 +154,15 @@ def replication_request(
     else:
         own = extra.get("llama_cpp") if source_backend in LLAMA_CPP_FAMILY else None
         llama_cfg = fit_llama_cpp_config(own or {}, gpu_total_mb)
+        art = model_row.artifact if isinstance(model_row.artifact, dict) else {}
+        mmproj = art.get("mmproj") if isinstance(art.get("mmproj"), dict) else None
+        if body["source"] != "ollama" and (mmproj or llama_cfg.get("mmproj_model_id")):
+            # El proyector de visión es otro fichero que solo tenemos aquí (un
+            # tag de Ollama lo lleva dentro, uno de HF no): sin él, el pod no
+            # cargaba el modelo. Se copia sin visión; para medir texto da igual.
+            for key in ("mmproj_model_id", "mmproj_path", "mmproj_gpu"):
+                llama_cfg.pop(key, None)
+            llama_cfg["vision_mode"] = "disabled"
         extra_config = {"llama_cpp": llama_cfg} if llama_cfg else {}
     body["register_config"] = {
         "backend_type": target,
@@ -525,6 +538,9 @@ ACTIVE = ("installing", "downloading", "registering", "loading")
 DISK_FULL_MARKS = ("insufficient disk space", "No space left on device")
 # Benchmark: modelos a la vez en el disco del pod (el que se mide y los siguientes).
 PREFETCH_ON_DISK = 3
+# Una descarga sin avanzar este tiempo se cancela y se vuelve a pedir (tantas veces).
+DOWNLOAD_STALL_S = 20 * 60
+DOWNLOAD_STALL_RETRIES = 2
 # Cortes de transporte seguidos (túnel, conexión) antes de dar un elemento por fallido.
 MAX_TRANSIENT_FAILURES = 5
 
@@ -572,7 +588,12 @@ async def _start_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) -
         resp = await fm.proxy_request(peer, "/ocabra/downloads", step["body"], {})
         if resp.status_code >= 400:
             raise CloudError(f"El nodo rechazó la descarga: {resp.text[:200]}", 502)
-        item.update(status="downloading", job_id=resp.json().get("job_id"), progress=0)
+        item.update(
+            status="downloading",
+            job_id=resp.json().get("job_id"),
+            progress=0,
+            progress_at=time.time(),
+        )
         return False
     if kind == "register":
         model_id = step["body"]["model_id"]
@@ -617,6 +638,45 @@ async def _start_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) -
     raise CloudError(f"Paso desconocido: {kind}", 500)
 
 
+async def _restart_stalled_download(fm: Any, peer: Any, item: dict, job: dict) -> None:
+    """Una descarga que no avanza: se cancela y se vuelve a pedir (o se da por fallida).
+
+    En una batería, dos descargas se quedaron al 0 % más de 90 minutos en dos
+    pods a la vez, sin fallar ni avanzar, y la ejecución acabó por tiempo.
+    Lo que dice el nodo de ese trabajo se guarda para poder diagnosticarlo.
+    """
+    snapshot = {
+        k: job.get(k) for k in ("status", "progress_pct", "error", "started_at", "created_at")
+    }
+    logger.warning(
+        "cloud_preload_download_stalled",
+        node=getattr(peer, "name", None),
+        model=item.get("model_id"),
+        job=snapshot,
+    )
+    cancel = await fm.proxy_raw(peer, "DELETE", f"/ocabra/downloads/{item['job_id']}", b"")
+    try:
+        await cancel.aread()
+    finally:
+        await cancel.aclose()
+    retries = int(item.get("stall_retries") or 0)
+    minutes = DOWNLOAD_STALL_S // 60
+    if retries >= DOWNLOAD_STALL_RETRIES:
+        raise CloudError(
+            f"La descarga no avanzó en {minutes} min ({retries + 1} veces; el nodo la "
+            f"tenía «{job.get('status')}» al {job.get('progress_pct') or 0} %)",
+            502,
+        )
+    for key in ("steps", "step", "job_id", "progress", "progress_at"):
+        item.pop(key, None)
+    item.update(
+        status="pending",
+        phase=f"descarga parada {minutes} min: se vuelve a pedir",
+        stall_retries=retries + 1,
+        last_stall=snapshot,
+    )
+
+
 async def _poll_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) -> bool:
     """Check the item's running step. ``True`` once it is done."""
     step = item["steps"][item["step"]]
@@ -644,10 +704,18 @@ async def _poll_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) ->
         if resp.status_code >= 400:
             raise CloudError(f"No se pudo consultar la descarga: {resp.text[:200]}", 502)
         job = resp.json()
-        item["progress"] = round(float(job.get("progress_pct") or 0), 1)
+        progress = round(float(job.get("progress_pct") or 0), 1)
+        now = time.time()
+        if progress > float(item.get("progress") or 0) or not item.get("progress_at"):
+            item["progress_at"] = now
+        item["progress"] = progress
         if job.get("status") in ("failed", "error", "cancelled"):
             raise CloudError(f"La descarga falló: {job.get('error') or job.get('status')}", 502)
-        return job.get("status") == "completed"
+        if job.get("status") == "completed":
+            return True
+        if now - float(item["progress_at"]) > DOWNLOAD_STALL_S:
+            await _restart_stalled_download(fm, peer, item, job)
+        return False
     if kind == "load":
         task = tasks.get(key)
         if task is None:

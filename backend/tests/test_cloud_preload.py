@@ -1207,3 +1207,78 @@ async def test_se_toman_los_valores_del_perfil_de_aqui(our_model):
         async with AsyncSessionLocal() as s:
             await s.execute(sa.delete(ModelProfile).where(ModelProfile.profile_id == KEY))
             await s.commit()
+
+
+async def test_una_descarga_parada_se_vuelve_a_pedir_y_a_la_tercera_falla():
+    from ocabra.core.cloud import preload
+
+    cancelled = []
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        return httpx.Response(200, json={"status": "queued", "progress_pct": 0})
+
+    async def proxy_raw(peer, method, path, content, headers=None):
+        cancelled.append((method, path))
+        return httpx.Response(200, json={})
+
+    fm = SimpleNamespace(proxy_get=proxy_get, proxy_raw=proxy_raw)
+    peer = SimpleNamespace(peer_id="p", name="pod")
+
+    def stalled(**extra):
+        return {
+            "model_id": "llamacpp_mks/qwen3.8:27b",
+            "status": "downloading",
+            "steps": [{"kind": "download", "body": {}}, {"kind": "load"}],
+            "step": 0,
+            "job_id": "j1",
+            "progress": 0,
+            "progress_at": time.time() - preload.DOWNLOAD_STALL_S - 1,
+            **extra,
+        }
+
+    item = stalled()
+    await preload._drive_item(fm, peer, item, {})
+    assert item["status"] == "pending" and item["stall_retries"] == 1
+    assert item["last_stall"]["status"] == "queued"
+    assert cancelled == [("DELETE", "/ocabra/downloads/j1")]
+    # Mientras avanza no se toca.
+    moving = stalled(progress_at=time.time())
+    await preload._drive_item(fm, peer, moving, {})
+    assert moving["status"] == "downloading"
+    # Tras los reintentos, falla con lo que decía el nodo.
+    last = stalled(stall_retries=preload.DOWNLOAD_STALL_RETRIES)
+    await preload._drive_item(fm, peer, last, {})
+    assert last["status"] == "error" and "no avanzó" in last["error"]
+
+
+def test_un_modelo_de_hf_con_vision_se_copia_sin_su_proyector():
+    row = SimpleNamespace(
+        backend_type="llamacpp_mks",
+        artifact={
+            "ref": "ggml-org/Inkling-2-Mini-GGUF::Inkling-2-Mini-IQ4_NL",
+            "kind": "gguf",
+            "path": "/data/models/huggingface/ggml-org--Inkling-2-Mini-GGUF--Inkling-2-Mini-IQ4_NL/Inkling-2-Mini-IQ4_NL.gguf",
+            "mmproj": {"path": "/data/models/x/mmproj.gguf", "source": "local"},
+            "source": "local",
+        },
+        model_key="inkling-2-mini-iq4-nl",
+        model_id="llamacpp_mks/inkling-2-mini-iq4-nl",
+        extra_config={
+            "llama_cpp": {"vision_mode": "on_demand", "mmproj_model_id": "x", "ctx_size": 8192}
+        },
+    )
+    _node_id, body = replication_request(row, 24564)
+    cfg = body["register_config"]["extra_config"]["llama_cpp"]
+    assert cfg["vision_mode"] == "disabled" and "mmproj_model_id" not in cfg
+    assert cfg["ctx_size"] == 8192
+    # Un tag de Ollama lleva el proyector dentro: se deja como está.
+    ollama_row = SimpleNamespace(
+        backend_type="llamacpp_mks",
+        artifact={"ref": "qwen3.8:27b", "kind": "gguf", "source": "ollama",
+                  "mmproj": {"layer": "projector", "source": "ollama"}},
+        model_key="qwen3.8:27b",
+        model_id="llamacpp_mks/qwen3.8:27b",
+        extra_config={"llama_cpp": {"vision_mode": "on_demand"}},
+    )  # fmt: skip
+    _node_id, body = replication_request(ollama_row, 24564)
+    assert body["register_config"]["extra_config"]["llama_cpp"]["vision_mode"] == "on_demand"
