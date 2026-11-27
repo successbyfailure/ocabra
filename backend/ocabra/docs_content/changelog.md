@@ -16,6 +16,27 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.17 — 2026-11-27
+
+### Cambios
+
+- **Cada intento de benchmark guarda con qué se midió.** En el entorno del
+  intento (`environment.model`) hay ahora:
+  - `snapshot`: la configuración del modelo en la máquina donde se midió.
+    En llama.cpp incluye contexto, slots, tipo de KV, `split_mode`, MTP y
+    visión; en Ollama, el tag y el paralelismo y contexto del daemon. También
+    los presets, con su contexto efectivo y si caben, los `request_defaults`
+    del perfil, y el fichero o digest del modelo. De las rutas solo queda el
+    nombre del fichero.
+  - `requestSampling`: los parámetros de muestreo que mandó el runner
+    (temperatura, top_p, top_k, min_p, penalizaciones, `max_tokens`,
+    `reasoning_effort`, `enable_thinking`…) con cuántas peticiones llevaron
+    cada combinación. Nunca se guarda el contenido de las peticiones.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.16 — 2026-11-27
 
 ### Arreglos

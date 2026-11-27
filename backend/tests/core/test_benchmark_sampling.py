@@ -106,3 +106,68 @@ def test_la_api_valida_el_modo_de_muestreo() -> None:
         BenchmarkRunCreate(
             app="ifeval", suite="quick", models=["m"], sampling="recommended", node="Mapache"
         )
+
+
+def test_se_anotan_solo_los_parametros_de_muestreo() -> None:
+    from ocabra.benchmarks.sampling_override import observed_params
+
+    body = {
+        "model": "gemma4:12b",
+        "messages": [{"role": "user", "content": "secreto"}],
+        "temperature": 0,
+        "max_tokens": 4096,
+        "top_p": 0.95,
+        "tools": [{"type": "function"}],
+        "chat_template_kwargs": {"enable_thinking": False},
+        "stop": ["x"],
+    }
+    assert observed_params(body) == {
+        "temperature": 0, "max_tokens": 4096, "top_p": 0.95, "tools": True,
+        "enable_thinking": False,
+    }  # fmt: skip
+    # Ollama: en ``options``.
+    assert observed_params({"options": {"temperature": 0.2, "num_ctx": 8192}}) == {
+        "temperature": 0.2,
+        "num_ctx": 8192,
+    }
+
+
+@pytest.mark.asyncio
+async def test_el_middleware_anota_y_la_app_recibe_el_cuerpo_entero() -> None:
+    import json
+
+    seen: dict = {}
+    observed: list = []
+
+    async def app(scope, receive, send):
+        message = await receive()
+        seen["body"] = message["body"]
+
+    manager = SimpleNamespace(
+        sampling_overrides=[],
+        service_api_key="sk-runner",
+        observe_sampling=lambda node, model, params: observed.append((node, model, params)),
+    )
+    body = json.dumps({"model": "gemma4:12b", "temperature": 0, "messages": []}).encode()
+    parts = [body[:10], body[10:]]
+
+    async def receive():
+        chunk = parts.pop(0)
+        return {"type": "http.request", "body": chunk, "more_body": bool(parts)}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/_node/ocabra-bench-x/v1/chat/completions",
+        "headers": [(b"authorization", b"Bearer sk-runner")],
+        "app": SimpleNamespace(state=SimpleNamespace(benchmark_manager=manager)),
+    }
+    await BenchmarkSamplingMiddleware(app)(scope, receive, None)
+    assert seen["body"] == body
+    assert observed == [("ocabra-bench-x", "gemma4:12b", {"temperature": 0})]
+    # Una petición de un usuario ni se lee.
+    observed.clear()
+    parts[:] = [body]
+    scope["headers"] = [(b"authorization", b"Bearer sk-usuario")]
+    await BenchmarkSamplingMiddleware(app)(scope, receive, None)
+    assert observed == []

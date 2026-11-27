@@ -302,6 +302,25 @@ class BenchmarkManager:
         self._freed_pod_models: set[tuple[str, str]] = set()
         # Base de pruebas de Corrala de cada máquina que mide a la vez (hueco).
         self._corrala_slots: dict[str, int] = {}
+        # Muestreo que manda el runner, por (máquina, modelo): combinación → peticiones.
+        self._observed_sampling: dict[tuple[str, str], dict[str, int]] = {}
+
+    @property
+    def service_api_key(self) -> str | None:
+        """La clave del runner (el middleware reconoce así sus peticiones)."""
+        return self._identity.raw_api_key if self._identity is not None else None
+
+    def observe_sampling(self, node: str, model: str, params: dict[str, object]) -> None:
+        """Anota el muestreo de una petición del runner (lo llama el middleware)."""
+        counts = self._observed_sampling.setdefault((node.lower(), model), {})
+        key = json.dumps(params, sort_keys=True)
+        if key in counts or len(counts) < 50:
+            counts[key] = counts.get(key, 0) + 1
+
+    def _sampling_summary(self, node: str | None, model: str) -> list[dict[str, object]]:
+        counts = self._observed_sampling.pop(((node or "").lower(), model), {})
+        ranked = sorted(counts.items(), key=lambda item: -item[1])[:10]
+        return [{"params": json.loads(key), "requests": n} for key, n in ranked]
 
     @property
     def sampling_overrides(self) -> list[dict[str, object]]:
@@ -825,6 +844,7 @@ class BenchmarkManager:
             command.extend(suite.resume_args)
         await self._set_phase(run_id, "running")
         started_at = datetime.now(UTC)
+        self._observed_sampling.pop(((node or "").lower(), model), None)
         if sampling is not None and self._identity is not None:
             self._sampling_overrides[str(run_id)] = {
                 "profile": model,
@@ -852,6 +872,9 @@ class BenchmarkManager:
         environment = await self._complete_environment(
             environment, started_at, finished_at, source, node=node
         )
+        observed = self._sampling_summary(node, model)
+        if observed:
+            environment.setdefault("model", {})["requestSampling"] = observed
         historical = await self._historical_external_requests(started_at, finished_at, node=node)
         if node:
             peer_external, verified = await self._node_local_requests(node, started_at, finished_at)
@@ -1477,7 +1500,38 @@ class BenchmarkManager:
         if auxiliary_nodes:
             environment["hardware"]["auxiliaryNodes"] = auxiliary_nodes
         environment["requests"] = observed["requests"]
+        profile_name = str((environment.get("model") or {}).get("profile") or "")
+        snapshot = await self._model_snapshot(profile_name, node) if profile_name else None
+        if snapshot is not None:
+            environment["model"]["snapshot"] = snapshot
         return environment
+
+    async def _model_snapshot(self, name: str, node: str | None) -> dict | None:
+        """Configuración, presets, muestreo y fichero del modelo donde se midió."""
+        from ocabra.benchmarks import model_snapshot
+
+        try:
+            if node:
+                peer = self._peer(node)
+                if peer is None:
+                    return None
+                return await model_snapshot.capture(lambda path: self._peer_json(peer, path), name)
+            if self._identity is None:
+                return None
+            import httpx
+
+            base = settings.benchmark_base_url.rstrip("/")
+            headers = {"Authorization": f"Bearer {self._identity.raw_api_key}"}
+            async with httpx.AsyncClient(timeout=30.0) as client:
+
+                async def get_json(path: str):
+                    response = await client.get(f"{base}{path}", headers=headers)
+                    return response.json() if response.status_code == 200 else None
+
+                return await model_snapshot.capture(get_json, name)
+        except Exception as exc:  # noqa: BLE001 — la foto es un extra, no tumba el intento
+            logger.warning("benchmark_model_snapshot_failed", model=name, error=str(exc))
+            return None
 
     @staticmethod
     def _deduplicate_external(items: list[dict[str, object]]) -> list[dict[str, object]]:
