@@ -159,6 +159,31 @@ async def _aw(value):
     return value
 
 
+@pytest.mark.asyncio
+async def test_lo_que_tiene_cargado_ollama_cuenta_como_liberable():
+    """Pod de benchmarks (27/11): Ollama aún tenía cargado el modelo recién
+    medido y el plan del siguiente de llama.cpp salía con contexto mínimo."""
+    gpu = SimpleNamespace(
+        index=0,
+        name="RTX 4090",
+        total_vram_mb=24564,
+        free_vram_mb=12000,
+        processes=[
+            SimpleNamespace(pid=501, process_name="ollama", used_vram_mb=11000),
+            SimpleNamespace(pid=77, process_name="Xorg", used_vram_mb=300),
+        ],
+    )
+    asked = []
+
+    async def released(index, models):
+        asked.append(dict(models))
+        return 22000
+
+    gm = SimpleNamespace(get_all_states=lambda: _aw([gpu]), get_free_vram_if_released=released)
+    await au.gpu_budgets(SimpleNamespace(_gpu_manager=gm, _states={}), [0])
+    assert asked == [{"ollama-runner:501": 501}]  # el escritorio no
+
+
 def test_si_no_cabe_por_el_borrador_especulativo_lo_dice():
     backend = _Backend(weights=15000, expert=450)
     state = SimpleNamespace(

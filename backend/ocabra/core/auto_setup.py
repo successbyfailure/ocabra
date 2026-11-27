@@ -126,6 +126,16 @@ async def gpu_budgets(model_manager: Any, indices: list[int]) -> list[GpuBudget]
             for s in states
             if index in (getattr(s, "current_gpu", None) or [])
         }
+        # Ollama carga sus modelos en su propio proceso (``WorkerInfo.pid`` es
+        # 0): sin esto, un modelo de Ollama aún residente contaba como memoria
+        # ajena y el plan de un modelo nuevo salía con un contexto mínimo (en
+        # un pod de benchmarks, todo lo de llama.cpp medido tras uno de Ollama
+        # daba «context_length_exceeded»). oCabra lo descarga como los demás.
+        for proc in _gpu_value(gpu, "processes") or []:
+            name = str(_gpu_value(proc, "process_name") or "")
+            pid = _gpu_value(proc, "pid")
+            if "ollama" in name.lower() and isinstance(pid, int) and pid > 0:
+                released[f"ollama-runner:{pid}"] = pid
         room = int(await gm.get_free_vram_if_released(index, released))
         # The buffer is already out of ``room``; the threshold only bites when
         # it reserves more than the buffer.

@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.11 — 2026-11-27
+
+### Arreglos
+
+- **Un modelo de Ollama recién usado reducía el contexto de los siguientes.**
+  Ollama mantiene cargado su último modelo unos minutos, en un proceso que
+  oCabra no reconocía como suyo. El plan automático de un modelo nuevo de
+  llama.cpp (al descargarlo, o al copiarlo a un pod) contaba esa memoria como
+  ocupada y salía con un contexto mínimo. Las peticiones daban entonces 400
+  `context_length_exceeded`. Ahora esa memoria cuenta como liberable, igual
+  que la de cualquier otro modelo cargado.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.10 — 2026-11-27
 
 ### Arreglos
