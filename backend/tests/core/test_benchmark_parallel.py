@@ -272,3 +272,60 @@ async def test_se_borra_del_pod_lo_que_ya_no_necesita_ninguna_prueba(tmp_path: P
     finally:
         await _delete(ifeval.id)
         await _delete(bfcl.id)
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_un_modelo_que_no_responde_no_da_un_resultado_valido() -> None:
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    import sqlalchemy as sa
+
+    from ocabra.benchmarks.manager import BenchmarkIdentity
+    from ocabra.db.auth import User
+    from ocabra.db.stats import RequestStat
+
+    manager = _manager(FakeCloud())
+    user = User(username=f"zz-bench-{uuid.uuid4().hex[:8]}", hashed_password="x")
+    async with AsyncSessionLocal() as session:
+        session.add(user)
+        await session.commit()
+    manager._identity = BenchmarkIdentity(user.id, "ocabra-benchmark", "secret")
+    start = datetime.now(UTC)
+    error = "GPU 0: need 5366 MB, only 4327 MB available after eviction [insufficient_vram]"
+
+    async def add(model, code, n, err=None):
+        async with AsyncSessionLocal() as session:
+            for i in range(n):
+                session.add(
+                    RequestStat(
+                        model_id=f"llamacpp_mks/{model}",
+                        requested_model=model,
+                        user_id=user.id,
+                        started_at=start + timedelta(seconds=i),
+                        status_code=code,
+                        error=err,
+                    )
+                )
+            await session.commit()
+
+    try:
+        # Escriba: los embeddings van bien, el modelo medido no carga nunca.
+        await add("qwen3-embedding:0.6b", 200, 7)
+        await add("bonsai-2:9b", 409, 5, error)
+        end = start + timedelta(minutes=1)
+        why = await manager._measured_failures(start, end, "bonsai-2:9b")
+        assert why is not None and "5 de 5" in why and "insufficient_vram" in why
+        assert await manager._measured_failures(start, end, "qwen3-embedding:0.6b") is None
+
+        # Algún fallo suelto o reintentos pasajeros no invalidan la medida.
+        await add("gemma4:12b", 200, 9)
+        await add("gemma4:12b", 409, 1, "x")
+        await add("gemma4:12b", 503, 20)
+        assert await manager._measured_failures(start, end, "gemma4:12b") is None
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(sa.delete(RequestStat).where(RequestStat.user_id == user.id))
+            await session.execute(sa.delete(User).where(User.id == user.id))
+            await session.commit()

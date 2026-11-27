@@ -324,7 +324,6 @@ async def test_runtime_parallelism_cap_is_used_for_capacity_and_identity(monkeyp
     assert any("p2" in warning and "p1" in warning for warning in row["warnings"])
 
 
-
 def test_capacity_uses_the_admission_fixed_margins_not_current_free_vram() -> None:
     """2026-11-08: resolved planned against the raw card total and said fits for
     presets the load admission then refused (need 23761 MB, 23647 available).
@@ -340,7 +339,11 @@ def test_capacity_uses_the_admission_fixed_margins_not_current_free_vram() -> No
         index=1,
         total_vram_mb=24_576,
         free_vram_mb=1_776,
-        processes=[GPUProcessInfo(pid=1, process_name="llama-server", process_type="C", used_vram_mb=22_378)],
+        processes=[
+            GPUProcessInfo(
+                pid=1, process_name="llama-server", process_type="C", used_vram_mb=22_378
+            )
+        ],
     )
     buffer = int(settings.vram_buffer_mb)
     assert _gpu_dict(empty)["total_mb"] == 24_576 - 418 - buffer
@@ -348,3 +351,26 @@ def test_capacity_uses_the_admission_fixed_margins_not_current_free_vram() -> No
     # a busy sample without per-process info can't attribute usage: fall back, don't collapse
     unknown = SimpleNamespace(index=1, total_vram_mb=24_576, free_vram_mb=1_776, processes=[])
     assert _gpu_dict(unknown)["total_mb"] == 24_576 - 512 - buffer
+
+
+def test_a_desktop_on_the_card_is_not_planned_for() -> None:
+    """Mapache (27/11): GTX 1660 with ~1 GB of desktop. Counted as an evictable
+    process, "max" context planned bonsai-2:9b for 5366 MB and every load
+    failed with 4327 MB available after evicting everything."""
+    from ocabra.config import settings
+    from ocabra.core.gpu_manager import GPUProcessInfo
+    from ocabra.core.runtime_preset_capacity import _gpu_dict
+
+    processes = [
+        GPUProcessInfo(
+            pid=75, process_name="python3.11", process_type="compute", used_vram_mb=1198
+        ),
+        GPUProcessInfo(pid=1865, process_name=None, process_type="graphics", used_vram_mb=568),
+        GPUProcessInfo(pid=632300, process_name=None, process_type="graphics", used_vram_mb=400),
+        # The same process in both lists (C+G) is a worker: not foreign.
+        GPUProcessInfo(pid=75, process_name="python3.11", process_type="graphics", used_vram_mb=0),
+    ]
+    gpu = SimpleNamespace(index=0, total_vram_mb=6144, free_vram_mb=3407, processes=processes)
+    buffer = int(settings.vram_buffer_mb)
+    unattributed = 6144 - 3407 - (1198 + 568 + 400)
+    assert _gpu_dict(gpu)["total_mb"] == 6144 - unattributed - 968 - buffer

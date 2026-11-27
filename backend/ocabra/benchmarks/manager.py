@@ -47,6 +47,8 @@ logger = structlog.get_logger(__name__)
 _SERVICE_USERNAME = "__ocabra_benchmark__"
 _SERVICE_KEY_NAME = "ocabra-benchmark"
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
+# Respuestas pasajeras que los runners reintentan: no cuentan como fallo del modelo.
+_TRANSIENT_STATUS = frozenset({429, 502, 503, 504})
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
@@ -854,6 +856,13 @@ class BenchmarkManager:
             await self._finish_failed_attempt(attempt.id, outcome.return_code, message, environment)
             await self._model_failed(run_id, model, message)
             return
+        failed_requests = await self._measured_failures(started_at, finished_at, model)
+        if failed_requests is not None:
+            await self._finish_failed_attempt(
+                attempt.id, outcome.return_code, failed_requests, environment
+            )
+            await self._model_failed(run_id, model, failed_requests)
+            return
         if external:
             await self._finish_contaminated_attempt(attempt.id, result, external, environment)
             if await self._run_auto_pause(run_id):
@@ -1155,6 +1164,49 @@ class BenchmarkManager:
         if not isinstance(value, dict):
             raise ValueError("El resultado del benchmark no es un objeto JSON")
         return value
+
+    async def _measured_failures(
+        self, started_at: datetime, finished_at: datetime, model: str
+    ) -> str | None:
+        """Por qué el resultado no vale si el modelo medido no llegó a responder.
+
+        Algunos runners (Escriba) anotan cada petición fallida como un caso
+        más y terminan bien: un modelo que no cabía en la GPU (409
+        ``insufficient_vram`` en cada petición) salía como «completado» con
+        una nota que no mide nada. Si al menos la mitad de las peticiones del
+        benchmark a ese modelo fallaron, el intento falla con el error más
+        repetido. Los pasajeros que el runner reintenta (429, 502–504) no
+        cuentan.
+        """
+        if self._identity is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(RequestStat.status_code, RequestStat.error).where(
+                        RequestStat.user_id == self._identity.user_id,
+                        RequestStat.started_at >= started_at,
+                        RequestStat.started_at <= finished_at,
+                        sa.or_(
+                            RequestStat.requested_model == model,
+                            RequestStat.model_id == model,
+                        ),
+                    )
+                )
+            ).all()
+        counted = [(code, error) for code, error in rows if code not in _TRANSIENT_STATUS]
+        failed = [(code, error) for code, error in counted if code is not None and code >= 400]
+        if not failed or len(failed) * 2 < len(counted):
+            return None
+        reasons: dict[str, int] = {}
+        for code, error in failed:
+            key = f"{code} {(error or '').strip()[:200]}".strip()
+            reasons[key] = reasons.get(key, 0) + 1
+        top = max(reasons, key=reasons.get)
+        return (
+            f"El modelo no respondió en {len(failed)} de {len(counted)} peticiones del "
+            f"benchmark; el resultado no lo mide. Error más repetido: {top}"
+        )
 
     async def _historical_external_requests(
         self, started_at: datetime, finished_at: datetime, *, node: str | None = None

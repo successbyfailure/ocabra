@@ -146,6 +146,31 @@ def _unattributed_vram_mb(gpu: Any) -> int:
     return unattributed
 
 
+def _foreign_graphics_vram_mb(gpu: Any) -> int:
+    """VRAM held by graphics processes (a desktop on the card, as on Mapache).
+
+    oCabra's workers are compute processes; a graphics-only process is the
+    host's desktop or another app and no eviction frees it. Told apart by
+    type, not by PID: on a containerised node NVML reports the host's PIDs
+    and the workers know the container's (see ``auto_setup.gpu_budgets``).
+    """
+    processes = getattr(gpu, "processes", None) or []
+
+    def field(proc: Any, name: str) -> Any:
+        return proc.get(name) if isinstance(proc, dict) else getattr(proc, name, None)
+
+    compute_pids = {field(p, "pid") for p in processes if field(p, "process_type") == "compute"}
+    total = 0
+    for proc in processes:
+        if field(proc, "process_type") != "graphics" or field(proc, "pid") in compute_pids:
+            continue
+        try:
+            total += int(field(proc, "used_vram_mb") or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 def _gpu_dict(gpu: Any) -> dict[str, int]:
     """Capacity a preset may plan against on this GPU.
 
@@ -156,6 +181,10 @@ def _gpu_dict(gpu: Any) -> dict[str, int]:
     nemotron-3-nano:30b on the 3090 resolved as fitting and then failed every
     load with ``insufficient_vram`` (need 23761/24059 MB, 23647 available).
 
+    A desktop on the card (graphics processes) is also out: counted as just
+    another process, "max" context on Mapache's 6 GB card planned for ~1 GB the
+    desktop never gives back, and every load of that preset failed.
+
     Deliberately NOT the current free VRAM: that depends on what happens to be
     loaded, and would turn presets unfit (→ every request rejected) whenever
     another model sits on the card. Validated presets keep using their
@@ -163,7 +192,12 @@ def _gpu_dict(gpu: Any) -> dict[str, int]:
     admission still admits those against physical free VRAM without buffer.
     """
     total = int(gpu.total_vram_mb)
-    usable = total - _unattributed_vram_mb(gpu) - max(0, int(settings.vram_buffer_mb or 0))
+    usable = (
+        total
+        - _unattributed_vram_mb(gpu)
+        - _foreign_graphics_vram_mb(gpu)
+        - max(0, int(settings.vram_buffer_mb or 0))
+    )
     return {
         "index": int(gpu.index),
         "total_mb": max(0, usable),
@@ -186,7 +220,6 @@ def _uses_unified_kv_pool(state: Any) -> bool:
     if isinstance(raw, str):
         return raw.strip().lower() in {"1", "true", "yes", "on"}
     return bool(raw)
-
 
 
 # Share of an MoE layer's weights that are expert tensors (what --n-cpu-moe

@@ -16,6 +16,27 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.2 — 2026-11-27
+
+### Arreglos
+
+- **El contexto `max` no descontaba el escritorio de la tarjeta.** En una
+  máquina con escritorio en la GPU (Mapache: GTX 1660 de 6 GB con ~1 GB de
+  procesos gráficos), un perfil con contexto `max` se planificaba para memoria
+  que el escritorio nunca suelta. Cada carga fallaba con 409
+  `insufficient_vram`, aunque se expulsara todo lo demás. Ahora esa memoria se
+  descuenta y el contexto se ajusta a lo que de verdad queda.
+- **Un benchmark daba por buena una medida en la que el modelo no respondió.**
+  Algunos runners anotan cada petición fallida como un caso más y terminan
+  bien, así que el intento salía «completado» con una nota que no medía nada.
+  Ahora, si la mitad o más de las peticiones del benchmark a ese modelo
+  fallan, el intento falla con el error más repetido. Los errores pasajeros
+  que el runner reintenta (429, 502–504) no cuentan.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.1 — 2026-11-27
 
 ### Arreglos
