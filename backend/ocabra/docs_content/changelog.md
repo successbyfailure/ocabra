@@ -16,6 +16,24 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.8 — 2026-11-27
+
+### Arreglos
+
+- **Un benchmark con pod propio fallaba entero si la GPU del pod venía
+  averiada.** RunPod da a veces máquinas cuya GPU no inicializa (`cuInit`
+  999). El pod lo detecta y se apaga, y antes eso tumbaba la batería. Ahora
+  se pide otra máquina a los 5 minutos con las mismas GPUs aceptables. Un
+  tipo de GPU que falla tres veces se deja de pedir para esa batería.
+- **El contexto `max` deja margen al escritorio de la tarjeta.** Lo que
+  ocupa un escritorio sube y baja con lo que haya abierto. Con la lectura
+  justa de un momento, a bonsai-2:9b le faltaron 95 MB para cargar en
+  Mapache. Ahora se reservan 256 MB más cuando hay escritorio en la GPU.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.7 — 2026-11-27
 
 ### Arreglos

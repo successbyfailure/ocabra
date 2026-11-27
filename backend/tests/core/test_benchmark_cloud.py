@@ -416,3 +416,52 @@ async def test_un_modelo_que_el_pod_no_pudo_bajar_falla_solo_y_se_sigue(
         assert measured == ["bueno"]
     finally:
         await _delete(run.id)
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_si_toca_una_gpu_averiada_se_espera_y_a_la_tercera_se_deja(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import ocabra.benchmarks.manager as manager_module
+
+    cloud = FakeCloud()
+    manager = _manager(cloud)
+    run = await _new_run(tmp_path)
+    broken = "La GPU del pod no funciona para cómputo (cuInit failed with CUDA error 999)"
+
+    async def launch_broken(gpu: str) -> None:
+        rid = str((await _load(run.id)).cloud_request_id)
+        node_id = str(uuid.uuid4())
+        cloud.requests.rows[rid].update(status="launched", cloudNodeId=node_id)
+        cloud.nodes.append(
+            {"id": node_id, "status": "terminated", "gpu_type_id": gpu, "error": broken}
+        )
+        await manager._advance_provisioning()
+
+    try:
+        await manager._advance_provisioning()
+        await launch_broken("4090")
+        waiting = await _load(run.id)
+        assert waiting.status == "queued" and waiting.cloud_request_id is None
+        assert waiting.cloud["broken_gpus"] == {"4090": 1}
+        # Se espera antes de pedir otra: nada nuevo de momento.
+        await manager._advance_provisioning()
+        assert len(cloud.requests.created) == 1
+        # Pasado el tiempo, otra vez con las mismas GPUs, hasta el tercer fallo.
+        monkeypatch.setattr(manager_module, "BROKEN_POD_RETRY_S", -1)
+        for strike in (2, 3):
+            async with AsyncSessionLocal() as session:
+                row = await session.get(BenchmarkRun, run.id)
+                row.cloud = {**row.cloud, "retry_after": None}
+                await session.commit()
+            await manager._advance_provisioning()
+            assert cloud.requests.created[-1]["gpu_type_ids"] == ["4090", "3090"]
+            await launch_broken("4090")
+            assert (await _load(run.id)).cloud["broken_gpus"] == {"4090": strike}
+        # A la tercera, la 4090 sale de la lista.
+        await manager._advance_provisioning()
+        assert cloud.requests.created[-1]["gpu_type_ids"] == ["3090"]
+        assert len(cloud.requests.created) == 4
+    finally:
+        await _delete(run.id)

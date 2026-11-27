@@ -373,4 +373,5 @@ def test_a_desktop_on_the_card_is_not_planned_for() -> None:
     gpu = SimpleNamespace(index=0, total_vram_mb=6144, free_vram_mb=3407, processes=processes)
     buffer = int(settings.vram_buffer_mb)
     unattributed = 6144 - 3407 - (1198 + 568 + 400)
-    assert _gpu_dict(gpu)["total_mb"] == 6144 - unattributed - 968 - buffer
+    # Lo del escritorio más su margen (sube y baja con lo que haya abierto).
+    assert _gpu_dict(gpu)["total_mb"] == 6144 - unattributed - (968 + 256) - buffer

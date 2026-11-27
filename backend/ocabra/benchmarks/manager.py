@@ -47,6 +47,12 @@ logger = structlog.get_logger(__name__)
 _SERVICE_USERNAME = "__ocabra_benchmark__"
 _SERVICE_KEY_NAME = "ocabra-benchmark"
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
+# Lo que deja el pod que se apaga por tener la GPU averiada (core/cloud/manager.py).
+GPU_BROKEN_MARK = "no funciona para cómputo"
+# GPU averiada en el pod: se vuelve a pedir pasado este tiempo, y un tipo de
+# GPU que falla tantas veces se deja de pedir para esa batería.
+BROKEN_POD_RETRY_S = 300
+BROKEN_GPU_STRIKES = 3
 # Respuestas pasajeras que los runners reintentan: no cuentan como fallo del modelo.
 _TRANSIENT_STATUS = frozenset({429, 502, 503, 504})
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -2151,6 +2157,11 @@ class BenchmarkManager:
             await self._fail_run(run_id, "La nube no está disponible (federación apagada)")
             return
         if request_id is None:
+            retry_after = spec.get("retry_after")
+            if retry_after and datetime.fromisoformat(str(retry_after)) > datetime.now(UTC):
+                # A la anterior le tocó una GPU averiada: se espera un poco.
+                await self._set_phase(run_id, "waiting_capacity")
+                return
             sibling = await self._batch_request(run_id)
             if sibling is None:
                 await self._request_pod(run_id, cloud, spec, models)
@@ -2176,6 +2187,8 @@ class BenchmarkManager:
             run.cloud_node_id = uuid.UUID(node_id)
             await session.commit()
         if node is None or node["status"] in ("terminated", "error"):
+            if node is not None and await self._retry_broken_pod(run_id, spec, node):
+                return
             await self._fail_run(
                 run_id, f"El pod se cayó antes de medir: {(node or {}).get('error') or 'terminado'}"
             )
@@ -2455,6 +2468,62 @@ class BenchmarkManager:
         if not name:
             return None
         return next((p for p in fm.get_online_peers() if p.name.lower() == str(name).lower()), None)
+
+    async def _retry_broken_pod(self, run_id: uuid.UUID, spec: dict, node: dict) -> bool:
+        """Pide otra máquina si al pod le tocó una GPU averiada. ``True`` si lo hizo.
+
+        RunPod da a veces máquinas cuya GPU no inicializa (``cuInit`` 999): el
+        pod lo detecta y se apaga (core/cloud/manager.py). Antes eso tumbaba
+        la batería entera. Ahora se vuelve a pedir pasados
+        ``BROKEN_POD_RETRY_S`` (la máquina siguiente suele ser otra) con las
+        mismas GPUs; un tipo de GPU que falla ``BROKEN_GPU_STRIKES`` veces se
+        deja de pedir. Toda la batería pasa a la máquina nueva.
+        """
+        error = str(node.get("error") or "")
+        if GPU_BROKEN_MARK not in error:
+            return False
+        gpu = str(node.get("gpu_type_id") or "")
+        strikes = (
+            dict(spec.get("broken_gpus") or {}) if isinstance(spec.get("broken_gpus"), dict) else {}
+        )
+        strikes[gpu] = int(strikes.get(gpu) or 0) + 1
+        excluded = {g for g, n in strikes.items() if n >= BROKEN_GPU_STRIKES}
+        remaining = [g for g in spec.get("gpu_type_ids") or [] if g not in excluded]
+        if not remaining:
+            return False
+        retry_at = (datetime.now(UTC) + timedelta(seconds=BROKEN_POD_RETRY_S)).isoformat()
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            query = select(BenchmarkRun).where(BenchmarkRun.id == run_id)
+            if run.batch_id is not None:
+                query = select(BenchmarkRun).where(
+                    BenchmarkRun.batch_id == run.batch_id,
+                    BenchmarkRun.status.not_in(_TERMINAL),
+                )
+            for row in (await session.execute(query)).scalars():
+                cloud = dict(row.cloud or {})
+                cloud["gpu_type_ids"] = [
+                    g for g in cloud.get("gpu_type_ids") or [] if g not in excluded
+                ]
+                cloud["broken_gpus"] = strikes
+                cloud["retry_after"] = retry_at
+                row.cloud = cloud
+                row.cloud_request_id = None
+                row.cloud_node_id = None
+                row.node = None
+                row.status = "queued"
+                row.phase = "waiting_capacity"
+            await session.commit()
+        logger.warning(
+            "benchmark_pod_gpu_broken_retry",
+            run_id=str(run_id),
+            gpu=gpu,
+            strikes=strikes[gpu],
+            excluded=sorted(excluded),
+            retry_at=retry_at,
+        )
+        self.notify()
+        return True
 
     async def _fail_unprepared_model(
         self, run_id: uuid.UUID, models: list[str], cursor: int, index: int, item: dict

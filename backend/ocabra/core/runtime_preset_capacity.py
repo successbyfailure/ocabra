@@ -113,6 +113,8 @@ runtime_capacity_cache = RuntimeCapacityCache()
 # usage (e.g. a busy GPU sampled without per-process info): NVML reserves
 # ~330-400 MiB on these cards plus a few MiB of contexts.
 _DEFAULT_UNATTRIBUTED_MB = 512
+# Margen sobre lo que ocupa un escritorio en la tarjeta (crece y encoge).
+DESKTOP_HEADROOM_MB = 256
 _MAX_PLAUSIBLE_UNATTRIBUTED_MB = 1024
 
 
@@ -168,7 +170,9 @@ def _foreign_graphics_vram_mb(gpu: Any) -> int:
             total += int(field(proc, "used_vram_mb") or 0)
         except (TypeError, ValueError):
             continue
-    return total
+    # Un escritorio no ocupa siempre lo mismo (ventanas, navegador…): con la
+    # lectura exacta de un momento, bonsai-2:9b se quedó a 95 MB de cargar.
+    return total + DESKTOP_HEADROOM_MB if total else 0
 
 
 def _gpu_dict(gpu: Any) -> dict[str, int]:
@@ -335,9 +339,7 @@ def _footprint(
     if effective <= 0 or not gpus:
         return {}
     if backend in ("vllm", "sglang"):
-        per_gpu = {
-            int(g["index"]): int(int(g["total_mb"]) * gpu_memory_utilization) for g in gpus
-        }
+        per_gpu = {int(g["index"]): int(int(g["total_mb"]) * gpu_memory_utilization) for g in gpus}
         return {
             "estimated_vram_mb": sum(per_gpu.values()),
             "vram_by_gpu": per_gpu,
