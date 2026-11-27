@@ -974,6 +974,10 @@ class BenchmarkManager:
             finally:
                 async with self._process_lock:
                     self._processes.discard(process)
+        if interruption is None and self._stop.is_set():
+            # El api se está apagando y ha terminado el runner (código -15):
+            # no es un fallo del modelo; al arrancar se retoma desde su punto.
+            interruption = "shutdown"
         return ProcessOutcome(process.returncode, interruption, external)
 
     async def _control_state(self, run_id: uuid.UUID) -> tuple[str, bool]:
@@ -1849,6 +1853,8 @@ class BenchmarkManager:
         return attempt
 
     async def _persist_interrupted_without_attempt(self, run_id: uuid.UUID, reason: str) -> None:
+        if reason == "shutdown":
+            return  # Sigue «running»: el arranque siguiente la vuelve a la cola.
         if reason == "cancelled":
             await self._mark_cancelled(run_id)
         elif reason == "manual":
@@ -1870,10 +1876,16 @@ class BenchmarkManager:
                 attempt.return_code = outcome.return_code
                 attempt.external_requests = external
                 attempt.environment = environment
-                attempt.error = f"Interrumpido: {outcome.interruption}"
+                attempt.error = (
+                    "API reiniciada durante el intento; se reanudará"
+                    if outcome.interruption == "shutdown"
+                    else f"Interrumpido: {outcome.interruption}"
+                )
                 attempt.finished_at = datetime.now(UTC)
                 await session.commit()
         run_id = await self._attempt_run_id(attempt_id)
+        if outcome.interruption == "shutdown":
+            return  # Sigue «running»: el arranque siguiente la vuelve a la cola.
         if outcome.interruption == "cancelled":
             await self._mark_cancelled(run_id)
         elif outcome.interruption == "manual":

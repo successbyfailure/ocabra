@@ -16,6 +16,20 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.9 — 2026-11-27
+
+### Arreglos
+
+- **Reiniciar el servidor podía dar por fallido el modelo que se estaba
+  midiendo.** Al apagarse, el api termina los runners en curso. Si el runner
+  terminaba antes de que el arranque siguiente lo viera, el intento quedaba
+  «fallido» («el runner terminó con código -15») y no se retomaba. Ahora queda
+  interrumpido y se reanuda desde su punto, como los demás.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.8 — 2026-11-27
 
 ### Arreglos

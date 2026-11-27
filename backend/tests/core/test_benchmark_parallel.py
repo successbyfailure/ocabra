@@ -435,3 +435,41 @@ async def test_si_el_disco_se_llena_a_mitad_la_descarga_espera() -> None:
         SimpleNamespace(proxy_get=proxy_get), SimpleNamespace(peer_id="p"), item, {}
     )
     assert item["status"] == "pending" and item["waiting_disk"] is True
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_un_runner_cortado_al_apagar_el_api_no_es_un_fallo(tmp_path: Path) -> None:
+    import asyncio
+    import sys
+
+    from ocabra.benchmarks.manager import BenchmarkIdentity
+
+    manager = _manager(FakeCloud())
+    manager._identity = BenchmarkIdentity(None, "ocabra-benchmark", "secret")
+    run = await _new_run(tmp_path)
+    async with AsyncSessionLocal() as session:
+        row = await session.get(BenchmarkRun, run.id)
+        row.status = "running"
+        await session.commit()
+    try:
+        task = asyncio.create_task(
+            manager._run_process(
+                run.id,
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                tmp_path,
+                tmp_path / "runner.log",
+                detect_external=False,
+            )
+        )
+        for _ in range(50):
+            if manager._processes:
+                break
+            await asyncio.sleep(0.1)
+        # Lo que hace stop(): marcar el apagado y terminar los runners.
+        manager._stop.set()
+        await manager._terminate_process()
+        outcome = await asyncio.wait_for(task, timeout=20)
+        assert outcome.return_code != 0 and outcome.interruption == "shutdown"
+    finally:
+        await _delete(run.id)
