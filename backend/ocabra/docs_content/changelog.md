@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.5 — 2026-11-27
+
+### Arreglos
+
+- **Una medida en un pod se descartaba por peticiones de otra suite.** Si
+  otra ejecución usaba el mismo modelo aquí sin fijar nodo (de juez, por
+  ejemplo), la comprobación «¿se sirvió donde se pidió?» las contaba y daba
+  «se sirvieron en local» a una medida buena. Ahora, en un nodo, solo cuentan
+  las peticiones forzadas a ese nodo. Desde 0.144.1 son las únicas que puede
+  hacer el benchmark: si el nodo no está, reciben 503 en vez de servirse en
+  otro sitio.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.4 — 2026-11-27
 
 ### Arreglos

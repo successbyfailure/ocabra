@@ -182,14 +182,17 @@ def belongs_to_run(row, node: str | None) -> bool:
     Varias ejecuciones miden a la vez en máquinas distintas con la misma
     identidad de servicio (y a menudo el mismo modelo). Las del runner van
     forzadas a su nodo (``/_node/<nodo>/`` → ruta ``forced``): una forzada a
-    otro nodo es de otra ejecución. Una que se sirvió en otro sitio sin
-    forzarse sí cuenta: es justo lo que hay que detectar.
+    otro nodo es de otra ejecución. En una medida local cuenta todo lo que no
+    va forzado a un nodo.
     """
     route = getattr(row, "federation_route", None)
     target = (getattr(row, "remote_node_name", None) or "").lower()
-    if route != "forced":
-        return True
-    return bool(node) and target == node.lower()
+    if node:
+        # El runner va siempre forzado a su nodo, y una petición forzada ya no
+        # se sirve en otro sitio (503 si el nodo no está): lo que no va forzado
+        # aquí es de otra ejecución o de otra suite (un juez sin /_node/).
+        return route == "forced" and target == node.lower()
+    return route != "forced"
 
 
 def execution_observations(rows, gpu_states: dict[int, object]) -> dict[str, object]:
@@ -1355,17 +1358,26 @@ class BenchmarkManager:
             row
             for row in rows
             if row.started_at + timedelta(milliseconds=row.duration_ms or 0) >= started_at
-            and belongs_to_run(row, node)
         ]
+        if not node:
+            rows = [row for row in rows if belongs_to_run(row, None)]
         auxiliary_nodes: list[str] = []
         if node:
             # En un nodo remoto se describe el modelo medido. Los auxiliares
             # que fija la suite (el reranker de Escriba, jueces…) se sirven
             # donde estén y solo se anotan: no son lo que se mide.
             profile = str((base.get("model") or {}).get("profile") or "")
-            measured = [row for row in rows if (row.requested_model or row.model_id) == profile]
+            measured = [
+                row
+                for row in rows
+                if (row.requested_model or row.model_id) == profile and belongs_to_run(row, node)
+            ]
             auxiliary_nodes = sorted(
-                {row.remote_node_name or "local" for row in rows if row not in measured}
+                {
+                    row.remote_node_name or "local"
+                    for row in rows
+                    if (row.requested_model or row.model_id) != profile
+                }
             )
             rows = measured
         gpu_manager = getattr(self._app.state, "gpu_manager", None)

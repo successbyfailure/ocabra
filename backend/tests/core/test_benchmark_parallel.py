@@ -372,16 +372,16 @@ def test_las_peticiones_forzadas_a_otro_nodo_son_de_otra_ejecucion() -> None:
     def row(route, node):
         return SimpleNamespace(federation_route=route, remote_node_name=node)
 
+    pod = "ocabra-bench-bfcl-df2426"
     # IFEval en el pod de BFCL mientras Fulcrum mide el mismo modelo en el suyo.
-    assert belongs_to_run(row("forced", "ocabra-bench-bfcl-df2426"), "ocabra-bench-bfcl-df2426")
-    assert not belongs_to_run(
-        row("forced", "ocabra-bench-fulcrum-af0679"), "ocabra-bench-bfcl-df2426"
-    )
-    # Servida en otro sitio sin forzar: cuenta (es lo que hay que detectar).
-    assert belongs_to_run(row("no_peer_has_model", None), "ocabra-bench-bfcl-df2426")
-    # Una medida local no ve las de los pods.
+    assert belongs_to_run(row("forced", pod), pod)
+    assert not belongs_to_run(row("forced", "ocabra-bench-fulcrum-af0679"), pod)
+    # Sin forzar (el juez de otra suite, servido aquí): no es de esta medida.
+    assert not belongs_to_run(row("no_peer_has_model", None), pod)
+    # Una medida local no ve las de los pods, sí las suyas.
     assert not belongs_to_run(row("forced", "Mapache"), None)
     assert belongs_to_run(row(None, None), None)
+    assert belongs_to_run(row("no_peer_has_model", None), None)
 
 
 @pytest.mark.asyncio
