@@ -16,6 +16,26 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.14 — 2026-11-27
+
+### Arreglos
+
+- **Modelos grandes de llama.cpp copiados a un pod de 24 GB rechazaban todas
+  las peticiones** (400 «no enabled runtime preset that fits»). Nuestros
+  perfiles fijan contextos medidos en nuestras GPUs, como gemma4:26b con
+  262 144 tokens × 4 en una 3090, validados con sondas. El pod no tiene esos
+  presets ni esas medidas, y con la configuración base daba que no cabían.
+  Ahora, si un perfil del pod se queda sin presets, recibe uno de contexto
+  máximo (`max`, con los mismos slots y tipo de KV), que se ajusta a lo que
+  quepa en su GPU. Probado en un pod: qwen3.8:27b pasa a caber en una 3090
+  con 53 856 tokens repartidos en 4 slots.
+- **El reparto entre nuestras GPUs (`split_mode`) viajaba al pod.** Ya no se
+  copia, igual que `tensor_split` y `main_gpu`.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.13 — 2026-11-27
 
 ### Arreglos

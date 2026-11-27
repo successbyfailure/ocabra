@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from types import SimpleNamespace
 
@@ -224,10 +225,17 @@ async def test_preload_downloads_then_loads_on_the_node(hub, our_model):  # noqa
 
     async def proxy_get(p, path, headers=None, timeout=None):  # noqa: ASYNC109 — mirrors the real signature
         calls.append(("GET", path, None))
+        if path.endswith("/profiles"):
+            return httpx.Response(200, json=[{"profile_id": KEY, "runtime_presets": []}])
         return httpx.Response(200, json={"job_id": "j1", **job})
+
+    async def proxy_raw(p, method, path, content, headers=None):
+        calls.append((method, path, json.loads(content) if content else None))
+        return httpx.Response(201, json={})
 
     fm.proxy_request = proxy_request
     fm.proxy_get = proxy_get
+    fm.proxy_raw = proxy_raw
 
     await fm.cloud.reconcile()  # pending → downloading
     item = (await _node(fm, node["id"]))["preload_models"][0]
@@ -248,6 +256,9 @@ async def test_preload_downloads_then_loads_on_the_node(hub, our_model):  # noqa
     await fm.cloud.reconcile()  # load finished → loaded
     assert (await _node(fm, node["id"]))["preload_models"][0]["status"] == "loaded"
     assert ("POST", f"/ocabra/models/{MID}/load", {}) in calls
+    # Antes de cargar, el perfil del pod (sin presets) recibió uno de contexto máximo.
+    preset = next(c for c in calls if c[0] == "POST" and c[1].endswith("/runtime-presets"))
+    assert preset[2]["context_mode"] == "max"
 
 
 @requires_db
@@ -1282,3 +1293,59 @@ def test_un_modelo_de_hf_con_vision_se_copia_sin_su_proyector():
     )  # fmt: skip
     _node_id, body = replication_request(ollama_row, 24564)
     assert body["register_config"]["extra_config"]["llama_cpp"]["vision_mode"] == "on_demand"
+
+
+async def test_un_perfil_del_pod_sin_presets_recibe_uno_de_contexto_maximo():
+    from ocabra.core.cloud import preload
+
+    calls = []
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        return httpx.Response(
+            200,
+            json=[
+                {"profile_id": "gemma4:26b", "runtime_presets": []},
+                {"profile_id": "ya-planificado", "runtime_presets": [{"preset_key": "normal"}]},
+            ],
+        )
+
+    async def proxy_raw(peer, method, path, content, headers=None):
+        calls.append((method, path, json.loads(content)))
+        return httpx.Response(201, json={})
+
+    row = SimpleNamespace(
+        backend_type="llamacpp_mks",
+        extra_config={
+            "llama_cpp": {"parallel_slots": 4, "cache_type_k": "q8_0", "ctx_size": 262144}
+        },
+    )
+    preset = preload.pod_preset(row)
+    assert preset["context_mode"] == "max" and preset["parallelism"] == 4
+    assert preset["kv_cache_dtype"] == "q8" and preset["is_default"] is True
+    assert preload.pod_preset(SimpleNamespace(backend_type="ollama", extra_config={})) is None
+    item = {
+        "model_id": "llamacpp_mks/gemma4:26b",
+        "node_model_id": "llamacpp_mks/gemma4:26b",
+        "steps": preload.with_defaults_step([{"kind": "load"}], None, preset),
+        "step": 0,
+    }
+    fm = SimpleNamespace(proxy_get=proxy_get, proxy_raw=proxy_raw)
+    assert await preload._start_step(fm, SimpleNamespace(), item, {}, ("p", "m")) is True
+    # Solo el que no tenía ninguno; el ya planificado se respeta.
+    assert [(m, p) for m, p, _ in calls] == [
+        ("POST", "/ocabra/profiles/gemma4:26b/runtime-presets")
+    ]
+    assert calls[0][2]["preset_key"] == "pod"
+
+
+def test_el_reparto_de_nuestras_gpus_no_viaja_al_pod():
+    row = SimpleNamespace(
+        backend_type="llamacpp_mks",
+        artifact={"source": "ollama", "ref": "qwen3.8:27b", "kind": "gguf"},
+        model_key="qwen3.8:27b",
+        model_id="llamacpp_mks/qwen3.8:27b",
+        extra_config={"llama_cpp": {"split_mode": "tensor", "main_gpu": 1, "tensor_split": [1, 3]}},
+    )
+    _node_id, body = replication_request(row, 24564)
+    cfg = body["register_config"]["extra_config"].get("llama_cpp") or {}
+    assert not {"split_mode", "main_gpu", "tensor_split"} & set(cfg)

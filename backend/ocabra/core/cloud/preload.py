@@ -39,7 +39,14 @@ from ocabra.core.cloud.manager import CloudError
 logger = structlog.get_logger(__name__)
 
 # Settings tied to *our* GPU layout: meaningless (or harmful) on another box.
-_HOST_SPECIFIC = ("disabled_gpus", "main_gpu", "tensor_split", "preferred_gpus", "gpu_indices")
+_HOST_SPECIFIC = (
+    "disabled_gpus",
+    "main_gpu",
+    "tensor_split",
+    "split_mode",  # «tensor» reparte entre nuestras dos GPUs; el pod tiene las suyas
+    "preferred_gpus",
+    "gpu_indices",
+)
 # Left free on the node's GPU for the CUDA context and the projector/draft.
 GPU_MARGIN_MB = 1500
 MIN_CONTEXT = 32768
@@ -444,11 +451,47 @@ async def hub_request_defaults(session_factory: Any, model_id: str) -> dict[str,
     return None
 
 
-def with_defaults_step(steps: list[dict[str, Any]], defaults: dict[str, Any] | None) -> list:
-    """*steps* plus copying our profile defaults to the node, before loading."""
-    if not defaults:
+def pod_preset(model_row: Any) -> dict[str, Any] | None:
+    """Preset para un perfil del pod que se quedó sin ninguno (llama.cpp).
+
+    Nuestros perfiles fijan contextos medidos en nuestras GPUs (gemma4:26b,
+    262 144 tokens × 4 en una 3090, validado con sondas). El pod no tiene esos
+    presets ni esas medidas: con la configuración base, su planificador decía
+    que no cabía y rechazaba todo («no enabled runtime preset that fits»). Con
+    ``max`` el contexto se ajusta a lo que quepa en su GPU, con nuestros slots.
+    """
+    from ocabra.core.model_ref import LLAMA_CPP_FAMILY
+
+    if str(getattr(model_row, "backend_type", "")) not in LLAMA_CPP_FAMILY:
+        return None
+    extra = model_row.extra_config if isinstance(model_row.extra_config, dict) else {}
+    cfg = extra.get("llama_cpp") if isinstance(extra.get("llama_cpp"), dict) else {}
+    slots = cfg.get("parallel_slots")
+    kv = str(cfg.get("cache_type_k") or "q8_0")
+    return {
+        "preset_key": "pod",
+        "label": "Pod (contexto máximo)",
+        "context_mode": "max",
+        "parallelism": int(slots) if isinstance(slots, int) and slots > 0 else 4,
+        "kv_cache_dtype": "q8" if kv.startswith("q8") else "q4" if kv.startswith("q4") else "fp16",
+        "is_default": True,
+    }
+
+
+def with_defaults_step(
+    steps: list[dict[str, Any]],
+    defaults: dict[str, Any] | None,
+    preset: dict[str, Any] | None = None,
+) -> list:
+    """*steps* plus setting the node's profiles up like ours, before loading."""
+    if not defaults and not preset:
         return steps
-    step = {"kind": "defaults", "request_defaults": defaults, "label": "valores por defecto"}
+    step = {
+        "kind": "defaults",
+        "request_defaults": defaults,
+        "ensure_preset": preset,
+        "label": "valores por defecto",
+    }
     load = next((i for i, s in enumerate(steps) if s.get("kind") == "load"), len(steps))
     return [*steps[:load], step, *steps[load:]]
 
@@ -616,26 +659,35 @@ async def _start_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) -
         resp = await fm.proxy_get(peer, f"/ocabra/models/{model_id}/profiles")
         if resp.status_code >= 400:
             raise CloudError(f"No se pudieron leer los perfiles: {resp.text[:200]}", 502)
-        body = json.dumps({"request_defaults": step["request_defaults"]}).encode()
+        defaults = step.get("request_defaults")
+        preset = step.get("ensure_preset")
         for profile in resp.json() or []:
             pid = profile.get("profile_id") or profile.get("profileId")
             if not pid:
                 continue
-            patch = await fm.proxy_raw(
-                peer,
-                "PATCH",
-                f"/ocabra/profiles/{pid}",
-                body,
-                {"content-type": "application/json"},
-            )
-            try:
-                text = (await patch.aread()).decode(errors="replace")
-            finally:
-                await patch.aclose()
-            if patch.status_code >= 400:
-                raise CloudError(f"No se pudo ajustar el perfil {pid}: {text[:200]}", 502)
+            if defaults:
+                await _node_json(
+                    fm, peer, "PATCH", f"/ocabra/profiles/{pid}", {"request_defaults": defaults}
+                )
+            presets = profile.get("runtime_presets") or profile.get("runtimePresets") or []
+            if preset and not presets:
+                await _node_json(
+                    fm, peer, "POST", f"/ocabra/profiles/{pid}/runtime-presets", preset
+                )
         return True
     raise CloudError(f"Paso desconocido: {kind}", 500)
+
+
+async def _node_json(fm: Any, peer: Any, method: str, path: str, body: dict) -> None:
+    resp = await fm.proxy_raw(
+        peer, method, path, json.dumps(body).encode(), {"content-type": "application/json"}
+    )
+    try:
+        text = (await resp.aread()).decode(errors="replace")
+    finally:
+        await resp.aclose()
+    if resp.status_code >= 400:
+        raise CloudError(f"El nodo rechazó {method} {path}: {text[:200]}", 502)
 
 
 async def _restart_stalled_download(fm: Any, peer: Any, item: dict, job: dict) -> None:
@@ -818,6 +870,7 @@ async def _drive_item(fm: Any, peer: Any, active: dict, tasks: dict) -> None:
                     await hub_request_defaults(fm.session_factory, str(row.model_id))
                     if backend is None
                     else None,
+                    pod_preset(row) if (backend or str(row.backend_type)) != "ollama" else None,
                 )
             if active.get("load") is False:
                 # «Solo descargar»: on the node, ready, loaded when asked for.
