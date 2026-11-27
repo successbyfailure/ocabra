@@ -224,3 +224,51 @@ def test_ifeval_espera_a_que_vuelva_el_nodo(monkeypatch) -> None:
     monkeypatch.setattr(ifeval.urllib.request, "urlopen", bad)
     with pytest.raises(RuntimeError):
         ifeval._request("p", "m")
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_se_borra_del_pod_lo_que_ya_no_necesita_ninguna_prueba(tmp_path: Path) -> None:
+    import uuid
+
+    import httpx
+
+    cloud = FakeCloud()
+    manager = _manager(cloud)
+    node_id = uuid.uuid4()
+    batch = uuid.uuid4()
+    cloud.nodes.append({"id": str(node_id), "status": "running", "peer_name": "pod-1"})
+    deleted: list[str] = []
+
+    async def proxy_raw(peer, method, path, content, headers=None):
+        assert method == "DELETE"
+        deleted.append(path)
+        return httpx.Response(200, json={"ok": True})
+
+    peer = SimpleNamespace(name="pod-1")
+    manager._app.state.federation_manager.get_online_peers = lambda: [peer]
+    manager._app.state.federation_manager.proxy_raw = proxy_raw
+    models = ["a:1b", "b:1b", "c:1b"]
+    ifeval = await _new_run(tmp_path, cloud_node_id=node_id, batch_id=batch)
+    bfcl = await _new_run(tmp_path, cloud_node_id=node_id, batch_id=batch)
+    async with AsyncSessionLocal() as session:
+        for run_id, index in ((ifeval.id, 2), (bfcl.id, 1)):
+            row = await session.get(BenchmarkRun, run_id)
+            row.models = models
+            row.current_model_index = index
+            await session.commit()
+    try:
+        # IFEval ya hizo a y b; BFCL solo a: se puede borrar a, b todavía no.
+        await manager._free_pod_models(ifeval.id)
+        assert deleted == ["/ocabra/models/llamacpp_mks/a:1b?delete_files=true"]
+        await manager._free_pod_models(ifeval.id)
+        assert len(deleted) == 1  # no se pide dos veces
+        async with AsyncSessionLocal() as session:
+            row = await session.get(BenchmarkRun, bfcl.id)
+            row.current_model_index = 2
+            await session.commit()
+        await manager._free_pod_models(bfcl.id)
+        assert deleted[-1] == "/ocabra/models/llamacpp_mks/b:1b?delete_files=true"
+    finally:
+        await _delete(ifeval.id)
+        await _delete(bfcl.id)

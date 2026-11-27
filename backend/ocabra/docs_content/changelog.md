@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.0 — 2026-11-27
+
+### Cambios
+
+- **Disco del pod al lanzarlo.** `POST /ocabra/cloud/nodes`,
+  `POST /ocabra/cloud/requests` y el `cloud` de las ejecuciones y planes de
+  benchmark aceptan `container_disk_gb` (20–2000). Sin él se usa el de los
+  ajustes de RunPod, como antes.
+- **Las baterías con pod borran cada modelo al terminar sus pruebas.** En
+  cuanto ninguna prueba de la batería necesita ya un modelo, se borra del pod
+  con sus ficheros. Así una batería de muchos modelos cabe en un disco
+  pequeño. Un modelo que comparte fichero con otro aún pendiente
+  (`llamacpp_mks/x` y `ollama/x`) se conserva hasta que acaben los dos.
+- **Una descarga de la batería que aún no cabe espera.** Si el pod no tiene
+  sitio para empezar una descarga, el modelo queda «esperando disco» y se
+  vuelve a intentar al liberarse espacio. Antes fallaba la batería entera.
+- **Los pods exigen 5 GB libres para descargar, no 30.** El mínimo del hub
+  (`download_min_free_gb`) se comía casi todo el disco de un pod de 80 GB.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.144.1 — 2026-11-27
 
 ### Arreglos

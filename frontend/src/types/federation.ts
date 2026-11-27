@@ -231,11 +231,15 @@ export interface CloudPreloadItem {
   step?: number;
   /** What the current step is working on (e.g. the HF repo being fetched). */
   phase?: string | null;
+  /** Benchmark: the pod had no room yet; retried as earlier models are freed. */
+  waiting_disk?: boolean;
 }
 
 export interface CloudNodeLaunch {
   gpu_type_id: string;
   gpu_count?: number;
+  /** Disco del pod en GB; sin él, el de los ajustes. */
+  container_disk_gb?: number;
   cloud_type?: "COMMUNITY" | "SECURE";
   max_runtime_minutes?: number;
   idle_shutdown_minutes?: number;

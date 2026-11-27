@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { api } from "@/api/client"
+import { PodDiskSlider } from "@/components/federation/PodDiskSlider"
 import type { BenchmarkCloudSpec, CloudGpuType } from "@/types"
 
 /** Valor del selector de nodo que significa «lanzar un pod propio». */
@@ -31,19 +32,26 @@ export const DEFAULT_CLOUD_SPEC: BenchmarkCloudSpec = {
 export function BenchmarkCloudFields({
   value,
   onChange,
+  modelIds = [],
 }: {
   value: BenchmarkCloudSpec
   onChange: (next: BenchmarkCloudSpec) => void
+  /** Modelos nuestros que irán al pod (para sugerir el disco). */
+  modelIds?: string[]
 }) {
   const [gpus, setGpus] = useState<CloudGpuType[] | null>(null)
   const [backends, setBackends] = useState<string[]>([])
   const [minVram, setMinVram] = useState("")
   const [defaultCloud, setDefaultCloud] = useState<"COMMUNITY" | "SECURE" | null>(null)
+  const [defaultDisk, setDefaultDisk] = useState<number | null>(null)
 
   useEffect(() => {
     api.federation.cloud.gpuTypes().then(setGpus).catch(() => setGpus([]))
     api.federation.cloud.getRunpod()
-      .then((info) => setDefaultCloud(info.settings.cloud_type))
+      .then((info) => {
+        setDefaultCloud(info.settings.cloud_type)
+        setDefaultDisk(info.settings.container_disk_gb)
+      })
       .catch(() => setDefaultCloud("COMMUNITY"))
     api.backends.list()
       .then((items) => setBackends(items.map((item) => item.backendType).sort()))
@@ -129,6 +137,13 @@ export function BenchmarkCloudFields({
           <input type="number" min={1} max={168} value={Math.round(value.max_runtime_minutes / 60)} onChange={(e) => set({ max_runtime_minutes: Math.max(1, Number(e.target.value) || 8) * 60 })} className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1" />
         </label>
       </div>
+      <PodDiskSlider
+        value={value.container_disk_gb}
+        defaultGb={defaultDisk}
+        modelIds={modelIds}
+        freesAsItGoes
+        onChange={(gb) => set({ container_disk_gb: gb })}
+      />
       {backends.length > 0 && (
         <div>
           <span className="font-medium">Backends a instalar</span>

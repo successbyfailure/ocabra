@@ -43,6 +43,7 @@ RECIPE_SNAPSHOT_EVERY_S = 600
 RECIPE_SNAPSHOT_TIMEOUT_S = 30
 STARTUP_DELAY_S = 15
 POD_NAME_PREFIX = "ocabra-"
+POD_MIN_FREE_GB = 5
 # A pod that has been running this long without joining us is broken (bad
 # image, can't reach us): stop paying for it.
 JOIN_TIMEOUT = timedelta(minutes=30)
@@ -520,8 +521,12 @@ class CloudNodeManager:
         download_only: list[str] | None = None,
         backends: list[str] | None = None,
         benchmark_prefetch: bool = False,
+        container_disk_gb: int | None = None,
     ) -> dict[str, Any]:
         """Create a pod that joins us as a swarm peer. Returns the node.
+
+        *container_disk_gb*: the pod's disk for this launch (None = the
+        provider default, ``container_disk_gb`` in its settings).
 
         *models* are our model ids to replicate there once it joins
         (see core/cloud/preload.py); they are validated before renting anything.
@@ -577,6 +582,9 @@ class CloudNodeManager:
             "OCABRA_ADMIN_PASS": secrets.token_urlsafe(24),
             # The pod kills itself if it can't keep its tunnel (see node watchdog).
             "OCABRA_CLOUD_SELF_DESTRUCT_MINUTES": "20",
+            # El mínimo libre del hub (30 GB) se comía casi todo el disco de un
+            # pod de 80; en un pod desechable basta con no llenarlo del todo.
+            "DOWNLOAD_MIN_FREE_GB": str(POD_MIN_FREE_GB),
         }
         if benchmark_prefetch:
             env["DOWNLOAD_WORKERS"] = "2"
@@ -609,7 +617,7 @@ class CloudNodeManager:
             gpu_type_id=gpu_type_id,
             gpu_count=max(1, int(gpu_count)),
             cloud_type=(cloud_type or cfg["cloud_type"]).upper(),
-            container_disk_gb=int(cfg["container_disk_gb"]),
+            container_disk_gb=int(container_disk_gb or cfg["container_disk_gb"]),
             env=env,
             min_cuda_version=await preload.required_cuda(self.fm.session_factory, models),
             network_volume_id=volume_id,

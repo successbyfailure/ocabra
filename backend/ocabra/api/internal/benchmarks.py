@@ -55,6 +55,9 @@ class BenchmarkCloudSpec(BaseModel):
         default=90, ge=5, le=24 * 60, description="Tope desde que sale el pod hasta que está listo"
     )
     max_runtime_minutes: int = Field(default=480, ge=30, le=7 * 24 * 60)
+    container_disk_gb: int | None = Field(
+        default=None, ge=20, le=2000, description="Disco del pod en GB; None = el de los ajustes"
+    )
     terminate_after: bool = True
 
 

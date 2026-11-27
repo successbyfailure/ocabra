@@ -292,6 +292,11 @@ export function Benchmarks() {
     runs, appName, suiteName, suiteProfileArgs(appName, profile), models,
   ), [appName, models, profile, runs, suiteName])
   const selectedPeer = peers.find((peer) => peer.name === node)
+  // Lo que se copiará al pod por cada modelo elegido (perfil → su despliegue).
+  const podModelIds = useMemo(
+    () => models.map((model) => profiles.find((item) => item.profileId === model)?.baseModelId ?? model),
+    [models, profiles],
+  )
   const modelOptions = useMemo<BenchmarkModelOption[]>(
     () => (selectedPeer
       ? peerModelOptions(selectedPeer)
@@ -609,7 +614,7 @@ export function Benchmarks() {
                       </option>
                     ))}
                   </select>
-                  {node === CLOUD_NODE && <BenchmarkCloudFields value={cloudSpec} onChange={setCloudSpec} />}
+                  {node === CLOUD_NODE && <BenchmarkCloudFields value={cloudSpec} onChange={setCloudSpec} modelIds={podModelIds} />}
                   {selectedPeer && (
                     <p className="text-xs text-muted-foreground">
                       El runner sigue aquí y cada petición va forzada a {selectedPeer.name}. El túnel añade

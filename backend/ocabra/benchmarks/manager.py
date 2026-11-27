@@ -270,6 +270,8 @@ class BenchmarkManager:
         # runner), uno por ejecución en curso; «diagnosis» es el del diagnóstico.
         self._sampling_overrides: dict[str, dict[str, object]] = {}
         self._last_diagnosis_purge = 0.0
+        # (nodo de la nube, modelo) ya borrados del pod: no se vuelve a pedir.
+        self._freed_pod_models: set[tuple[str, str]] = set()
 
     @property
     def sampling_overrides(self) -> list[dict[str, object]]:
@@ -1897,6 +1899,7 @@ class BenchmarkManager:
                     run.node = None  # El siguiente modelo puede seguir descargándose.
             await session.commit()
             finished = run.status == "completed"
+        await self._free_pod_models(run_id)
         if finished:
             await self._release_cloud(run_id)
         self.notify()
@@ -1928,6 +1931,7 @@ class BenchmarkManager:
                     if run.cloud:
                         run.node = None
                 await session.commit()
+                await self._free_pod_models(run_id)
                 if last:
                     await self._release_cloud(run_id)
                 self.notify()
@@ -2223,6 +2227,7 @@ class BenchmarkManager:
             "volume_id": spec.get("volume_id"),
             "privacy_mode": spec.get("privacy_mode") or "functional",
             "max_runtime_minutes": int(spec.get("max_runtime_minutes") or 480),
+            "container_disk_gb": spec.get("container_disk_gb"),
             # Entre que queda listo y la primera petición no hay tráfico: margen.
             "idle_shutdown_minutes": 60,
         }
@@ -2257,6 +2262,93 @@ class BenchmarkManager:
         except ValueError:
             return None
         return pending.model_id if pending is not None else None
+
+    async def _free_pod_models(self, run_id: uuid.UUID) -> None:
+        """Borra del pod los modelos que ya no necesita ninguna prueba de la batería.
+
+        El disco del pod no da para todos los modelos de una batería grande:
+        en cuanto un modelo ha pasado por todas sus pruebas se borra (con sus
+        ficheros) y deja sitio a las descargas de los siguientes. Se protege
+        por modelo, no por despliegue: ``llamacpp_mks/x`` y ``ollama/x`` leen
+        el mismo fichero, así que no se borra ninguno mientras quede el otro.
+        """
+        try:
+            async with AsyncSessionLocal() as session:
+                run = await self._get_run(session, run_id)
+                if not run.cloud or run.cloud_node_id is None:
+                    return
+                node_id = run.cloud_node_id
+                mates = select(BenchmarkRun).where(BenchmarkRun.cloud_node_id == node_id)
+                if run.batch_id is not None:
+                    mates = select(BenchmarkRun).where(
+                        sa.or_(
+                            BenchmarkRun.cloud_node_id == node_id,
+                            BenchmarkRun.batch_id == run.batch_id,
+                        )
+                    )
+                rows = list((await session.execute(mates)).scalars())
+            pending: set[str] = set()
+            done: set[str] = set()
+            for row in rows:
+                models = list(row.models or [])
+                cut = len(models) if row.status in _TERMINAL else row.current_model_index
+                done.update(models[:cut])
+                pending.update(models[cut:])
+            pending_ids = {mid for mid in [await self._pod_model_id(m) for m in pending] if mid}
+            busy_keys = {mid.split("/", 1)[-1] for mid in pending_ids}
+            to_free: list[str] = []
+            for model in sorted(done - pending):
+                mid = await self._pod_model_id(model)
+                if (
+                    mid
+                    and mid not in pending_ids
+                    and mid.split("/", 1)[-1] not in busy_keys
+                    and (str(node_id), mid) not in self._freed_pod_models
+                    and mid not in to_free
+                ):
+                    to_free.append(mid)
+            if not to_free:
+                return
+            peer = await self._cloud_peer(str(node_id))
+            if peer is None:
+                return
+            from urllib.parse import quote
+
+            fm = self._app.state.federation_manager
+            for mid in to_free:
+                response = await fm.proxy_raw(
+                    peer, "DELETE", f"/ocabra/models/{quote(mid, safe='/:')}?delete_files=true", b""
+                )
+                try:
+                    await response.aread()
+                finally:
+                    await response.aclose()
+                if response.status_code < 400 or response.status_code == 404:
+                    self._freed_pod_models.add((str(node_id), mid))
+                    logger.info("benchmark_pod_model_freed", node=peer.name, model=mid)
+                else:
+                    logger.warning(
+                        "benchmark_pod_model_free_failed",
+                        node=peer.name,
+                        model=mid,
+                        status=response.status_code,
+                    )
+        except Exception as exc:  # noqa: BLE001 — liberar disco no debe parar la medida
+            logger.warning("benchmark_pod_free_error", run_id=str(run_id), error=str(exc))
+
+    async def _cloud_peer(self, node_id: str):
+        """El peer de federación de un nodo de la nube, si está conectado."""
+        fm = getattr(self._app.state, "federation_manager", None)
+        cloud = getattr(fm, "cloud", None)
+        if fm is None or cloud is None:
+            return None
+        name = next(
+            (n.get("peer_name") for n in await cloud.list_nodes() if str(n.get("id")) == node_id),
+            None,
+        )
+        if not name:
+            return None
+        return next((p for p in fm.get_online_peers() if p.name.lower() == str(name).lower()), None)
 
     async def _mark_skipped(self, run_id: uuid.UUID, skipped: dict[str, str]) -> None:
         """Anota en la ejecución (y su batería) los modelos que no irán al pod."""

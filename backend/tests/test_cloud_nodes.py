@@ -359,6 +359,16 @@ async def test_launch_creates_pod_with_single_use_invite(hub):
 
 
 @requires_db
+async def test_el_disco_del_pod_se_elige_al_lanzar(hub):
+    fm, fake = hub
+    await fm.cloud.launch(gpu_type_id="3090", container_disk_gb=150)
+    await fm.cloud.launch(gpu_type_id="3090")
+    assert [spec.container_disk_gb for spec in fake.created] == [150, 80]
+    # El mínimo libre del hub (30 GB) no viaja: el pod pide solo 5.
+    assert fake.created[0].env["DOWNLOAD_MIN_FREE_GB"] == "5"
+
+
+@requires_db
 async def test_hf_token_only_when_enabled(hub):
     fm, fake = hub
     await fm.cloud.update_provider("runpod", settings={"pass_hf_token": True})

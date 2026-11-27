@@ -262,6 +262,8 @@ export interface BenchmarkCloudSpec {
   wait_minutes: number;
   ready_timeout_minutes: number;
   max_runtime_minutes: number;
+  /** Disco del pod en GB; sin él, el de los ajustes. */
+  container_disk_gb?: number | null;
   terminate_after: boolean;
 }
 

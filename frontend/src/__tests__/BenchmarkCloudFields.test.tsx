@@ -13,7 +13,10 @@ vi.mock("@/api/client", () => ({
           { id: "A100", name: "A100", memory_gb: 80, availability: "NONE", community: true, secure: true, price_community: 1.2, price_secure: 1.6 },
           { id: "L40", name: "L40", memory_gb: 48, availability: "HIGH", community: false, secure: true, price_community: null, price_secure: 0.75 },
         ]),
-        getRunpod: vi.fn().mockResolvedValue({ settings: { cloud_type: "COMMUNITY" } }),
+        getRunpod: vi.fn().mockResolvedValue({ settings: { cloud_type: "COMMUNITY", container_disk_gb: 80 } }),
+        replicableModels: vi.fn().mockResolvedValue([
+          { model_id: "llamacpp_mks/gemma4:12b", display_name: "g", size_bytes: 8 * 1024 ** 3, replicable: true, loaded: false, reason: null },
+        ]),
       },
     },
     backends: { list: vi.fn().mockResolvedValue([{ backendType: "vllm" }]) },
@@ -73,5 +76,20 @@ describe("BenchmarkCloudFields", () => {
     await waitFor(() => expect(latest.gpu_type_ids).toEqual(["4090"]))
     expect(screen.queryByText(/RTX 3090/)).toBeNull()
     expect(screen.getByText(/0\.69 \$\/h/)).toBeTruthy()
+  })
+
+  it("sugiere el disco por los modelos y lo manda al pedir el pod", async () => {
+    function WithModels() {
+      const [value, setValue] = useState(DEFAULT_CLOUD_SPEC)
+      latest = value
+      return <BenchmarkCloudFields value={value} onChange={setValue} modelIds={["llamacpp_mks/gemma4:12b"]} />
+    }
+    render(<WithModels />)
+    fireEvent.click(await screen.findByText("Usar 40 GB"))
+    expect(latest.container_disk_gb).toBe(40)
+    fireEvent.change(screen.getByLabelText("Disco del pod en GB"), { target: { value: "120" } })
+    expect(latest.container_disk_gb).toBe(120)
+    fireEvent.click(screen.getByText("Volver a los ajustes"))
+    expect(latest.container_disk_gb).toBeNull()
   })
 })

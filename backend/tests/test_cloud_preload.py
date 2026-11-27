@@ -491,7 +491,9 @@ async def test_drive_walks_install_downloads_register_load(tmp_path, monkeypatch
 
     monkeypatch.setattr(preload, "load_model_rows", rows)
     real_plan = preload.plan_replication
-    monkeypatch.setattr(preload, "plan_replication", lambda r, g, _d=None, b=None: real_plan(r, g, models_dir, b))
+    monkeypatch.setattr(
+        preload, "plan_replication", lambda r, g, _d=None, b=None: real_plan(r, g, models_dir, b)
+    )
 
     node = {"backend": "not_installed", "jobs": {}, "registered": False}
     calls = []
@@ -560,7 +562,9 @@ async def test_drive_refuses_diffusers_on_an_old_node(tmp_path, monkeypatch):
 
     monkeypatch.setattr(preload, "load_model_rows", rows)
     real_plan = preload.plan_replication
-    monkeypatch.setattr(preload, "plan_replication", lambda r, g, _d=None, b=None: real_plan(r, g, models_dir, b))
+    monkeypatch.setattr(
+        preload, "plan_replication", lambda r, g, _d=None, b=None: real_plan(r, g, models_dir, b)
+    )
     fm = SimpleNamespace(session_factory=None)
     peer = SimpleNamespace(
         peer_id="p", gpus=[], tunnel_session=SimpleNamespace(remote_info={"version": "0.86.1"})
@@ -1051,3 +1055,37 @@ async def test_an_engine_we_do_not_deploy_is_copied_from_our_default(our_model):
     assert rows[f"llama_cpp/{KEY}"][1] == "llama_cpp"
     problems = await replication_problems(AsyncSessionLocal, wanted)
     assert list(problems) == ["ollama/zz-no-such-model:1b"]
+
+
+async def test_en_una_bateria_sin_disco_espera_en_vez_de_fallar():
+    from ocabra.core.cloud import preload
+
+    item = {
+        "model_id": "llamacpp_mks/m",
+        "status": "downloading",
+        "benchmark_prefetch": True,
+        "steps": [{"kind": "download", "body": {}}, {"kind": "load"}],
+        "step": 0,
+        "job_id": "j1",
+        "node_model_id": "llamacpp_mks/m",
+    }
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        return httpx.Response(
+            200,
+            json={"status": "failed", "error": "insufficient disk space: 6.0 GB free in /data"},
+        )
+
+    fm = SimpleNamespace(proxy_get=proxy_get)
+    peer = SimpleNamespace(peer_id="p")
+    await preload._drive_item(fm, peer, item, {})
+    assert item["status"] == "pending" and item["waiting_disk"] is True
+    assert "steps" not in item and "job_id" not in item
+
+    # Fuera de un benchmark sigue siendo un error.
+    manual = {**item, "status": "downloading", "benchmark_prefetch": False, "job_id": "j1"}
+    manual["steps"] = [{"kind": "download", "body": {}}, {"kind": "load"}]
+    manual["step"] = 0
+    manual.pop("waiting_disk")
+    await preload._drive_item(fm, peer, manual, {})
+    assert manual["status"] == "error"

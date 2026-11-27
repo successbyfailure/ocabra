@@ -6,6 +6,7 @@ import { api, request } from "@/api/client"
 import { formatSeconds, podReadinessParts } from "@/lib/format"
 import { VolumesPanel } from "./VolumesPanel"
 import { EMPTY_PICK, ModelPicker, pickCount } from "./ModelPicker"
+import { PodDiskSlider } from "./PodDiskSlider"
 import type {
   CloudDataCenter,
   CloudLaunchRequest,
@@ -354,6 +355,7 @@ function LaunchDialog({
   const [queueIfBusy, setQueueIfBusy] = useState(false)
   const [alternatives, setAlternatives] = useState<string[]>([])
   const [waitHours, setWaitHours] = useState(6)
+  const [diskGb, setDiskGb] = useState<number | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -364,6 +366,7 @@ function LaunchDialog({
     api.federation.cloud.dataCenters().then(setDataCenters).catch(() => setDataCenters([]))
     setCloudType(preset?.cloudType ?? info.settings.cloud_type)
     setTtl(info.settings.default_ttl_minutes)
+    setDiskGb(null)
     setIdle(info.settings.default_idle_minutes)
     setCount(preset?.count ?? 1)
     setGpuId(preset?.gpuId ?? "")
@@ -584,6 +587,16 @@ function LaunchDialog({
             )}
           </div>
 
+          <div className="mt-3">
+            <PodDiskSlider
+              value={diskGb}
+              defaultGb={info.settings.container_disk_gb}
+              modelIds={picked.models}
+              freesAsItGoes={false}
+              onChange={setDiskGb}
+            />
+          </div>
+
           <div className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
             {chosen ? (
               <>
@@ -621,6 +634,7 @@ function LaunchDialog({
                     recipes: picked.recipes,
                     download_only: picked.downloadOnly,
                     backends: picked.backends,
+                    container_disk_gb: diskGb ?? undefined,
                   } as const
                   if (queueIfBusy) {
                     const req = await api.federation.cloud.requests.create({
@@ -658,7 +672,7 @@ function PreloadChip({ item, seconds }: { item: CloudPreloadItem; seconds?: numb
   const took = seconds != null && (item.status === "loaded" || item.status === "ready" || item.status === "error") ? ` en ${formatSeconds(seconds)}` : ""
   const steps = item.steps?.length ? ` (paso ${(item.step ?? 0) + 1}/${item.steps.length})` : ""
   const label = {
-    pending: "en cola",
+    pending: item.waiting_disk ? "esperando disco" : "en cola",
     installing: `instalando backend${pct}`,
     registering: "registrando",
     downloading: `descargando${pct}${steps}`,

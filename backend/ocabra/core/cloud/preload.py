@@ -429,6 +429,9 @@ def _node_version(peer: Any) -> tuple[int, ...] | None:
 
 
 ACTIVE = ("installing", "downloading", "registering", "loading")
+# Lo que dice el nodo cuando no queda el mínimo libre para empezar una descarga
+# (api/internal/downloads.py).
+DISK_FULL_MARK = "insufficient disk space"
 # Cortes de transporte seguidos (túnel, conexión) antes de dar un elemento por fallido.
 MAX_TRANSIENT_FAILURES = 5
 
@@ -643,8 +646,21 @@ async def _drive_item(fm: Any, peer: Any, active: dict, tasks: dict) -> None:
         return
     except Exception as exc:  # noqa: BLE001 — one model failing must not stop the rest
         tasks.pop(key, None)
+        if active.get("benchmark_prefetch") and DISK_FULL_MARK in str(exc):
+            # El nodo rechaza la descarga antes de empezarla (no deja nada a
+            # medias): en una batería se borran los modelos ya medidos, así
+            # que se vuelve a intentar cuando haya sitio.
+            active.clear()
+            active.update(
+                {k: v for k, v in before.items() if k not in ("steps", "step", "job_id")},
+                status="pending",
+                phase="esperando espacio en disco",
+                waiting_disk=True,
+            )
+            return
         active.update(status="error", error=str(exc)[:300])
         return
+    active.pop("waiting_disk", None)
     active.pop("transient_failures", None)
     active.pop("last_transient_error", None)
 
