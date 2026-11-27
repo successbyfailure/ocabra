@@ -51,6 +51,19 @@ def _write_progress(completed: int, total: int, stage: str) -> None:
     temporary.replace(path)
 
 
+RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
+RETRY_DELAY_S = 10.0
+# Lo que puede tardar en volver un nodo (reinicio del hub, túnel reconectando).
+RETRY_WINDOW_S = 900.0
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> float:
+    try:
+        return min(60.0, max(1.0, float(exc.headers.get("Retry-After") or RETRY_DELAY_S)))
+    except (TypeError, ValueError):
+        return RETRY_DELAY_S
+
+
 def _request(prompt: str, model: str) -> tuple[str, float, dict[str, int]]:
     base_url = os.environ["OPENAI_COMPATIBLE_URL"].rstrip("/")
     endpoint = f"{base_url}/v1/chat/completions"
@@ -71,12 +84,26 @@ def _request(prompt: str, model: str) -> tuple[str, float, dict[str, int]]:
         },
         method="POST",
     )
-    started = time.monotonic()
-    try:
-        with urllib.request.urlopen(request, timeout=600) as response:
-            payload = json.loads(response.read().decode())
-    except (OSError, ValueError, urllib.error.HTTPError) as exc:
-        raise RuntimeError(f"IFEval no pudo generar una respuesta: {exc}") from exc
+    deadline = time.monotonic() + RETRY_WINDOW_S
+    while True:
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response:
+                payload = json.loads(response.read().decode())
+            break
+        except urllib.error.HTTPError as exc:
+            # Pasajero (el nodo del benchmark reconectando, cola llena): se espera.
+            if exc.code in RETRYABLE_STATUS and time.monotonic() < deadline:
+                time.sleep(_retry_after(exc))
+                continue
+            raise RuntimeError(f"IFEval no pudo generar una respuesta: {exc}") from exc
+        except urllib.error.URLError as exc:
+            if not isinstance(exc.reason, TimeoutError) and time.monotonic() < deadline:
+                time.sleep(RETRY_DELAY_S)
+                continue
+            raise RuntimeError(f"IFEval no pudo generar una respuesta: {exc}") from exc
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"IFEval no pudo generar una respuesta: {exc}") from exc
     elapsed = time.monotonic() - started
     content = payload["choices"][0]["message"].get("content") or ""
     usage = payload.get("usage") or {}

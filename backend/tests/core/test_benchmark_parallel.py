@@ -185,3 +185,42 @@ async def test_los_pods_de_benchmarks_en_curso_quedan_reservados(tmp_path: Path)
         assert fm.reserved_peers == set()
     finally:
         await _delete(run.id)
+
+
+def test_ifeval_espera_a_que_vuelva_el_nodo(monkeypatch) -> None:
+    import io
+    import json
+    import urllib.error
+
+    from ocabra.benchmarks.runners import ifeval
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_URL", "http://hub/_node/pod")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_KEY", "sk")
+    monkeypatch.setattr(ifeval.time, "sleep", lambda _s: None)
+    calls = []
+
+    class Ok(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def urlopen(request, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(request.full_url, 503, "x", {"Retry-After": "15"}, None)
+        if len(calls) == 2:
+            raise urllib.error.URLError(ConnectionRefusedError())
+        body = {"choices": [{"message": {"content": "hola"}}], "usage": {}}
+        return Ok(json.dumps(body).encode())
+
+    monkeypatch.setattr(ifeval.urllib.request, "urlopen", urlopen)
+    assert ifeval._request("p", "m")[0] == "hola" and len(calls) == 3
+
+    def bad(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 400, "x", {}, None)
+
+    monkeypatch.setattr(ifeval.urllib.request, "urlopen", bad)
+    with pytest.raises(RuntimeError):
+        ifeval._request("p", "m")

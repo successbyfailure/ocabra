@@ -1695,6 +1695,21 @@ async def resolve_federated(
                 _decide("remote", "forced", model_id, peer)
                 return ("remote", peer)
         note_federation(forced_unavailable=str(forced)[:64])
+        if (federation_request_info.get() or {}).get("force_strict"):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "message": (
+                            f"The node '{forced}' this request is pinned to is not "
+                            "connected right now"
+                        ),
+                        "type": "service_unavailable",
+                        "code": "pinned_node_unavailable",
+                    }
+                },
+                headers={"Retry-After": "15"},
+            )
 
     # Per-model strategy (core/federation_policy.py).
     from ocabra.core.federation_policy import LOCAL_NODE, node_matches, policy_for
@@ -1853,6 +1868,9 @@ class FederationHopMiddleware:
         scope, prefixed_node = strip_node_prefix(scope)
         if prefixed_node is not None:
             info["force_node"] = prefixed_node
+            # Por URL lo usan los benchmarks: medir en otra máquina sería un
+            # resultado falso, así que si el nodo no está se espera, no se cambia.
+            info["force_strict"] = True
         for key, value in scope.get("headers") or ():
             if key == self._HEADER:
                 hop = value.decode("latin-1") or "peer"

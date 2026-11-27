@@ -16,6 +16,23 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.144.1 — 2026-11-27
+
+### Arreglos
+
+- **`/_node/<nodo>/` ya no se sirve en otra máquina si ese nodo no está.**
+  Antes, con el nodo desconectado (un túnel reconectando tras un reinicio),
+  la petición caía en el reparto normal y se servía donde hubiese el modelo,
+  aunque la URL pedía ese nodo. Para un benchmark eso es medir otra máquina.
+  Ahora responde 503 con `Retry-After: 15` y código `pinned_node_unavailable`.
+  La cabecera `X-Ocabra-Node` sigue como antes: si el nodo no está, se usa el
+  reparto normal y se anota.
+
+**Acción:** si llamas por `/_node/<nodo>/`, reintenta los 503 respetando
+`Retry-After`.
+
+---
+
 ## 0.144.0 — 2026-11-27
 
 ### Cambios

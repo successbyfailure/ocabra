@@ -83,6 +83,14 @@ async def test_decision_and_forced_node_are_recorded(_ctx, monkeypatch):
     _ctx["force_node"] = "nope"
     assert await resolve_federated("m", mm, fm) == ("remote", pod)
     assert _ctx["forced_unavailable"] == "nope"
+    # Por URL (/_node/<nodo>/, los benchmarks): nunca en otro sitio, 503 y esperar.
+    _ctx.clear()
+    _ctx.update(force_node="nope", force_strict=True)
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await resolve_federated("m", mm, fm)
+    assert exc.value.status_code == 503 and exc.value.headers["Retry-After"] == "15"
 
 
 def test_collector_fields():
