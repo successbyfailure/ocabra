@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the backend version (also in frontend/package.json).
-APP_VERSION = "0.143.1"
+APP_VERSION = "0.144.0"
 
 
 class Settings(BaseSettings):
@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     # False on hosts without an Ollama daemon (the ocabra-node image): skips the
     # inventory/spill loops and startup discovery, which otherwise warn every
     # 15 s. Pulling Ollama tags still works (straight from the registry).
+    # Imagen ocabra-node: sin contenedor de Ollama, se baja y arranca uno
+    # propio la primera vez que un modelo de Ollama lo necesita
+    # (backends/ollama_daemon.py). La versión la fija el hub al lanzar el pod.
+    ollama_node_autostart: bool = False
+    ollama_node_version: str = ""
     ollama_enabled: bool = True
     # One shared Ollama daemon (the per-GPU pools were retired 2026-11-12).
     # Its global parallelism and context live in ``ollama_env_file``, which the
@@ -1018,7 +1023,9 @@ class Settings(BaseSettings):
     # Bootstrap for unattended nodes (cloud pods): join this hub with this invite
     # on startup if not already joined. Implies federation_enabled.
     federation_join_url: str = Field(default="", description="Hub to join on startup (https://...)")
-    federation_join_invite: str = Field(default="", description="Invite code for federation_join_url")
+    federation_join_invite: str = Field(
+        default="", description="Invite code for federation_join_url"
+    )
     # Cloud node (set on the pod by the hub when it launches it): terminate this
     # pod if no hub tunnel has been up for this many minutes. 0 = off.
     ocabra_cloud_self_destruct_minutes: int = Field(default=0, ge=0)

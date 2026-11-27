@@ -66,11 +66,30 @@ async def _call(manager, token: str | None) -> dict | None:
 @pytest.mark.asyncio
 async def test_solo_la_clave_del_runner_activa_el_override() -> None:
     manager = SimpleNamespace(sampling_override=OVERRIDE)
-    assert await _call(manager, "sk-runner") == OVERRIDE
+    assert await _call(manager, "sk-runner") == [OVERRIDE]
     assert await _call(manager, "sk-de-un-usuario") is None
     assert await _call(manager, None) is None
     assert await _call(SimpleNamespace(sampling_override=None), "sk-runner") is None
     assert current_sampling_override.get() is None
+
+
+def test_varios_overrides_a_la_vez_cada_uno_en_su_perfil() -> None:
+    other = {**OVERRIDE, "profile": "gemma4:26b", "params": {"temperature": 0.7}}
+    marker = current_sampling_override.set([OVERRIDE, other])
+    try:
+        assert apply_override("gemma4:12b", {"temperature": 0})["temperature"] == 1.0
+        assert apply_override("gemma4:26b", {"temperature": 0})["temperature"] == 0.7
+        assert apply_override("qwen3.8:27b", {"temperature": 0}) == {"temperature": 0}
+    finally:
+        current_sampling_override.reset(marker)
+
+
+@pytest.mark.asyncio
+async def test_el_middleware_lee_los_overrides_de_todas_las_ejecuciones() -> None:
+    other = {**OVERRIDE, "profile": "gemma4:26b"}
+    manager = SimpleNamespace(sampling_overrides=[OVERRIDE, other])
+    assert await _call(manager, "sk-runner") == [OVERRIDE, other]
+    assert await _call(manager, "sk-de-un-usuario") is None
 
 
 def test_la_api_valida_el_modo_de_muestreo() -> None:

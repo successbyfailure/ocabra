@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
-import type { ModelProfile, ProfileCategory } from "@/types"
-import { backendVersionLabel, benchmarkModelGroups } from "@/pages/Benchmarks"
+import type { LogicalModel, ModelProfile, ProfileCategory } from "@/types"
+import { backendVersionLabel, benchmarkModelGroups, localModelOptions } from "@/pages/Benchmarks"
 
 function profile(
   profileId: string,
@@ -85,5 +85,69 @@ describe("benchmarks en un nodo de la federación", () => {
     // Las opciones del peer se agrupan igual que los perfiles locales.
     const groups = benchmarkModelGroups(options, "escriba", "embeddings")
     expect(groups.map((group) => group.key)).toEqual(["qwen3-embedding:0.6b"])
+  })
+})
+
+function logical(modelKey: string, deployed: string[], compatible: Array<[string, boolean]>): LogicalModel {
+  return {
+    modelKey,
+    displayName: modelKey,
+    category: "llm",
+    defaultBackend: deployed[0] as LogicalModel["defaultBackend"],
+    deployments: deployed.map((backend, index) => ({
+      modelId: `${backend}/${modelKey}`,
+      backend: backend as LogicalModel["defaultBackend"],
+      isDefault: index === 0,
+      installed: true,
+      status: null,
+      loadPolicy: "on_demand",
+      pinPermanent: false,
+      preferredGpu: null,
+      artifact: null,
+      profiles: [],
+    })),
+    compatibleBackends: compatible.map(([backend, installed]) => ({
+      backend: backend as LogicalModel["defaultBackend"],
+      status: "compatible",
+      installed,
+      reason: "GGUF",
+      deployed: deployed.includes(backend),
+    })),
+    publicProfiles: [modelKey],
+    hiddenProfiles: deployed.slice(1).map((backend) => `${modelKey}-${backend.replace("_", "-")}`),
+    registryMetadata: null,
+  }
+}
+
+describe("backends a elegir al medir aquí o en un pod", () => {
+  const profiles = [
+    profile("gemma4:12b", "llamacpp_mks/gemma4:12b"),
+    profile("gemma4:12b-ollama", "ollama/gemma4:12b"),
+  ]
+  const models = [
+    logical("gemma4:12b", ["llamacpp_mks", "ollama"], [["llamacpp_mks", true], ["llama_cpp", true], ["ollama", true]]),
+  ]
+
+  it("pide los otros backends por id de despliegue, también los no desplegados", () => {
+    const options = localModelOptions(profiles, models, "local")
+    expect(options.map((item) => [item.profileId, item.pending ?? false])).toEqual([
+      ["gemma4:12b", false],
+      ["llama_cpp/gemma4:12b", true],
+      ["ollama/gemma4:12b", false],
+    ])
+    // El nombre derivado no se ofrece: la API de inferencia lo rechaza.
+    expect(options.some((item) => item.profileId === "gemma4:12b-ollama")).toBe(false)
+    const groups = benchmarkModelGroups(options, "bfcl", "simple_python")
+    expect(groups).toHaveLength(1)
+  })
+
+  it("aquí solo ofrece sin desplegar lo que está instalado; en un pod, lo que el pod sabe montar", () => {
+    const notInstalled = [logical("gemma4:12b", ["llamacpp_mks"], [["llamacpp_mks", true], ["llama_cpp", false], ["bitnet", true]])]
+    expect(localModelOptions(profiles.slice(0, 1), notInstalled, "local").map((item) => item.profileId)).toEqual([
+      "gemma4:12b", "bitnet/gemma4:12b",
+    ])
+    expect(localModelOptions(profiles.slice(0, 1), notInstalled, "cloud").map((item) => item.profileId)).toEqual([
+      "gemma4:12b", "llama_cpp/gemma4:12b",
+    ])
   })
 })

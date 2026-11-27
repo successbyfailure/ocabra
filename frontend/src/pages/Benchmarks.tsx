@@ -9,7 +9,7 @@ import { api } from "@/api/client"
 import { formatDateTime, formatDurationBetween, podReadinessParts } from "@/lib/format"
 import type {
   BenchmarkAppCatalog, BenchmarkAttempt, BenchmarkBatteryItem, BenchmarkCloudSpec, BenchmarkRun, BenchmarkRunStatus, BenchmarkSchedule,
-  BenchmarkScheduleInput, FederationPeer,
+  BenchmarkScheduleInput, FederationPeer, LogicalModel,
   ModelProfile,
 } from "@/types"
 import { BenchmarkCloudFields, CLOUD_NODE, DEFAULT_CLOUD_SPEC } from "./benchmarks/BenchmarkCloudFields"
@@ -86,7 +86,51 @@ function benchmarkCategories(app: string, suite: string): Set<ModelProfile["cate
 /** Lo que necesita el selector de modelos: un perfil local o uno anunciado por un peer. */
 export type BenchmarkModelOption = Pick<
   ModelProfile, "profileId" | "baseModelId" | "displayName" | "category" | "isDefault"
->
+> & {
+  /** Backend compatible sin desplegar: se crea al medir aquí o se monta en el pod. */
+  pending?: boolean
+}
+
+/** Backends que un pod sabe montar a partir del fichero de un modelo (core/cloud/preload.py). */
+const POD_BACKENDS = new Set(["llamacpp_mks", "llama_cpp", "ollama"])
+
+/**
+ * Opciones del selector en este servidor o en un pod: por cada modelo, su
+ * perfil público y cualquier otro backend capaz de servir su fichero, esté
+ * desplegado o no, pedido como `<backend>/<modelo>` (los nombres derivados
+ * como `gemma4:12b-ollama` los rechaza la API de inferencia).
+ */
+export function localModelOptions(
+  profiles: ModelProfile[], logical: LogicalModel[], target: "local" | "cloud",
+): BenchmarkModelOption[] {
+  const options: BenchmarkModelOption[] = []
+  const covered = new Set<string>()
+  logical.forEach((model) => {
+    const deploymentIds = new Set(model.deployments.map((item) => item.modelId))
+    const own = profiles.filter((item) => item.baseModelId && deploymentIds.has(item.baseModelId))
+    own.forEach((item) => covered.add(item.profileId))
+    const publicOnes = own.filter((item) => model.publicProfiles.includes(item.profileId))
+    options.push(...publicOnes)
+    const category = publicOnes[0]?.category ?? own[0]?.category ?? "llm"
+    model.compatibleBackends.forEach((entry) => {
+      if (entry.backend === model.defaultBackend && publicOnes.length > 0) return
+      const deployed = model.deployments.some((item) => item.backend === entry.backend)
+      if (!deployed && (target === "cloud" ? !POD_BACKENDS.has(entry.backend) : !entry.installed)) return
+      const profileId = `${entry.backend}/${model.modelKey}`
+      options.push({
+        profileId,
+        baseModelId: profileId,
+        displayName: model.displayName || model.modelKey,
+        category,
+        isDefault: false,
+        pending: !deployed,
+      })
+    })
+  })
+  // Lo que no cuelga de un modelo lógico (routers aparte) sigue como estaba.
+  options.push(...profiles.filter((item) => !covered.has(item.profileId) && item.baseModelId))
+  return options
+}
 
 function categoryFromCapabilities(caps: Record<string, boolean> | undefined): ModelProfile["category"] {
   if (!caps) return "llm"
@@ -160,6 +204,7 @@ export function Benchmarks() {
   const [view, setView] = useState<"results" | "runs" | "launch">("results")
   const [catalog, setCatalog] = useState<BenchmarkAppCatalog[]>([])
   const [profiles, setProfiles] = useState<ModelProfile[]>([])
+  const [logicalModels, setLogicalModels] = useState<LogicalModel[]>([])
   const [runs, setRuns] = useState<BenchmarkRun[]>([])
   const [schedules, setSchedules] = useState<BenchmarkSchedule[]>([])
   const [loading, setLoading] = useState(true)
@@ -227,6 +272,8 @@ export function Benchmarks() {
       })
       .catch((error) => toast.error(error instanceof Error ? error.message : "No se pudieron cargar los benchmarks"))
       .finally(() => setLoading(false))
+    // Sin la vista de modelos lógicos, el selector se queda con los perfiles.
+    api.logicalModels.list().then(setLogicalModels).catch(() => setLogicalModels([]))
     // Sin federación (o sin permiso para verla) solo se mide aquí.
     api.federation.getPeers()
       .then((items) => setPeers(items.filter((peer) => peer.enabled)))
@@ -246,8 +293,12 @@ export function Benchmarks() {
   ), [appName, models, profile, runs, suiteName])
   const selectedPeer = peers.find((peer) => peer.name === node)
   const modelOptions = useMemo<BenchmarkModelOption[]>(
-    () => (selectedPeer ? peerModelOptions(selectedPeer) : profiles),
-    [profiles, selectedPeer],
+    () => (selectedPeer
+      ? peerModelOptions(selectedPeer)
+      : logicalModels.length > 0
+        ? localModelOptions(profiles, logicalModels, node === CLOUD_NODE ? "cloud" : "local")
+        : profiles),
+    [logicalModels, node, profiles, selectedPeer],
   )
   const modelGroups = useMemo(() => {
     return benchmarkModelGroups(modelOptions, appName, suiteName, modelSearch)
@@ -588,7 +639,7 @@ export function Benchmarks() {
                         const backend = profileBackend(item)
                         const sameBackend = group.options.filter((candidate) => profileBackend(candidate) === backend).length > 1
                         const selected = models.includes(item.profileId)
-                        return <button key={item.profileId} type="button" onClick={() => toggleModel(item.profileId)} title={`${item.profileId} · ${item.baseModelId ?? ""}`} className={`rounded-full border px-2 py-1 text-[11px] transition-colors ${selected ? "border-primary bg-primary text-primary-foreground" : "border-border bg-card text-muted-foreground hover:border-primary/60 hover:text-foreground"}`}>{backend}{sameBackend ? ` · ${item.profileId}` : ""}</button>
+                        return <button key={item.profileId} type="button" onClick={() => toggleModel(item.profileId)} title={item.pending ? `${item.profileId} · sin desplegar: ${node === CLOUD_NODE ? "el pod lo monta con este backend" : "se despliega aquí al medir"}` : `${item.profileId} · ${item.baseModelId ?? ""}`} className={`rounded-full border px-2 py-1 text-[11px] transition-colors ${selected ? "border-primary bg-primary text-primary-foreground" : "border-border bg-card text-muted-foreground hover:border-primary/60 hover:text-foreground"}`}>{backend}{sameBackend ? ` · ${item.profileId}` : ""}{item.pending ? " +" : ""}</button>
                       })}
                     </div>
                   </div>

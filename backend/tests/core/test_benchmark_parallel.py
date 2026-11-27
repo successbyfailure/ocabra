@@ -1,0 +1,139 @@
+"""Una ejecución a la vez por máquina y baterías de pod con modelos que no se copian."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from ocabra.backends import ollama_daemon
+from ocabra.benchmarks.models import normalize_models, split_deployment_id
+from ocabra.database import AsyncSessionLocal
+from ocabra.db.benchmarks import BenchmarkRun
+from tests.core.test_benchmark_cloud import FakeCloud, _delete, _load, _manager, _new_run
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_un_modelo_que_no_se_puede_copiar_no_tumba_la_bateria(tmp_path: Path) -> None:
+    cloud = FakeCloud()
+
+    async def problems(models):
+        return {m: "sus ficheros solo existen en este servidor" for m in models if "local" in m}
+
+    cloud.replication_problems = problems
+    manager = _manager(cloud)
+    run = await _new_run(tmp_path)
+    async with AsyncSessionLocal() as session:
+        row = await session.get(BenchmarkRun, run.id)
+        row.models = ["solo-local:1b", "gemma4:12b"]
+        await session.commit()
+    try:
+        await manager._advance_provisioning()
+        assert cloud.requests.created[0]["launch"]["models"] == ["llamacpp_mks/gemma4:12b"]
+        loaded = await _load(run.id)
+        assert loaded.status == "queued"
+        assert "solo existen" in loaded.cloud["skipped"]["solo-local:1b"]
+
+        # Al llegarle el turno se da por fallido con su motivo y se sigue.
+        async with AsyncSessionLocal() as session:
+            row = await session.get(BenchmarkRun, run.id)
+            row.node = "ocabra-bench-1"
+            await session.commit()
+        await manager._execute_run(run.id)
+        after = await _load(run.id)
+        assert after.current_model_index == 1 and after.status == "queued"
+        assert "no se pudo copiar al pod" in after.error
+    finally:
+        await _delete(run.id)
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_si_no_se_puede_copiar_ninguno_no_se_alquila_nada(tmp_path: Path) -> None:
+    cloud = FakeCloud()
+
+    async def problems(models):
+        return {m: "no se puede" for m in models}
+
+    cloud.replication_problems = problems
+    manager = _manager(cloud)
+    run = await _new_run(tmp_path)
+    try:
+        await manager._advance_provisioning()
+        assert cloud.requests.created == []
+        failed = await _load(run.id)
+        assert failed.status == "failed" and "no se puede" in failed.error
+    finally:
+        await _delete(run.id)
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_cada_maquina_mide_lo_suyo_a_la_vez(tmp_path: Path) -> None:
+    manager = _manager(FakeCloud())
+    local = await _new_run(tmp_path)
+    mapache = await _new_run(tmp_path, node="Mapache")
+    otra_local = await _new_run(tmp_path)
+    for run in (local, mapache, otra_local):
+        async with AsyncSessionLocal() as session:
+            row = await session.get(BenchmarkRun, run.id)
+            row.cloud = None
+            await session.commit()
+    try:
+        assert await manager._next_queued(set()) == (local.id, "")
+        # Con este servidor midiendo, la siguiente es la de Mapache, no otra local.
+        assert await manager._next_queued({""}) == (mapache.id, "Mapache")
+        assert await manager._next_queued({"", "Mapache"}) is None
+        assert await manager._next_queued({"Mapache"}) == (local.id, "")
+    finally:
+        for run in (local, mapache, otra_local):
+            await _delete(run.id)
+
+
+def test_overrides_de_varias_ejecuciones_y_el_del_diagnostico() -> None:
+    manager = _manager(FakeCloud())
+    manager._sampling_overrides["run-1"] = {"profile": "a"}
+    manager.sampling_override = {"profile": "b"}
+    assert manager.sampling_override == {"profile": "b"}
+    assert [item["profile"] for item in manager.sampling_overrides] == ["a", "b"]
+    manager.sampling_override = None
+    assert manager.sampling_overrides == [{"profile": "a"}]
+
+
+@pytest.mark.asyncio
+async def test_los_nombres_derivados_pasan_a_id_de_despliegue() -> None:
+    async def suffixed(name):
+        return ("gemma4:12b", "ollama/gemma4:12b") if name == "gemma4:12b-ollama" else None
+
+    registry = SimpleNamespace(engine_suffixed_name=suffixed)
+    models = ["gemma4:12b", "gemma4:12b-ollama", "ollama/gemma4:12b"]
+    assert await normalize_models(registry, models) == ["gemma4:12b", "ollama/gemma4:12b"]
+    assert split_deployment_id("ollama/gemma4:12b") == ("ollama", "gemma4:12b")
+    assert split_deployment_id("org/repo") is None
+
+
+@pytest.mark.asyncio
+async def test_el_hub_no_arranca_ollama_propio(monkeypatch) -> None:
+    monkeypatch.setattr(ollama_daemon.settings, "ollama_node_autostart", False)
+    called = []
+
+    async def reachable(url=None):
+        called.append(url)
+        return False
+
+    monkeypatch.setattr(ollama_daemon, "reachable", reachable)
+    assert await ollama_daemon.ensure_daemon() is False
+    assert called == [None]
+    assert ollama_daemon.installed_version() is None
+
+
+def test_el_ollama_del_pod_copia_los_ajustes_del_hub(monkeypatch) -> None:
+    monkeypatch.setattr(ollama_daemon.settings, "ollama_base_url", "http://127.0.0.1:11434")
+    monkeypatch.setattr(ollama_daemon.settings, "ollama_num_parallel", 1)
+    monkeypatch.setattr(ollama_daemon.settings, "ollama_max_context", 65536)
+    env = ollama_daemon.daemon_env()
+    assert env["OLLAMA_HOST"] == "127.0.0.1:11434"
+    assert env["OLLAMA_NUM_PARALLEL"] == "1" and env["OLLAMA_CONTEXT_LENGTH"] == "65536"
+    assert env["OLLAMA_KV_CACHE_TYPE"] == "q8_0" and env["OLLAMA_FLASH_ATTENTION"] == "1"

@@ -40,6 +40,7 @@ from ocabra.benchmarks.diagnosis.reference import (
     resolve_reference_repo,
 )
 from ocabra.benchmarks.diagnosis.report import render_markdown, write_candidates
+from ocabra.benchmarks.models import bench_profile
 from ocabra.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -245,7 +246,7 @@ class DiagnosisRunner:
         self._store.save(job)
 
         app_state = self._app.state
-        profile = await app_state.profile_registry.get(model)
+        profile = await bench_profile(app_state.profile_registry, model)
         if profile is None:
             raise LookupError(f"perfil '{model}' no encontrado")
         state = await app_state.model_manager.get_state(profile.base_model_id)

@@ -17,6 +17,8 @@ from sqlalchemy import select
 from ocabra.api._deps_auth import UserContext, require_role
 from ocabra.benchmarks.catalog import APPS, catalog_payload, scoring_issue
 from ocabra.benchmarks.manager import list_runs, load_run, next_schedule_occurrence
+from ocabra.benchmarks.models import normalize_models
+from ocabra.benchmarks.models import validate_models as validate_bench_models
 from ocabra.config import settings
 from ocabra.database import AsyncSessionLocal
 from ocabra.db.benchmarks import BenchmarkRun, BenchmarkSchedule
@@ -346,6 +348,26 @@ def _validate_catalog(app_name: str, suite_name: str) -> None:
         raise HTTPException(status_code=400, detail="Suite de benchmark desconocida")
 
 
+async def _bench_models(request: Request, models: list[str], node: str | None) -> list[str]:
+    """Modelos tal como se van a pedir: ids de despliegue en vez de nombres derivados.
+
+    Aquí o en un pod, un backend concreto que aún no está desplegado vale si
+    puede leer el fichero del modelo (se crea o se replica al medir); en un
+    nodo de la federación se mide lo que él anuncia, tal cual.
+    """
+    if node is not None:
+        return models
+    registry = getattr(request.app.state, "profile_registry", None)
+    if registry is None:
+        return models
+    cleaned = await normalize_models(registry, models)
+    try:
+        await validate_bench_models(cleaned)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return cleaned
+
+
 def _canonical_node(request: Request, node: str | None) -> str | None:
     """Nombre del peer tal como lo conoce la federación, o 400 si no existe.
 
@@ -412,6 +434,7 @@ async def create_benchmark_run(
     for app_name, suite_name, _args in items:
         _validate_catalog(app_name, suite_name)
     node = _canonical_node(request, body.node)
+    models = await _bench_models(request, body.models, node)
     batch_id = uuid.uuid4() if len(items) > 1 else None
     root = Path(settings.benchmark_dir).resolve()  # noqa: ASYNC240 — cálculo local de ruta
     runs = []
@@ -424,7 +447,7 @@ async def create_benchmark_run(
                 suite=suite_name,
                 # La revisión fijada solo vale para la app principal.
                 revision=body.revision if app_name == body.app else None,
-                models=body.models,
+                models=models,
                 suite_args=suite_args,
                 auto_pause=body.auto_pause,
                 node=node,
@@ -475,15 +498,17 @@ async def create_benchmark_schedule(
     for app_name, suite_name, _args in body.battery_items():
         _validate_catalog(app_name, suite_name)
     now = datetime.now(UTC)
+    node = _canonical_node(request, body.node)
+    models = await _bench_models(request, body.models, node)
     schedule = BenchmarkSchedule(
         name=body.name,
         app=body.app,
         suite=body.suite,
         revision=body.revision,
-        models=body.models,
+        models=models,
         suite_args=body.suite_args,
         auto_pause=body.auto_pause,
-        node=_canonical_node(request, body.node),
+        node=node,
         sampling=None if body.sampling == "benchmark" else body.sampling,
         cloud=body.cloud.model_dump() if body.cloud else None,
         battery=[item.model_dump() for item in body.battery] or None,
@@ -517,6 +542,7 @@ async def update_benchmark_schedule(
     for app_name, suite_name, _args in body.battery_items():
         _validate_catalog(app_name, suite_name)
     node = _canonical_node(request, body.node)
+    models = await _bench_models(request, body.models, node)
     async with AsyncSessionLocal() as session:
         schedule = await session.get(BenchmarkSchedule, schedule_id)
         if schedule is None:
@@ -526,7 +552,6 @@ async def update_benchmark_schedule(
             "app",
             "suite",
             "revision",
-            "models",
             "suite_args",
             "auto_pause",
             "enabled",
@@ -536,6 +561,7 @@ async def update_benchmark_schedule(
         ):
             setattr(schedule, field, getattr(body, field))
         schedule.node = node
+        schedule.models = models
         schedule.sampling = None if body.sampling == "benchmark" else body.sampling
         schedule.cloud = body.cloud.model_dump() if body.cloud else None
         schedule.battery = [item.model_dump() for item in body.battery] or None

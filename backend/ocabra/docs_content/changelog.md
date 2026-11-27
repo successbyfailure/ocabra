@@ -16,6 +16,29 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.144.0 — 2026-11-27
+
+### Cambios
+
+- **Benchmarks con un backend concreto.** `POST /ocabra/benchmarks/runs` (y los
+  planes) aceptan en `models` el id de despliegue `<backend>/<modelo>`
+  (`ollama/gemma4:12b`) aunque ese despliegue no exista aún. Basta con que el
+  backend pueda leer el fichero del modelo: en este servidor se crea al medir,
+  y en un pod se monta con ese backend. Los nombres derivados
+  (`gemma4:12b-ollama`), que la API de inferencia rechaza, se traducen solos.
+  Un backend que no sirve ese fichero da 400 al crear la ejecución.
+- **Ejecuciones en paralelo por máquina.** La cola de benchmarks mide a la vez
+  en máquinas distintas (este servidor, cada nodo, cada pod). Antes una medida
+  en un pod dejaba esperando a otra en un nodo de la federación hasta que
+  terminase. En una misma máquina sigue habiendo una sola a la vez.
+- **Modelos de Ollama en pods.** La imagen `ocabra-node` baja y arranca su
+  propio Ollama la primera vez que un modelo lo necesita, con la versión, el
+  paralelismo y el contexto del hub. Necesita un nodo 0.144.0 o posterior.
+- **Una batería con pod ya no falla entera por un modelo.** Si un modelo no se
+  puede copiar al pod, se lanza el pod con los demás y ese modelo queda
+  fallido con su motivo en `error`. Antes no se alquilaba nada.
+
+**Acción:** ninguna.
 ## 0.143.1 — VRAM mínima inclusiva
 
 El selector de GPU de benchmarks incluye las tarjetas que igualan el mínimo.

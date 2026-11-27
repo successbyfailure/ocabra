@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
+import httpx
 import structlog
 
 if TYPE_CHECKING:
@@ -58,6 +59,30 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "pass_hf_token": False,
     "hub_url": "",  # empty = PUBLIC_URL
 }
+
+
+async def ollama_node_env(cfg: Any) -> dict[str, str]:
+    """Lo que el Ollama propio del pod copia del nuestro: versión, paralelismo, contexto.
+
+    Así un benchmark de un modelo de Ollama en un pod mide el mismo Ollama
+    que el hub. La versión se pregunta al daemon (si no responde, el nodo usa
+    la suya por defecto).
+    """
+    env = {
+        "OLLAMA_NUM_PARALLEL": str(int(getattr(cfg, "ollama_num_parallel", 1) or 1)),
+        "OLLAMA_MAX_CONTEXT": str(int(getattr(cfg, "ollama_max_context", 65536) or 65536)),
+    }
+    base = str(getattr(cfg, "ollama_base_url", "") or "").rstrip("/")
+    if base and getattr(cfg, "ollama_enabled", True):
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(f"{base}/api/version")
+            version = str(resp.json().get("version") or "") if resp.status_code == 200 else ""
+        except (httpx.HTTPError, ValueError):
+            version = ""
+        if version:
+            env["OLLAMA_NODE_VERSION"] = version
+    return env
 
 
 class CloudError(Exception):
@@ -555,6 +580,7 @@ class CloudNodeManager:
         }
         if benchmark_prefetch:
             env["DOWNLOAD_WORKERS"] = "2"
+        env.update(await ollama_node_env(self.fm.settings))
         zero_data = privacy_mode == "zero_data"
         if zero_data:
             # Nothing about requests is kept on the pod; Secure Cloud (vetted
@@ -664,8 +690,8 @@ class CloudNodeManager:
 
         needed = list(dict.fromkeys(backends or []))
         if models:
-            ours = await preload.load_model_rows(self.fm.session_factory, models)
-            needed += [str(r.backend_type) for r in ours.values()]
+            ours = await preload.replication_rows(self.fm.session_factory, models)
+            needed += [str(backend or r.backend_type) for r, backend in ours.values()]
         needed += [str(rows[rid].backend_type) for rid in dict.fromkeys(recipe_ids)]
         backend_items = [
             recipes_mod.backend_item(b)
@@ -673,6 +699,12 @@ class CloudNodeManager:
             if b and b != "ollama" and b not in recipes_mod.IMAGE_BACKENDS
         ]
         return backend_items + items
+
+    async def replication_problems(self, models: list[str]) -> dict[str, str]:
+        """``{model_id: why}`` for the models that couldn't be copied to a pod."""
+        from ocabra.core.cloud import preload
+
+        return await preload.replication_problems(self.fm.session_factory, models)
 
     async def add_models(
         self,

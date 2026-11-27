@@ -81,8 +81,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
     && apt-get purge -y build-essential && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 # Backends installed on demand (diffusers, to carry our image models) pip
-# install from git. Own layer so the Python deps above stay cached.
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+# install from git (and zstd unpacks the Ollama release, backends/ollama_daemon.py).
+# Own layer so the Python deps above stay cached.
+RUN apt-get update && apt-get install -y --no-install-recommends git zstd \
     && rm -rf /var/lib/apt/lists/*
 COPY . .
 
@@ -129,6 +130,8 @@ ENV DATABASE_URL=postgresql+asyncpg://ocabra:ocabra@127.0.0.1:5432/ocabra \
     REDIS_URL=redis://127.0.0.1:6379/0 \
     DEFAULT_GPU_INDEX=0 \
     OLLAMA_ENABLED=false \
+    OLLAMA_NODE_AUTOSTART=true \
+    OLLAMA_BASE_URL=http://127.0.0.1:11434 \
     FEDERATION_ENABLED=true \
     FEDERATION_LOCAL_URL=http://127.0.0.1:8000 \
     BACKENDS_FAT_IMAGE=false \

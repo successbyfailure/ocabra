@@ -40,6 +40,8 @@ GPU_MARGIN_MB = 1500
 MIN_CONTEXT = 32768
 # First node version whose download API takes exact files into a folder.
 EXACT_FILES_MIN_VERSION = (0, 87, 0)
+# First node image that starts its own Ollama (backends/ollama_daemon.py).
+OLLAMA_MIN_VERSION = (0, 144, 0)
 _HF_CACHE_RE = re.compile(r"/models--([^/]+)/snapshots/([^/]+)(?:/(.*))?$")
 
 
@@ -78,25 +80,53 @@ def fit_llama_cpp_config(cfg: dict[str, Any], gpu_total_mb: int | None) -> dict[
     return out
 
 
-def replication_request(model_row: Any, gpu_total_mb: int | None) -> tuple[str, dict[str, Any]]:
-    """``(node_model_id, download_body)`` to replicate *model_row* on a node."""
+def replication_request(
+    model_row: Any, gpu_total_mb: int | None, backend: str | None = None
+) -> tuple[str, dict[str, Any]]:
+    """``(node_model_id, download_body)`` to replicate *model_row* on a node.
+
+    *backend* serves the same file with another engine than *model_row*'s
+    (``ollama/gemma4:12b`` from our llama.cpp deployment): our settings are
+    only carried over when they are that engine's.
+    """
     from ocabra.core.model_ref import LLAMA_CPP_FAMILY, build_model_ref
 
-    backend = str(model_row.backend_type)
-    if backend not in LLAMA_CPP_FAMILY:
+    source_backend = str(model_row.backend_type)
+    target = backend or source_backend
+    if target not in LLAMA_CPP_FAMILY and target != "ollama":
         raise CloudError(
-            f"Por ahora solo se replican modelos de llama.cpp (este es {backend})", 400
+            f"Por ahora solo se replican modelos de llama.cpp y Ollama (este es {target})", 400
         )
     body = download_source(model_row.artifact)
+    if target == "ollama" and body["source"] != "ollama":
+        raise CloudError(
+            "Este modelo no se puede servir con Ollama en el pod: su fichero no viene de "
+            "un tag de Ollama",
+            400,
+        )
+    if target == "ollama":
+        # The node registers the tag as is; Ollama reads the manifest itself.
+        body.pop("artifact", None)
     model_key = str(model_row.model_key or str(model_row.model_id).split("/", 1)[-1])
     extra = model_row.extra_config if isinstance(model_row.extra_config, dict) else {}
-    llama_cfg = fit_llama_cpp_config(extra.get("llama_cpp") or {}, gpu_total_mb)
+    if target == "ollama":
+        own = extra.get("ollama") if source_backend == "ollama" else None
+        section = (
+            {k: v for k, v in own.items() if k not in _HOST_SPECIFIC}
+            if isinstance(own, dict)
+            else {}
+        )
+        extra_config = {"ollama": section} if section else {}
+    else:
+        own = extra.get("llama_cpp") if source_backend in LLAMA_CPP_FAMILY else None
+        llama_cfg = fit_llama_cpp_config(own or {}, gpu_total_mb)
+        extra_config = {"llama_cpp": llama_cfg} if llama_cfg else {}
     body["register_config"] = {
-        "backend_type": backend,
+        "backend_type": target,
         "model_key": model_key,
-        "extra_config": {"llama_cpp": llama_cfg} if llama_cfg else {},
+        "extra_config": extra_config,
     }
-    return build_model_ref(backend, model_key), body
+    return build_model_ref(target, model_key), body
 
 
 def _hf_cache_origin(path: str | Path) -> tuple[str, str, str] | None:
@@ -242,27 +272,32 @@ def _diffusers_plan(model_row: Any, models_dir: str) -> dict[str, Any]:
 
 
 def plan_replication(
-    model_row: Any, gpu_total_mb: int | None, models_dir: str | None = None
+    model_row: Any,
+    gpu_total_mb: int | None,
+    models_dir: str | None = None,
+    backend: str | None = None,
 ) -> dict[str, Any]:
     """``{node_model_id, steps, size_bytes, min_node_version}`` for *model_row*.
 
+    *backend*: serve it on the node with that engine instead of the row's.
     Touches the filesystem (diffusers trees): call it off the event loop.
     Raises :class:`CloudError` (400) with the reason when it can't be copied.
     """
-    if str(model_row.backend_type) == "diffusers":
+    if str(model_row.backend_type) == "diffusers" and backend in (None, "diffusers"):
         from ocabra.config import settings
 
         return _diffusers_plan(model_row, models_dir or settings.models_dir)
-    node_model_id, body = replication_request(model_row, gpu_total_mb)
+    node_model_id, body = replication_request(model_row, gpu_total_mb, backend)
     return {
         "node_model_id": node_model_id,
         "steps": [{"kind": "download", "body": body}, {"kind": "load"}],
         "size_bytes": None,
-        "min_node_version": None,
+        # Ollama on a pod needs a node that brings its own daemon.
+        "min_node_version": OLLAMA_MIN_VERSION if node_model_id.startswith("ollama/") else None,
     }
 
 
-REPLICABLE_BACKENDS = ("diffusers",)
+REPLICABLE_BACKENDS = ("diffusers", "ollama")
 
 
 async def load_model_rows(session_factory: Any, model_ids: list[str]) -> dict[str, Any]:
@@ -285,14 +320,66 @@ async def load_model_rows(session_factory: Any, model_ids: list[str]) -> dict[st
     return {r.model_id: r for r in rows}
 
 
+async def replication_rows(
+    session_factory: Any, model_ids: list[str]
+) -> dict[str, tuple[Any, str | None]]:
+    """``{model_id: (row, backend)}``: what to copy each requested model from.
+
+    An id we have is its own row. ``<backend>/<model>`` with no such
+    deployment here (a benchmark asking for an engine we don't serve that
+    model with) comes from the model's default deployment, served on the
+    node with that *backend*.
+    """
+    import sqlalchemy as sa
+
+    from ocabra.db.model_config import LogicalModel, ModelConfig
+
+    rows = await load_model_rows(session_factory, model_ids)
+    out: dict[str, tuple[Any, str | None]] = {mid: (row, None) for mid, row in rows.items()}
+    missing = [mid for mid in model_ids if mid not in rows and "/" in mid]
+    if not missing:
+        return out
+    async with session_factory() as session:
+        for mid in missing:
+            backend, _, key = mid.partition("/")
+            logical = await session.get(LogicalModel, key)
+            if logical is None:
+                continue
+            siblings = (
+                (await session.execute(sa.select(ModelConfig).where(ModelConfig.model_key == key)))
+                .scalars()
+                .all()
+            )
+            source = next(
+                (r for r in siblings if r.backend_type == logical.default_backend),
+                siblings[0] if siblings else None,
+            )
+            if source is not None:
+                out[mid] = (source, backend)
+    return out
+
+
 async def validate_models(session_factory: Any, model_ids: list[str]) -> None:
     """Fail fast (before renting anything) on unknown or non-replicable models."""
-    rows = await load_model_rows(session_factory, model_ids)
+    for reason in (await replication_problems(session_factory, model_ids)).values():
+        raise CloudError(reason, 400)
+
+
+async def replication_problems(session_factory: Any, model_ids: list[str]) -> dict[str, str]:
+    """``{model_id: why}`` for the models that can't be copied to a node."""
+    rows = await replication_rows(session_factory, model_ids)
+    problems: dict[str, str] = {}
     for mid in model_ids:
-        row = rows.get(mid)
-        if row is None:
-            raise CloudError(f"Modelo desconocido: {mid}", 400)
-        await asyncio.to_thread(plan_replication, row, None)
+        found = rows.get(mid)
+        if found is None:
+            problems[mid] = f"Modelo desconocido: {mid}"
+            continue
+        row, backend = found
+        try:
+            await asyncio.to_thread(plan_replication, row, None, None, backend)
+        except CloudError as exc:
+            problems[mid] = str(exc)
+    return problems
 
 
 async def required_cuda(session_factory: Any, model_ids: list[str]) -> str | None:
@@ -308,11 +395,11 @@ async def required_cuda(session_factory: Any, model_ids: list[str]) -> str | Non
 
     if not model_ids or not settings.backend_oci_repository:
         return None
-    rows = await load_model_rows(session_factory, model_ids)
+    rows = await replication_rows(session_factory, model_ids)
     backends: set[str] = set()
-    for row in rows.values():
+    for row, backend in rows.values():
         try:
-            plan = await asyncio.to_thread(plan_replication, row, None)
+            plan = await asyncio.to_thread(plan_replication, row, None, None, backend)
         except CloudError:
             continue
         backends |= {s["backend"] for s in plan["steps"] if s["kind"] == "backend"}
@@ -501,11 +588,14 @@ async def _drive_item(fm: Any, peer: Any, active: dict, tasks: dict) -> None:
                     "node_model_id": active["model_id"],
                 }
             else:
-                rows = await load_model_rows(fm.session_factory, [active["model_id"]])
-                row = rows.get(active["model_id"])
-                if row is None:
+                rows = await replication_rows(fm.session_factory, [active["model_id"]])
+                found = rows.get(active["model_id"])
+                if found is None:
                     raise CloudError("El modelo ya no existe aquí", 400)
-                plan = await asyncio.to_thread(plan_replication, row, _node_gpu_total(peer))
+                row, backend = found
+                plan = await asyncio.to_thread(
+                    plan_replication, row, _node_gpu_total(peer), None, backend
+                )
                 need = plan.get("min_node_version")
                 have = _node_version(peer)
                 if need and have is not None and have < tuple(need):

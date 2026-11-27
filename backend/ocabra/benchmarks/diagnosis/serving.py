@@ -24,6 +24,7 @@ from typing import Any
 
 import httpx
 
+from ocabra.benchmarks.models import bench_profile
 from ocabra.config import settings
 
 # Lo que se compara entre lo efectivo y lo recomendado.
@@ -148,7 +149,7 @@ async def backend_body(
     from ocabra.core.inference.resolution import merge_profile_defaults
     from ocabra.core.output_limits import apply_declared_output_limit
 
-    profile = await app_state.profile_registry.get(profile_id)
+    profile = await bench_profile(app_state.profile_registry, profile_id)
     if profile is None:
         raise LookupError(f"perfil '{profile_id}' no encontrado")
     state = await app_state.model_manager.get_state(profile.base_model_id)

@@ -5,6 +5,7 @@ import httpx
 import structlog
 
 from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
+from ocabra.backends.ollama_daemon import ensure_daemon
 from ocabra.config import settings
 from ocabra.registry.ollama_registry import OllamaRegistry
 
@@ -51,6 +52,8 @@ class OllamaBackend(BackendInterface):
         return self._registries.setdefault(endpoint, OllamaRegistry(endpoint))
 
     async def load(self, model_id: str, gpu_indices: list[int], **kwargs) -> WorkerInfo:
+        # En un pod no hay contenedor de Ollama: se arranca uno propio.
+        await ensure_daemon()
         # Honour the oCabra load_policy when telling Ollama how long to keep
         # the weights in memory. For warm/pin models we pass keep_alive=-1
         # ("never evict") so Ollama doesn't silently drop the weights after
@@ -198,13 +201,17 @@ class OllamaBackend(BackendInterface):
         native_context_length = 0
 
         # Query Ollama /api/show for accurate capabilities
+        shown = False
         try:
+            if settings.ollama_node_autostart:
+                await ensure_daemon()
             async with httpx.AsyncClient(timeout=5.0) as client:
                 r = await client.post(
                     f"{settings.ollama_base_url}/api/show",
                     json={"name": model_id},
                 )
                 if r.status_code == 200:
+                    shown = True
                     data = r.json()
                     # Ollama 0.5+ exposes a top-level ``capabilities`` array
                     # (e.g. ["completion", "vision", "audio", "tools",
@@ -305,7 +312,10 @@ class OllamaBackend(BackendInterface):
             context_length=context_length,
             native_context_length=native_context_length,
         )
-        self._caps_cache[model_id] = caps
+        # Solo se recuerda lo que dijo Ollama: con el daemon del pod aún sin
+        # arrancar se quedaría para siempre la heurística.
+        if shown or not settings.ollama_node_autostart:
+            self._caps_cache[model_id] = caps
         return caps
 
     # Disk size undercounts real VRAM for large-context models — the KV cache

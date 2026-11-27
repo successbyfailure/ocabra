@@ -34,6 +34,7 @@ from sqlalchemy.orm import selectinload
 
 from ocabra.benchmarks.catalog import APPS, AppSpec, SuiteSpec
 from ocabra.benchmarks.diagnosis.jobs import DiagnosisRunner, DiagnosisStore
+from ocabra.benchmarks.models import bench_profile, ensure_deployment, pending_deployment
 from ocabra.config import APP_VERSION, settings
 from ocabra.core.cloud import timeline as cloud_timeline
 from ocabra.database import AsyncSessionLocal
@@ -253,17 +254,39 @@ class BenchmarkManager:
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
-        self._process: asyncio.subprocess.Process | None = None
+        # Procesos de runner vivos (uno por ejecución en curso).
+        self._processes: set[asyncio.subprocess.Process] = set()
         self._process_lock = asyncio.Lock()
+        # Una ejecución a la vez por máquina («» = este servidor): las de
+        # nodos distintos no comparten hardware y avanzan en paralelo.
+        self._running: dict[str, asyncio.Task[None]] = {}
         self._diagnoses = DiagnosisStore(self._root)
         self._diagnosis_runner: DiagnosisRunner | None = None
         self._provision_task: asyncio.Task[None] | None = None
         # Una sola pasada de aprovisionamiento a la vez: dos a la vez pedirían
         # dos pods para la misma ejecución.
         self._provision_lock = asyncio.Lock()
-        # Override de muestreo activo (perfil, parámetros y clave del runner).
-        self.sampling_override: dict[str, object] | None = None
+        # Overrides de muestreo activos (perfil, parámetros y clave del
+        # runner), uno por ejecución en curso; «diagnosis» es el del diagnóstico.
+        self._sampling_overrides: dict[str, dict[str, object]] = {}
         self._last_diagnosis_purge = 0.0
+
+    @property
+    def sampling_overrides(self) -> list[dict[str, object]]:
+        """Overrides de muestreo de todo lo que está midiendo ahora."""
+        return list(self._sampling_overrides.values())
+
+    @property
+    def sampling_override(self) -> dict[str, object] | None:
+        """El override del diagnóstico en curso (lo pone ``DiagnosisRunner``)."""
+        return self._sampling_overrides.get("diagnosis")
+
+    @sampling_override.setter
+    def sampling_override(self, value: dict[str, object] | None) -> None:
+        if value:
+            self._sampling_overrides["diagnosis"] = value
+        else:
+            self._sampling_overrides.pop("diagnosis", None)
 
     @property
     def diagnoses(self) -> DiagnosisStore:
@@ -287,13 +310,14 @@ class BenchmarkManager:
         self._stop.set()
         self._wake.set()
         await self._terminate_process()
-        for task in (self._task, self._provision_task):
+        for task in (self._task, self._provision_task, *self._running.values()):
             if task is not None:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
         self._task = None
         self._provision_task = None
+        self._running.clear()
         logger.info("benchmark_manager_stopped")
 
     def notify(self) -> None:
@@ -488,13 +512,15 @@ class BenchmarkManager:
             try:
                 await self._enqueue_due_schedules()
                 await self._resume_after_quiet_period()
-                run_id = await self._next_queued_run()
-                if run_id is not None:
-                    await self._execute_run(run_id)
+                started = await self._start_queued_runs()
+                if started:
                     continue
-                # Los diagnósticos repiten casos: solo con la cola de benchmarks vacía.
+                # Los diagnósticos repiten casos en este servidor: solo sin
+                # nada local en cola ni midiendo.
                 await self._purge_diagnoses()
-                job = await asyncio.to_thread(self._diagnoses.next_queued)
+                job = None
+                if "" not in self._running and not await self._local_run_queued():
+                    job = await asyncio.to_thread(self._diagnoses.next_queued)
                 if job is not None and self._identity is not None:
                     runner = DiagnosisRunner(self._app, self._diagnoses, self._identity.raw_api_key)
                     self._diagnosis_runner = runner
@@ -558,10 +584,39 @@ class BenchmarkManager:
         if queued:
             self.notify()
 
-    async def _next_queued_run(self) -> uuid.UUID | None:
+    async def _start_queued_runs(self) -> int:
+        """Arranca la siguiente ejecución de cada máquina libre. Devuelve cuántas."""
+        started = 0
+        while True:
+            picked = await self._next_queued(set(self._running))
+            if picked is None:
+                return started
+            run_id, target = picked
+            task = asyncio.create_task(
+                self._execute_run_guarded(run_id), name=f"benchmark-run-{target or 'local'}"
+            )
+            self._running[target] = task
+            task.add_done_callback(lambda _t, target=target: self._run_finished(target, _t))
+            started += 1
+
+    def _run_finished(self, target: str, task: asyncio.Task[None]) -> None:
+        if self._running.get(target) is task:
+            self._running.pop(target, None)
+        self._wake.set()
+
+    async def _execute_run_guarded(self, run_id: uuid.UUID) -> None:
+        try:
+            await self._execute_run(run_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — one broken run must not kill the queue
+            logger.exception("benchmark_worker_error", run_id=str(run_id), error=str(exc))
+
+    async def _next_queued(self, busy: set[str]) -> tuple[uuid.UUID, str] | None:
+        """La ejecución en cola más antigua de una máquina que no esté midiendo ya."""
         async with AsyncSessionLocal() as session:
-            run_id = await session.scalar(
-                select(BenchmarkRun.id)
+            query = (
+                select(BenchmarkRun.id, BenchmarkRun.node)
                 .where(
                     BenchmarkRun.status == "queued",
                     # Las que esperan su pod no ocupan la cola: las mueve
@@ -569,9 +624,33 @@ class BenchmarkManager:
                     sa.or_(BenchmarkRun.cloud.is_(None), BenchmarkRun.node.is_not(None)),
                 )
                 .order_by(BenchmarkRun.created_at)
+            )
+            if "" in busy:
+                query = query.where(BenchmarkRun.node.is_not(None))
+            remote = [name for name in busy if name]
+            if remote:
+                query = query.where(
+                    sa.or_(BenchmarkRun.node.is_(None), BenchmarkRun.node.not_in(remote))
+                )
+            row = (await session.execute(query.limit(1))).first()
+            return (row[0], row[1] or "") if row else None
+
+    async def _next_queued_run(self) -> uuid.UUID | None:
+        picked = await self._next_queued(set())
+        return picked[0] if picked else None
+
+    async def _local_run_queued(self) -> bool:
+        async with AsyncSessionLocal() as session:
+            found = await session.scalar(
+                select(BenchmarkRun.id)
+                .where(
+                    BenchmarkRun.status == "queued",
+                    BenchmarkRun.node.is_(None),
+                    BenchmarkRun.cloud.is_(None),
+                )
                 .limit(1)
             )
-            return run_id
+            return found is not None
 
     async def _resume_after_quiet_period(self) -> None:
         if self._identity is None:
@@ -624,6 +703,12 @@ class BenchmarkManager:
             app = APPS[run.app]
             suite = app.suites[run.suite]
             model = run.models[run.current_model_index]
+            skipped = (run.cloud or {}).get("skipped") or {}
+            if model in skipped:
+                reason = f"no se pudo copiar al pod: {skipped[model]}"
+                await session.commit()
+                await self._model_failed(run_id, model, reason)
+                return
             # En un nodo remoto el tráfico del hub no comparte hardware con la
             # medida: solo cuenta el que llega a ese nodo (se mira al terminar).
             if run.auto_pause and self._identity is not None and not run.node:
@@ -686,6 +771,9 @@ class BenchmarkManager:
             (workspace / ".prepared").touch()
 
         node = await self._run_node(run_id)
+        if not node and await ensure_deployment(self._app.state, model):
+            # Un backend compatible que aquí no estaba desplegado.
+            logger.info("benchmark_deployment_created", run_id=str(run_id), model=model)
         environment = await self._base_environment(run_id, source, app, suite, model)
         if node:
             environment["node"] = await self._node_description(node)
@@ -706,7 +794,7 @@ class BenchmarkManager:
         await self._set_phase(run_id, "running")
         started_at = datetime.now(UTC)
         if sampling is not None and self._identity is not None:
-            self.sampling_override = {
+            self._sampling_overrides[str(run_id)] = {
                 "profile": model,
                 "params": sampling["params"],
                 "api_key": self._identity.raw_api_key,
@@ -722,7 +810,7 @@ class BenchmarkManager:
                 node=node,
             )
         finally:
-            self.sampling_override = None
+            self._sampling_overrides.pop(str(run_id), None)
         finished_at = datetime.now(UTC)
         await self._set_phase(run_id, "finalizing")
         # StatsMiddleware records at response completion. Give its short DB
@@ -812,7 +900,7 @@ class BenchmarkManager:
                 start_new_session=True,
             )
             async with self._process_lock:
-                self._process = process
+                self._processes.add(process)
             interruption: str | None = None
             try:
                 while process.returncode is None:
@@ -849,8 +937,7 @@ class BenchmarkManager:
                         interruption = "manual"
             finally:
                 async with self._process_lock:
-                    if self._process is process:
-                        self._process = None
+                    self._processes.discard(process)
         return ProcessOutcome(process.returncode, interruption, external)
 
     async def _control_state(self, run_id: uuid.UUID) -> tuple[str, bool]:
@@ -1017,10 +1104,14 @@ class BenchmarkManager:
         return getattr(self._app.state, "model_manager", None)
 
     async def _terminate_process(self, process: asyncio.subprocess.Process | None = None) -> None:
+        """Termina *process*, o todos los runners vivos si no se indica."""
         if process is None:
             async with self._process_lock:
-                process = self._process
-        if process is None or process.returncode is not None:
+                alive = list(self._processes)
+            for item in alive:
+                await self._terminate_process(item)
+            return
+        if process.returncode is not None:
             return
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGTERM)
@@ -1311,7 +1402,7 @@ class BenchmarkManager:
         from ocabra.benchmarks.diagnosis.reference import load_reference, resolve_reference_repo
 
         state_obj = self._app.state
-        profile = await state_obj.profile_registry.get(model)
+        profile = await bench_profile(state_obj.profile_registry, model)
         state = await state_obj.model_manager.get_state(profile.base_model_id) if profile else None
         repo = resolve_reference_repo(
             str(getattr(state, "model_key", None) or model),
@@ -1969,9 +2060,11 @@ class BenchmarkManager:
             by_id = {item["model_id"]: item for item in items}
             prerequisites = [item for item in items if item.get("kind") == "backend"]
             relevant = []
+            skipped = spec.get("skipped") or {}
             for index in range(cursor, len(models)):
-                profile = await self._app.state.profile_registry.get(models[index])
-                item = by_id.get(profile.base_model_id) if profile else None
+                if models[index] in skipped:
+                    continue  # No va al pod: se da por fallido al llegarle el turno.
+                item = by_id.get(await self._pod_model_id(models[index]) or "")
                 if item is None:
                     await self._fail_run(run_id, f"Falta la precarga de {models[index]}")
                     return
@@ -2049,13 +2142,40 @@ class BenchmarkManager:
         """Pide la máquina: los modelos de toda la batería se replican en el pod."""
         registry = self._app.state.profile_registry
         base_ids: list[str] = []
+        bench_of: dict[str, list[str]] = {}
         for model in await self._batch_models(run_id, models):
-            profile = await registry.get(model)
-            if profile is None:
+            profile = await bench_profile(registry, model)
+            base_id = profile.base_model_id if profile is not None else None
+            if base_id is None:
+                # Un backend aún sin desplegar aquí: el pod lo monta con él.
+                try:
+                    pending = await pending_deployment(model)
+                except ValueError as exc:
+                    await self._fail_run(run_id, str(exc))
+                    return
+                base_id = pending.model_id if pending is not None else None
+            if base_id is None:
                 await self._fail_run(run_id, f"Perfil desconocido: {model}")
                 return
-            if profile.base_model_id not in base_ids:
-                base_ids.append(profile.base_model_id)
+            if base_id not in base_ids:
+                base_ids.append(base_id)
+            bench_of.setdefault(base_id, []).append(model)
+        # Lo que no se puede copiar al pod (ficheros solo de aquí, un backend
+        # que el pod no sabe montar) no tumba la batería: se mide lo demás y
+        # ese modelo queda fallido con su motivo.
+        check = getattr(cloud, "replication_problems", None)
+        problems = await check(base_ids) if check is not None else {}
+        if problems and len(problems) == len(base_ids):
+            await self._fail_run(
+                run_id, "No hubo máquina para el benchmark: " + "; ".join(problems.values())
+            )
+            return
+        skipped = {
+            model: reason for base, reason in problems.items() for model in bench_of.get(base, [])
+        }
+        base_ids = [base for base in base_ids if base not in problems]
+        if skipped:
+            await self._mark_skipped(run_id, skipped)
         async with AsyncSessionLocal() as session:
             app = (await self._get_run(session, run_id)).app
         launch = {
@@ -2092,6 +2212,29 @@ class BenchmarkManager:
                 run_id, f"No hubo máquina para el benchmark: {request.get('lastError')}"
             )
         self.notify()
+
+    async def _pod_model_id(self, model: str) -> str | None:
+        """El modelo nuestro (o el despliegue aún por crear) que el pod monta para *model*."""
+        profile = await bench_profile(self._app.state.profile_registry, model)
+        if profile is not None and profile.base_model_id:
+            return profile.base_model_id
+        try:
+            pending = await pending_deployment(model)
+        except ValueError:
+            return None
+        return pending.model_id if pending is not None else None
+
+    async def _mark_skipped(self, run_id: uuid.UUID, skipped: dict[str, str]) -> None:
+        """Anota en la ejecución (y su batería) los modelos que no irán al pod."""
+        async with AsyncSessionLocal() as session:
+            run = await self._get_run(session, run_id)
+            query = select(BenchmarkRun).where(BenchmarkRun.id == run_id)
+            if run.batch_id is not None:
+                query = select(BenchmarkRun).where(BenchmarkRun.batch_id == run.batch_id)
+            for row in (await session.execute(query)).scalars():
+                if row.cloud:
+                    row.cloud = {**row.cloud, "skipped": skipped}
+            await session.commit()
 
     async def _release_cloud(self, run_id: uuid.UUID) -> None:
         """Al terminar (bien, mal o cancelada): suelta la petición y, si se pidió, el pod."""

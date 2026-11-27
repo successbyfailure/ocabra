@@ -11,8 +11,10 @@ import sqlalchemy as sa
 
 from ocabra.core.cloud.manager import CloudError
 from ocabra.core.cloud.preload import (
+    OLLAMA_MIN_VERSION,
     download_source,
     fit_llama_cpp_config,
+    plan_replication,
     replication_request,
 )
 
@@ -83,6 +85,60 @@ def test_replication_request_keeps_our_id():
         "model_key": "gemma4:26b",
         "extra_config": {"llama_cpp": {"ctx_size": 8192}},
     }
+
+
+def test_an_ollama_deployment_is_replicated_with_ollama():
+    row = SimpleNamespace(
+        backend_type="ollama",
+        artifact={"kind": "ollama_tag", "source": "ollama", "ref": "gemma4:12b"},
+        model_key="gemma4:12b",
+        model_id="ollama/gemma4:12b",
+        extra_config={"ollama": {"num_ctx": 32768, "preferred_gpus": [1]}},
+    )
+    node_id, body = replication_request(row, 24564)
+    assert node_id == "ollama/gemma4:12b"
+    assert body["source"] == "ollama" and body["model_ref"] == "gemma4:12b"
+    # Lo de nuestras GPUs no viaja; el contexto sí.
+    assert body["register_config"]["extra_config"] == {"ollama": {"num_ctx": 32768}}
+    plan = plan_replication(row, 24564)
+    assert plan["min_node_version"] == OLLAMA_MIN_VERSION
+
+
+def test_another_engine_reads_the_same_file_without_our_settings():
+    row = SimpleNamespace(
+        backend_type="llamacpp_mks",
+        artifact={"kind": "gguf", "source": "ollama", "ref": "qwen3.8:27b"},
+        model_key="qwen3.8:27b",
+        model_id="llamacpp_mks/qwen3.8:27b",
+        extra_config={"llama_cpp": {"ctx_size": 8192}},
+    )
+    node_id, body = replication_request(row, 24564, "ollama")
+    assert node_id == "ollama/qwen3.8:27b"
+    assert body["register_config"] == {
+        "backend_type": "ollama",
+        "model_key": "qwen3.8:27b",
+        "extra_config": {},
+    }
+    node_id, body = replication_request(row, 24564, "llama_cpp")
+    assert node_id == "llama_cpp/qwen3.8:27b"
+    assert body["register_config"]["extra_config"] == {"llama_cpp": {"ctx_size": 8192}}
+
+
+def test_ollama_on_a_pod_needs_an_ollama_tag():
+    row = SimpleNamespace(
+        backend_type="llamacpp_mks",
+        artifact={
+            "kind": "gguf",
+            "source": "huggingface",
+            "ref": "org/repo::m.gguf",
+            "file": "m.gguf",
+        },
+        model_key="m",
+        model_id="llamacpp_mks/m",
+        extra_config={},
+    )
+    with pytest.raises(CloudError, match="tag de Ollama"):
+        replication_request(row, None, "ollama")
 
 
 # ── full sequence over Postgres with a simulated node ────────────
@@ -435,7 +491,7 @@ async def test_drive_walks_install_downloads_register_load(tmp_path, monkeypatch
 
     monkeypatch.setattr(preload, "load_model_rows", rows)
     real_plan = preload.plan_replication
-    monkeypatch.setattr(preload, "plan_replication", lambda r, g: real_plan(r, g, models_dir))
+    monkeypatch.setattr(preload, "plan_replication", lambda r, g, _d=None, b=None: real_plan(r, g, models_dir, b))
 
     node = {"backend": "not_installed", "jobs": {}, "registered": False}
     calls = []
@@ -504,7 +560,7 @@ async def test_drive_refuses_diffusers_on_an_old_node(tmp_path, monkeypatch):
 
     monkeypatch.setattr(preload, "load_model_rows", rows)
     real_plan = preload.plan_replication
-    monkeypatch.setattr(preload, "plan_replication", lambda r, g: real_plan(r, g, models_dir))
+    monkeypatch.setattr(preload, "plan_replication", lambda r, g, _d=None, b=None: real_plan(r, g, models_dir, b))
     fm = SimpleNamespace(session_factory=None)
     peer = SimpleNamespace(
         peer_id="p", gpus=[], tunnel_session=SimpleNamespace(remote_info={"version": "0.86.1"})
@@ -981,3 +1037,17 @@ async def test_un_corte_del_tunel_no_da_el_modelo_por_fallido():
     for _ in range(preload.MAX_TRANSIENT_FAILURES):
         items = await preload.drive(fm, peer, items, {})
     assert items[0]["status"] == "error" and "no respondió" in items[0]["error"]
+
+
+@requires_db
+async def test_an_engine_we_do_not_deploy_is_copied_from_our_default(our_model):
+    from ocabra.core.cloud.preload import replication_problems, replication_rows
+
+    wanted = [MID, f"ollama/{KEY}", f"llama_cpp/{KEY}", "ollama/zz-no-such-model:1b"]
+    rows = await replication_rows(AsyncSessionLocal, wanted)
+    assert rows[MID][1] is None
+    source, backend = rows[f"ollama/{KEY}"]
+    assert source.model_id == MID and backend == "ollama"
+    assert rows[f"llama_cpp/{KEY}"][1] == "llama_cpp"
+    problems = await replication_problems(AsyncSessionLocal, wanted)
+    assert list(problems) == ["ollama/zz-no-such-model:1b"]
