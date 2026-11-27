@@ -182,15 +182,13 @@ export function useWebSocket() {
     if (getRemoteNode()) {
       let stopped = false
       const poll = async () => {
-        try {
-          const [gpus, models] = await Promise.all([api.gpus.list(), api.models.list()])
-          if (stopped) return
-          setGpus(gpus)
-          setModels(models)
-          setConnected(true)
-        } catch {
-          if (!stopped) setConnected(false)
-        }
+        // Cada una por su lado: un listado de modelos lento en el nodo no debe
+        // dejar el panel también sin GPUs (ni marcarlo como desconectado).
+        const [gpus, models] = await Promise.allSettled([api.gpus.list(), api.models.list()])
+        if (stopped) return
+        if (gpus.status === "fulfilled") setGpus(gpus.value)
+        if (models.status === "fulfilled") setModels(models.value)
+        setConnected(gpus.status === "fulfilled" || models.status === "fulfilled")
       }
       void poll()
       const timer = window.setInterval(() => void poll(), REMOTE_POLL_MS)

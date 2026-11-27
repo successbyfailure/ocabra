@@ -154,6 +154,10 @@ def replication_request(
         "backend_type": target,
         "model_key": model_key,
         "extra_config": extra_config,
+        # Solo el despliegue pedido: un tag de Ollama servido con llama.cpp
+        # dejaba además su copia de Ollama, que en un pod sin daemon colgaba
+        # el listado de modelos (y no la usa nadie).
+        "backends": [],
     }
     if gpus and target in LLAMA_CPP_FAMILY:
         # Como al descargar en el hub: el nodo planea sus perfiles (el mayor

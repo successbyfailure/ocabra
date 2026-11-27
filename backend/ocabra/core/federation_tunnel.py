@@ -278,10 +278,10 @@ _FULL_DENY = (
     "/ocabra/groups",
     "/ocabra/federation",
     "/ocabra/cloud",
-    "/ocabra/host",
     "/ocabra/ws",
 )
-_FULL_READ_ONLY = ("/ocabra/config",)
+# The remote panel shows the node's CPU and RAM (``GET /ocabra/host/stats``).
+_FULL_READ_ONLY = ("/ocabra/config", "/ocabra/host")
 
 
 def _under(path: str, prefix: str) -> bool:

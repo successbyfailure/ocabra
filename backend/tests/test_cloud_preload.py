@@ -84,6 +84,8 @@ def test_replication_request_keeps_our_id():
         "backend_type": "llamacpp_mks",
         "model_key": "gemma4:26b",
         "extra_config": {"llama_cpp": {"ctx_size": 8192}},
+        # Solo este despliegue: sin la copia de Ollama que deja un tag servido con llama.cpp.
+        "backends": [],
     }
 
 
@@ -118,6 +120,7 @@ def test_another_engine_reads_the_same_file_without_our_settings():
         "backend_type": "ollama",
         "model_key": "qwen3.8:27b",
         "extra_config": {},
+        "backends": [],
     }
     node_id, body = replication_request(row, 24564, "llama_cpp")
     assert node_id == "llama_cpp/qwen3.8:27b"

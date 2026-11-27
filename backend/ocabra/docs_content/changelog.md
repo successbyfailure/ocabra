@@ -16,6 +16,27 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.3 — 2026-11-27
+
+### Arreglos
+
+- **En un pod, `GET /ocabra/models` se colgaba con modelos de Ollama
+  registrados.** Pedir las capacidades de un modelo de Ollama intentaba bajar
+  y arrancar el Ollama del pod dentro de la propia petición. El listado no
+  respondía en minutos y el panel remoto del pod se quedaba sin modelos ni
+  GPU, marcando «Reconectando». Ahora el Ollama del pod solo arranca al cargar
+  un modelo suyo.
+- **Los pods ya no registran una copia de Ollama de cada modelo.** Un tag de
+  Ollama servido con llama.cpp dejaba también un despliegue `ollama/…` de
+  respaldo que en un pod no usa nadie.
+- **El panel remoto muestra la CPU y la RAM del nodo.**
+  `GET /ocabra/host/stats` se puede pedir por la federación con acceso
+  completo, solo en lectura.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.2 — 2026-11-27
 
 ### Arreglos

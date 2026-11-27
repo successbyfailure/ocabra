@@ -6,6 +6,7 @@ import structlog
 
 from ocabra.backends.base import BackendCapabilities, BackendInterface, ModalityType, WorkerInfo
 from ocabra.backends.ollama_daemon import ensure_daemon
+from ocabra.backends.ollama_daemon import reachable as daemon_reachable
 from ocabra.config import settings
 from ocabra.registry.ollama_registry import OllamaRegistry
 
@@ -203,8 +204,11 @@ class OllamaBackend(BackendInterface):
         # Query Ollama /api/show for accurate capabilities
         shown = False
         try:
-            if settings.ollama_node_autostart:
-                await ensure_daemon()
+            if settings.ollama_node_autostart and not await daemon_reachable():
+                # El Ollama propio de un pod solo se arranca al cargar un modelo
+                # suyo: aquí bloqueaba (descarga de 1,5 GB) el listado de
+                # modelos, y el panel remoto se quedaba sin modelos ni GPU.
+                raise httpx.ConnectError("el Ollama del nodo aún no está arrancado")
             async with httpx.AsyncClient(timeout=5.0) as client:
                 r = await client.post(
                     f"{settings.ollama_base_url}/api/show",

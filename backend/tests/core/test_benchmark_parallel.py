@@ -329,3 +329,38 @@ async def test_un_modelo_que_no_responde_no_da_un_resultado_valido() -> None:
             await session.execute(sa.delete(RequestStat).where(RequestStat.user_id == user.id))
             await session.execute(sa.delete(User).where(User.id == user.id))
             await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_listar_modelos_de_ollama_en_un_pod_no_arranca_su_ollama(monkeypatch) -> None:
+    import time
+
+    from ocabra.backends import ollama_backend
+
+    monkeypatch.setattr(ollama_backend.settings, "ollama_node_autostart", True)
+    started = []
+
+    async def ensure():
+        started.append(1)
+        return True
+
+    async def not_running(url=None):
+        return False
+
+    monkeypatch.setattr(ollama_backend, "ensure_daemon", ensure)
+    monkeypatch.setattr(ollama_backend, "daemon_reachable", not_running)
+    backend = ollama_backend.OllamaBackend()
+    t0 = time.monotonic()
+    caps = await backend.get_capabilities("gemma4:12b")
+    assert started == [] and time.monotonic() - t0 < 1
+    assert caps.chat is True
+    # Sin respuesta de Ollama no se recuerda la heurística: se pregunta otra vez.
+    assert "gemma4:12b" not in backend._caps_cache
+
+
+def test_el_panel_remoto_puede_leer_la_cpu_del_nodo() -> None:
+    from ocabra.core.federation_tunnel import path_allowed
+
+    assert path_allowed("/ocabra/host/stats", "full", "GET")
+    assert not path_allowed("/ocabra/host/stats", "full", "POST")
+    assert not path_allowed("/ocabra/host/stats", "inference", "GET")
