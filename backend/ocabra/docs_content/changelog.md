@@ -16,6 +16,21 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.6 — 2026-11-27
+
+### Arreglos
+
+- **Un modelo copiado a un pod medía con otro muestreo por defecto.** El pod
+  creaba sus perfiles sin los `request_defaults` del perfil de aquí, así que
+  las peticiones que no fijan temperatura ni muestreo (Corrala, Fulcrum,
+  Escriba…) usaban los valores del llama-server, no los configurados aquí.
+  Ahora, al copiar el modelo, el pod los recibe en sus perfiles antes de
+  cargarlo.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.5 — 2026-11-27
 
 ### Arreglos

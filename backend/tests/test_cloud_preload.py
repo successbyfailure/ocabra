@@ -1140,3 +1140,70 @@ def test_el_pod_planea_su_contexto_con_sus_gpus():
     # Sin GPUs conocidas (nodo antiguo), como antes.
     _node_id, body = replication_request(row, 24564)
     assert "placement" not in body["register_config"]
+
+
+def test_los_valores_por_defecto_se_copian_antes_de_cargar():
+    from ocabra.core.cloud.preload import with_defaults_step
+
+    steps = [{"kind": "download", "body": {}}, {"kind": "load"}]
+    out = with_defaults_step(steps, {"temperature": 1.0})
+    assert [s["kind"] for s in out] == ["download", "defaults", "load"]
+    assert out[1]["request_defaults"] == {"temperature": 1.0}
+    # «Solo descargar» (sin load): al final. Sin valores: igual que antes.
+    assert [s["kind"] for s in with_defaults_step(steps[:1], {"t": 1})] == ["download", "defaults"]
+    assert with_defaults_step(steps, None) == steps
+
+
+async def test_el_paso_ajusta_los_perfiles_del_nodo():
+    from ocabra.core.cloud import preload
+
+    patched = []
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        assert path == "/ocabra/models/llamacpp_mks/gemma4:12b/profiles"
+        return httpx.Response(200, json=[{"profile_id": "gemma4:12b"}, {"profile_id": "x"}])
+
+    async def proxy_raw(peer, method, path, content, headers=None):
+        patched.append((method, path, content))
+        return httpx.Response(200, json={})
+
+    fm = SimpleNamespace(proxy_get=proxy_get, proxy_raw=proxy_raw)
+    item = {
+        "model_id": "llamacpp_mks/gemma4:12b",
+        "node_model_id": "llamacpp_mks/gemma4:12b",
+        "steps": [{"kind": "defaults", "request_defaults": {"temperature": 1.0}}],
+        "step": 0,
+    }
+    assert await preload._start_step(fm, SimpleNamespace(), item, {}, ("p", "m")) is True
+    assert [p[:2] for p in patched] == [
+        ("PATCH", "/ocabra/profiles/gemma4:12b"),
+        ("PATCH", "/ocabra/profiles/x"),
+    ]
+    assert b'"temperature": 1.0' in patched[0][2]
+
+
+@requires_db
+async def test_se_toman_los_valores_del_perfil_de_aqui(our_model):
+    from ocabra.core.cloud.preload import hub_request_defaults
+    from ocabra.db.model_config import ModelProfile
+
+    async with AsyncSessionLocal() as s:
+        s.add(
+            ModelProfile(
+                profile_id=KEY,
+                base_model_id=MID,
+                is_default=True,
+                request_defaults={"temperature": 1.0, "top_k": 64},
+            )
+        )
+        await s.commit()
+    try:
+        assert await hub_request_defaults(AsyncSessionLocal, MID) == {
+            "temperature": 1.0,
+            "top_k": 64,
+        }
+        assert await hub_request_defaults(AsyncSessionLocal, "ollama/nada") is None
+    finally:
+        async with AsyncSessionLocal() as s:
+            await s.execute(sa.delete(ModelProfile).where(ModelProfile.profile_id == KEY))
+            await s.commit()

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import os
 import re
 from pathlib import Path
@@ -398,6 +399,47 @@ async def replication_rows(
     return out
 
 
+async def hub_request_defaults(session_factory: Any, model_id: str) -> dict[str, Any] | None:
+    """The ``request_defaults`` our profile for *model_id* has, if any.
+
+    The default one (or else the first with defaults) of that deployment:
+    what a request for it gets here, so the pod measures with the same.
+    """
+    import sqlalchemy as sa
+
+    from ocabra.db.model_config import ModelProfile
+
+    if session_factory is None:
+        return None
+    try:
+        async with session_factory() as session:
+            profiles = (
+                (
+                    await session.execute(
+                        sa.select(ModelProfile).where(ModelProfile.base_model_id == model_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    except Exception:  # noqa: BLE001 — copiar los valores es una mejora, no un requisito
+        return None
+    ordered = sorted(profiles, key=lambda p: (not bool(p.is_default), p.backend is not None))
+    for profile in ordered:
+        if isinstance(profile.request_defaults, dict) and profile.request_defaults:
+            return dict(profile.request_defaults)
+    return None
+
+
+def with_defaults_step(steps: list[dict[str, Any]], defaults: dict[str, Any] | None) -> list:
+    """*steps* plus copying our profile defaults to the node, before loading."""
+    if not defaults:
+        return steps
+    step = {"kind": "defaults", "request_defaults": defaults, "label": "valores por defecto"}
+    load = next((i for i, s in enumerate(steps) if s.get("kind") == "load"), len(steps))
+    return [*steps[:load], step, *steps[load:]]
+
+
 async def validate_models(session_factory: Any, model_ids: list[str]) -> None:
     """Fail fast (before renting anything) on unknown or non-replicable models."""
     for reason in (await replication_problems(session_factory, model_ids)).values():
@@ -545,6 +587,33 @@ async def _start_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) -
         item["status"] = "loading"
         tasks[key] = _load_task(fm, peer, item["node_model_id"])
         return False
+    if kind == "defaults":
+        # Los perfiles que el nodo creó al registrar el modelo, con nuestros
+        # request_defaults: sin esto un pod mide con los del llama-server
+        # (las suites que no fijan muestreo salían con otro distinto).
+        model_id = item["node_model_id"]
+        resp = await fm.proxy_get(peer, f"/ocabra/models/{model_id}/profiles")
+        if resp.status_code >= 400:
+            raise CloudError(f"No se pudieron leer los perfiles: {resp.text[:200]}", 502)
+        body = json.dumps({"request_defaults": step["request_defaults"]}).encode()
+        for profile in resp.json() or []:
+            pid = profile.get("profile_id") or profile.get("profileId")
+            if not pid:
+                continue
+            patch = await fm.proxy_raw(
+                peer,
+                "PATCH",
+                f"/ocabra/profiles/{pid}",
+                body,
+                {"content-type": "application/json"},
+            )
+            try:
+                text = (await patch.aread()).decode(errors="replace")
+            finally:
+                await patch.aclose()
+            if patch.status_code >= 400:
+                raise CloudError(f"No se pudo ajustar el perfil {pid}: {text[:200]}", 502)
+        return True
     raise CloudError(f"Paso desconocido: {kind}", 500)
 
 
@@ -675,6 +744,13 @@ async def _drive_item(fm: Any, peer: Any, active: dict, tasks: dict) -> None:
                         409,
                     )
             steps = plan["steps"]
+            if not active.get("recipe_steps"):
+                steps = with_defaults_step(
+                    steps,
+                    await hub_request_defaults(fm.session_factory, str(row.model_id))
+                    if backend is None
+                    else None,
+                )
             if active.get("load") is False:
                 # «Solo descargar»: on the node, ready, loaded when asked for.
                 steps = [s for s in steps if s["kind"] != "load"]
