@@ -16,6 +16,22 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.15 — 2026-11-27
+
+### Arreglos
+
+- **Un pod podía no ver los presets que acababa de planificar.** El plan
+  automático al registrar un modelo los guardaba sin refrescar la caché de
+  perfiles del nodo. El modelo se resolvía entonces sin presets (y no cabía),
+  y añadirle otro daba `IntegrityError`. Ahora el hub reescribe cada perfil
+  del pod antes de comprobar sus presets, lo que hace que el nodo lo recargue.
+  Si aun así no se puede añadir el preset de contexto máximo, se anota y la
+  preparación sigue.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.14 — 2026-11-27
 
 ### Arreglos

@@ -1,7 +1,7 @@
 {
   "name": "ocabra-frontend",
   "private": true,
-  "version": "0.145.14",
+  "version": "0.145.15",
   "type": "module",
   "scripts": {
     "dev": "vite",

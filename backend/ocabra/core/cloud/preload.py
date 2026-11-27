@@ -665,20 +665,36 @@ async def _start_step(fm: Any, peer: Any, item: dict, tasks: dict, key: tuple) -
             pid = profile.get("profile_id") or profile.get("profileId")
             if not pid:
                 continue
-            if defaults:
-                await _node_json(
-                    fm, peer, "PATCH", f"/ocabra/profiles/{pid}", {"request_defaults": defaults}
-                )
-            presets = profile.get("runtime_presets") or profile.get("runtimePresets") or []
-            if preset and not presets:
+            # Escribir el perfil hace que el nodo lo recargue: su caché no ve los
+            # presets que el plan automático acaba de guardar, y crear otro por
+            # defecto chocaba con ellos (IntegrityError).
+            patched = await _node_json(
+                fm,
+                peer,
+                "PATCH",
+                f"/ocabra/profiles/{pid}",
+                {"request_defaults": defaults} if defaults else {"enabled": True},
+            )
+            if not preset:
+                continue
+            presets = (patched or {}).get("runtime_presets")
+            if presets is None:
+                presets = profile.get("runtime_presets") or []
+            if presets:
+                continue
+            try:
                 await _node_json(
                     fm, peer, "POST", f"/ocabra/profiles/{pid}/runtime-presets", preset
                 )
+            except CloudError as exc:
+                # Sin preset el modelo puede no caber, pero eso lo dirá al
+                # medirlo; no se pierde por esto el resto de su preparación.
+                logger.warning("cloud_preload_pod_preset_failed", profile=pid, error=str(exc))
         return True
     raise CloudError(f"Paso desconocido: {kind}", 500)
 
 
-async def _node_json(fm: Any, peer: Any, method: str, path: str, body: dict) -> None:
+async def _node_json(fm: Any, peer: Any, method: str, path: str, body: dict) -> Any:
     resp = await fm.proxy_raw(
         peer, method, path, json.dumps(body).encode(), {"content-type": "application/json"}
     )
@@ -688,6 +704,10 @@ async def _node_json(fm: Any, peer: Any, method: str, path: str, body: dict) -> 
         await resp.aclose()
     if resp.status_code >= 400:
         raise CloudError(f"El nodo rechazó {method} {path}: {text[:200]}", 502)
+    try:
+        return json.loads(text) if text else None
+    except ValueError:
+        return None
 
 
 async def _restart_stalled_download(fm: Any, peer: Any, item: dict, job: dict) -> None:

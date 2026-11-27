@@ -1331,11 +1331,55 @@ async def test_un_perfil_del_pod_sin_presets_recibe_uno_de_contexto_maximo():
     }
     fm = SimpleNamespace(proxy_get=proxy_get, proxy_raw=proxy_raw)
     assert await preload._start_step(fm, SimpleNamespace(), item, {}, ("p", "m")) is True
-    # Solo el que no tenía ninguno; el ya planificado se respeta.
+    # Cada perfil se reescribe (el nodo lo recarga); solo el que no tenía
+    # ningún preset recibe el nuestro, el ya planificado se respeta.
     assert [(m, p) for m, p, _ in calls] == [
-        ("POST", "/ocabra/profiles/gemma4:26b/runtime-presets")
+        ("PATCH", "/ocabra/profiles/gemma4:26b"),
+        ("POST", "/ocabra/profiles/gemma4:26b/runtime-presets"),
+        ("PATCH", "/ocabra/profiles/ya-planificado"),
     ]
-    assert calls[0][2]["preset_key"] == "pod"
+    assert calls[1][2]["preset_key"] == "pod"
+
+
+async def test_con_la_cache_del_nodo_desfasada_no_se_duplica_el_preset():
+    """Pod (27/11): el listado no veía el preset que el plan automático acababa
+    de guardar, y crear otro por defecto daba IntegrityError."""
+    from ocabra.core.cloud import preload
+
+    calls = []
+
+    async def proxy_get(peer, path, headers=None, timeout=None):  # noqa: ASYNC109
+        return httpx.Response(200, json=[{"profile_id": "qwen3:8b", "runtime_presets": []}])
+
+    async def proxy_raw(peer, method, path, content, headers=None):
+        calls.append((method, path))
+        if method == "PATCH":  # recargado: ahí está el del plan automático
+            return httpx.Response(200, json={"runtime_presets": [{"preset_key": "normal"}]})
+        return httpx.Response(500, json={"detail": "IntegrityError"})
+
+    fm = SimpleNamespace(proxy_get=proxy_get, proxy_raw=proxy_raw)
+    preset = {"preset_key": "pod", "context_mode": "max", "parallelism": 4}
+    item = {
+        "model_id": "llamacpp_mks/qwen3:8b",
+        "node_model_id": "llamacpp_mks/qwen3:8b",
+        "steps": preload.with_defaults_step([], None, preset),
+        "step": 0,
+    }
+    assert await preload._start_step(fm, SimpleNamespace(), item, {}, ("p", "m")) is True
+    assert calls == [("PATCH", "/ocabra/profiles/qwen3:8b")]
+    # Y si crearlo falla de todos modos, el modelo sigue su preparación.
+    calls.clear()
+
+    async def proxy_raw_empty(peer, method, path, content, headers=None):
+        calls.append((method, path))
+        if method == "PATCH":
+            return httpx.Response(200, json={"runtime_presets": []})
+        return httpx.Response(500, json={"detail": "IntegrityError"})
+
+    fm.proxy_raw = proxy_raw_empty
+    item["step"] = 0
+    assert await preload._start_step(fm, SimpleNamespace(), item, {}, ("p", "m")) is True
+    assert calls[-1] == ("POST", "/ocabra/profiles/qwen3:8b/runtime-presets")
 
 
 def test_el_reparto_de_nuestras_gpus_no_viaja_al_pod():
