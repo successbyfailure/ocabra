@@ -38,6 +38,15 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
   puede copiar al pod, se lanza el pod con los demás y ese modelo queda
   fallido con su motivo en `error`. Antes no se alquilaba nada.
 
+### Arreglos
+
+- **Peticiones de usuarios servidas en el pod de un benchmark.** La federación
+  trataba el pod alquilado para un benchmark como un nodo más. Si tenía
+  cargado el modelo que pedías (o el destino de un router como
+  `recomendado-sota`), tu petición podía acabar allí: la medida salía
+  contaminada y tus datos pasaban por esa máquina. Ahora, mientras dure el
+  benchmark, el pod solo recibe las peticiones del propio benchmark.
+
 **Acción:** ninguna.
 ## 0.143.1 — VRAM mínima inclusiva
 

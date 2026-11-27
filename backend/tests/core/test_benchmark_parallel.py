@@ -137,3 +137,51 @@ def test_el_ollama_del_pod_copia_los_ajustes_del_hub(monkeypatch) -> None:
     assert env["OLLAMA_HOST"] == "127.0.0.1:11434"
     assert env["OLLAMA_NUM_PARALLEL"] == "1" and env["OLLAMA_CONTEXT_LENGTH"] == "65536"
     assert env["OLLAMA_KV_CACHE_TYPE"] == "q8_0" and env["OLLAMA_FLASH_ATTENTION"] == "1"
+
+
+def test_un_pod_reservado_no_entra_en_el_reparto_automatico() -> None:
+    from ocabra.core.federation import FederationManager, federation_request_info
+    from tests.test_federation import _make_peer_state, _make_session_factory, _make_settings
+
+    fm = FederationManager(_make_settings(), _make_session_factory())
+    loaded = [{"model_id": "llamacpp_mks/ornith-1.5:35b", "status": "loaded"}]
+    pod = _make_peer_state(name="ocabra-bench-bfcl-528c2e", models=loaded)
+    mapache = _make_peer_state(name="Mapache", models=loaded)
+    fm._peers = {pod.peer_id: pod, mapache.peer_id: mapache}
+    assert len(fm.get_remote_models()["llamacpp_mks/ornith-1.5:35b"]) == 2
+
+    fm.reserved_peers = {"ocabra-bench-bfcl-528c2e"}
+    assert fm.get_remote_models()["llamacpp_mks/ornith-1.5:35b"] == [mapache]
+    assert [p for p, _ in fm.get_remote_catalog()["llamacpp_mks/ornith-1.5:35b"]] == [mapache]
+    # El runner del benchmark, que lo pide por /_node/<pod>/, sí llega.
+    marker = federation_request_info.set({"force_node": "ocabra-bench-bfcl-528c2e"})
+    try:
+        assert pod in fm.get_remote_models()["llamacpp_mks/ornith-1.5:35b"]
+    finally:
+        federation_request_info.reset(marker)
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_los_pods_de_benchmarks_en_curso_quedan_reservados(tmp_path: Path) -> None:
+    import uuid
+
+    cloud = FakeCloud()
+    manager = _manager(cloud)
+    fm = manager._app.state.federation_manager
+    fm.reserved_peers = set()
+    node_id = uuid.uuid4()
+    cloud.nodes.append({"id": str(node_id), "status": "running", "peer_name": "Ocabra-Bench-1"})
+    cloud.nodes.append({"id": str(uuid.uuid4()), "status": "running", "peer_name": "manual-pod"})
+    run = await _new_run(tmp_path, cloud_node_id=node_id)
+    try:
+        await manager._sync_reserved_pods()
+        assert fm.reserved_peers == {"ocabra-bench-1"}
+        async with AsyncSessionLocal() as session:
+            row = await session.get(BenchmarkRun, run.id)
+            row.status = "completed"
+            await session.commit()
+        await manager._sync_reserved_pods()
+        assert fm.reserved_peers == set()
+    finally:
+        await _delete(run.id)

@@ -190,6 +190,11 @@ class FederationManager:
         self._settings = settings
         self._session_factory = session_factory
         self._peers: dict[str, PeerState] = {}
+        # Pods alquilados para un benchmark en curso (nombres en minúscula):
+        # solo les llega lo que se manda a ellos a propósito (``/_node/<pod>/``).
+        # Si el reparto automático les mandase tráfico de usuarios, la medida
+        # saldría contaminada y sus peticiones irían a una máquina alquilada.
+        self.reserved_peers: set[str] = set()
         self._heartbeat_task: asyncio.Task | None = None
         from ocabra.core import secrets_box
 
@@ -1078,6 +1083,20 @@ class FederationManager:
         """Return only peers that are online and enabled."""
         return [p for p in self._peers.values() if p.online and p.enabled]
 
+    def get_routable_peers(self) -> list[PeerState]:
+        """Online peers the automatic routing may use (not reserved for a benchmark)."""
+        reserved = getattr(self, "reserved_peers", None)
+        if not reserved:
+            return self.get_online_peers()
+        # Una petición dirigida a un pod reservado (el runner del benchmark)
+        # sí lo ve: es la única forma de llegar a él.
+        forced = str((federation_request_info.get() or {}).get("force_node") or "").lower()
+        return [
+            p
+            for p in self.get_online_peers()
+            if p.name.lower() not in reserved or p.name.lower() == forced
+        ]
+
     def get_remote_models(self) -> dict[str, list[PeerState]]:
         """Return a mapping of model_id to list of peers that have it loaded.
 
@@ -1089,7 +1108,7 @@ class FederationManager:
         if federation_hop.get() is not None:
             return {}
         model_map: dict[str, list[PeerState]] = {}
-        for peer in self.get_online_peers():
+        for peer in self.get_routable_peers():
             for model in peer.models:
                 model_id = model.get("model_id", "")
                 status = str(model.get("status", "")).upper()
@@ -1109,7 +1128,7 @@ class FederationManager:
         if federation_hop.get() is not None:
             return {}
         catalog: dict[str, list[tuple[PeerState, dict[str, Any]]]] = {}
-        for peer in self.get_online_peers():
+        for peer in self.get_routable_peers():
             for model in peer.models:
                 model_id = model.get("model_id", "")
                 if model_id:

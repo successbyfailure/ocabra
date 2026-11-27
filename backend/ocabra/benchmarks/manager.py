@@ -1975,6 +1975,7 @@ class BenchmarkManager:
     async def _provision_loop(self) -> None:
         while not self._stop.is_set():
             try:
+                await self._sync_reserved_pods()
                 await self._advance_provisioning()
             except asyncio.CancelledError:
                 raise
@@ -1982,6 +1983,39 @@ class BenchmarkManager:
                 logger.exception("benchmark_provision_loop_error", error=str(exc))
             with suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=15)
+
+    async def _sync_reserved_pods(self) -> None:
+        """Aparta del reparto automático los pods de benchmarks que no han terminado.
+
+        Un pod con modelos cargados era un destino más para la federación:
+        tráfico de usuarios acababa en la máquina alquilada, contaminando la
+        medida (y mandando sus datos a ese pod). Reservado, solo le llega lo
+        que se le manda por ``/_node/<pod>/``, que es como mide el runner.
+        """
+        fm = getattr(self._app.state, "federation_manager", None)
+        cloud = getattr(fm, "cloud", None)
+        if fm is None or cloud is None or not hasattr(fm, "reserved_peers"):
+            return
+        async with AsyncSessionLocal() as session:
+            node_ids = {
+                str(node_id)
+                for node_id in (
+                    await session.execute(
+                        select(BenchmarkRun.cloud_node_id).where(
+                            BenchmarkRun.cloud_node_id.is_not(None),
+                            BenchmarkRun.status.not_in(_TERMINAL),
+                        )
+                    )
+                ).scalars()
+            }
+        names: set[str] = set()
+        if node_ids:
+            for node in await cloud.list_nodes():
+                if str(node.get("id")) in node_ids and node.get("peer_name"):
+                    names.add(str(node["peer_name"]).lower())
+        if names != fm.reserved_peers:
+            logger.info("benchmark_pods_reserved", pods=sorted(names))
+        fm.reserved_peers = names
 
     async def _advance_provisioning(self) -> None:
         """Mueve las ejecuciones que esperan su pod: pedirlo, esperarlo, darlo por listo."""
