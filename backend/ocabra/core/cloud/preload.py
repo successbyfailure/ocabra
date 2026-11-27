@@ -45,15 +45,41 @@ OLLAMA_MIN_VERSION = (0, 144, 0)
 _HF_CACHE_RE = re.compile(r"/models--([^/]+)/snapshots/([^/]+)(?:/(.*))?$")
 
 
+_SPLIT_GGUF_RE = re.compile(r"-0*1-of-0*([2-9]|\d{2,})\.gguf$", re.IGNORECASE)
+
+
+def _hf_file_from_path(ref: str, path: str) -> str | None:
+    """The file inside the repo for a GGUF we downloaded from Hugging Face.
+
+    Downloads land in ``huggingface/<org>--<repo>--<stem>/<file in repo>``;
+    older ones only recorded that path (``source: local``), not ``file``.
+    """
+    repo, _, stem = ref.partition("::")
+    folder = f"{repo.replace('/', '--')}--{stem}/"
+    marker = f"/huggingface/{folder}"
+    if marker not in path:
+        return None
+    return path.split(marker, 1)[1] or None
+
+
 def download_source(artifact: dict[str, Any] | None) -> dict[str, Any]:
     """``{"source", "model_ref"[, "artifact"]}`` to fetch *artifact* elsewhere."""
     art = artifact or {}
     ref = str(art.get("ref") or "")
     if art.get("source") == "ollama" and ref:
         return {"source": "ollama", "model_ref": ref}
-    if "::" in ref and art.get("file"):
+    file = art.get("file")
+    if "::" in ref and not file and art.get("path"):
+        file = _hf_file_from_path(ref, str(art["path"]))
+    if "::" in ref and file:
+        if _SPLIT_GGUF_RE.search(str(file)):
+            raise CloudError(
+                "Este modelo no se puede replicar todavía: es un GGUF partido en varios "
+                "ficheros y la descarga del nodo solo baja uno",
+                400,
+            )
         repo = ref.split("::", 1)[0]
-        return {"source": "huggingface", "model_ref": repo, "artifact": str(art["file"])}
+        return {"source": "huggingface", "model_ref": repo, "artifact": str(file)}
     raise CloudError(
         "Este modelo no se puede replicar: sus ficheros solo existen en este servidor "
         "(no vienen de Ollama ni de Hugging Face)",
@@ -81,7 +107,10 @@ def fit_llama_cpp_config(cfg: dict[str, Any], gpu_total_mb: int | None) -> dict[
 
 
 def replication_request(
-    model_row: Any, gpu_total_mb: int | None, backend: str | None = None
+    model_row: Any,
+    gpu_total_mb: int | None,
+    backend: str | None = None,
+    gpus: list[int] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """``(node_model_id, download_body)`` to replicate *model_row* on a node.
 
@@ -126,6 +155,11 @@ def replication_request(
         "model_key": model_key,
         "extra_config": extra_config,
     }
+    if gpus and target in LLAMA_CPP_FAMILY:
+        # Como al descargar en el hub: el nodo planea sus perfiles (el mayor
+        # contexto que cabe) con llama-fit sobre sus propias GPUs, en vez de
+        # cargar con nuestro contexto, pensado para otras tarjetas.
+        body["register_config"]["placement"] = {"gpus": list(gpus), "cpu": False}
     return build_model_ref(target, model_key), body
 
 
@@ -276,6 +310,7 @@ def plan_replication(
     gpu_total_mb: int | None,
     models_dir: str | None = None,
     backend: str | None = None,
+    gpus: list[int] | None = None,
 ) -> dict[str, Any]:
     """``{node_model_id, steps, size_bytes, min_node_version}`` for *model_row*.
 
@@ -287,7 +322,7 @@ def plan_replication(
         from ocabra.config import settings
 
         return _diffusers_plan(model_row, models_dir or settings.models_dir)
-    node_model_id, body = replication_request(model_row, gpu_total_mb, backend)
+    node_model_id, body = replication_request(model_row, gpu_total_mb, backend, gpus)
     return {
         "node_model_id": node_model_id,
         "steps": [{"kind": "download", "body": body}, {"kind": "load"}],
@@ -419,6 +454,16 @@ def _node_gpu_total(peer: Any) -> int | None:
     gpus = getattr(peer, "gpus", None) or []
     totals = [int(g.get("total_vram_mb") or 0) for g in gpus if isinstance(g, dict)]
     return max(totals) if totals else None
+
+
+def _node_gpu_indices(peer: Any) -> list[int]:
+    gpus = getattr(peer, "gpus", None) or []
+    out: list[int] = []
+    for position, gpu in enumerate(gpus):
+        if isinstance(gpu, dict):
+            index = gpu.get("index")
+            out.append(int(index) if isinstance(index, int) else position)
+    return out
 
 
 def _node_version(peer: Any) -> tuple[int, ...] | None:
@@ -597,7 +642,12 @@ async def _drive_item(fm: Any, peer: Any, active: dict, tasks: dict) -> None:
                     raise CloudError("El modelo ya no existe aquí", 400)
                 row, backend = found
                 plan = await asyncio.to_thread(
-                    plan_replication, row, _node_gpu_total(peer), None, backend
+                    plan_replication,
+                    row,
+                    _node_gpu_total(peer),
+                    None,
+                    backend,
+                    gpus=_node_gpu_indices(peer),
                 )
                 need = plan.get("min_node_version")
                 have = _node_version(peer)

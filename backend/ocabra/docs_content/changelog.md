@@ -16,6 +16,25 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.1 — 2026-11-27
+
+### Arreglos
+
+- **Un modelo copiado a un pod cargaba con el contexto pensado para nuestras
+  GPUs.** En una tarjeta más pequeña no cabía y cada petición daba 409
+  `insufficient_vram` (nemotron-3-nano:30b pedía 25,5 GB en una 4090). Ahora el
+  pod calcula su propio contexto con `llama-fit` sobre sus GPUs, igual que al
+  descargar un modelo aquí.
+- **Modelos bajados de Hugging Face que se daban por «solo de este
+  servidor».** Las fichas antiguas solo guardan la ruta del fichero, y la
+  réplica no la usaba. Ahora el fichero se saca de esa ruta. Los GGUF partidos
+  en varios ficheros dicen que aún no se pueden copiar, en vez de bajar solo
+  la primera parte.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.0 — 2026-11-27
 
 ### Cambios

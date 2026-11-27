@@ -492,7 +492,9 @@ async def test_drive_walks_install_downloads_register_load(tmp_path, monkeypatch
     monkeypatch.setattr(preload, "load_model_rows", rows)
     real_plan = preload.plan_replication
     monkeypatch.setattr(
-        preload, "plan_replication", lambda r, g, _d=None, b=None: real_plan(r, g, models_dir, b)
+        preload,
+        "plan_replication",
+        lambda r, g, _d=None, b=None, **kw: real_plan(r, g, models_dir, b, **kw),
     )
 
     node = {"backend": "not_installed", "jobs": {}, "registered": False}
@@ -563,7 +565,9 @@ async def test_drive_refuses_diffusers_on_an_old_node(tmp_path, monkeypatch):
     monkeypatch.setattr(preload, "load_model_rows", rows)
     real_plan = preload.plan_replication
     monkeypatch.setattr(
-        preload, "plan_replication", lambda r, g, _d=None, b=None: real_plan(r, g, models_dir, b)
+        preload,
+        "plan_replication",
+        lambda r, g, _d=None, b=None, **kw: real_plan(r, g, models_dir, b, **kw),
     )
     fm = SimpleNamespace(session_factory=None)
     peer = SimpleNamespace(
@@ -1089,3 +1093,47 @@ async def test_en_una_bateria_sin_disco_espera_en_vez_de_fallar():
     manual.pop("waiting_disk")
     await preload._drive_item(fm, peer, manual, {})
     assert manual["status"] == "error"
+
+
+def test_un_gguf_bajado_de_hugging_face_se_replica_aunque_solo_guarde_la_ruta():
+    # inkling: la ficha antigua solo tiene la ruta local, no «file».
+    art = {
+        "ref": "ggml-org/Inkling-2-Mini-GGUF::Inkling-2-Mini-IQ4_NL",
+        "kind": "gguf",
+        "path": "/data/models/huggingface/ggml-org--Inkling-2-Mini-GGUF--Inkling-2-Mini-IQ4_NL/Inkling-2-Mini-IQ4_NL.gguf",
+        "source": "local",
+    }
+    assert download_source(art) == {
+        "source": "huggingface",
+        "model_ref": "ggml-org/Inkling-2-Mini-GGUF",
+        "artifact": "Inkling-2-Mini-IQ4_NL.gguf",
+    }
+    # Un fichero suelto que no sale de esa carpeta sigue sin poder copiarse.
+    with pytest.raises(CloudError, match="solo existen en este servidor"):
+        download_source({"ref": "x::y", "kind": "gguf", "path": "/data/models/mio.gguf"})
+
+
+def test_un_gguf_partido_lo_dice_en_vez_de_bajar_media_parte():
+    art = {
+        "ref": "org/Big-GGUF::Big-IQ1_M-00001-of-00002",
+        "file": "IQ1_M/Big-IQ1_M-00001-of-00002.gguf",
+        "kind": "gguf",
+        "source": "hf",
+    }
+    with pytest.raises(CloudError, match="partido en varios"):
+        download_source(art)
+
+
+def test_el_pod_planea_su_contexto_con_sus_gpus():
+    row = SimpleNamespace(
+        backend_type="llamacpp_mks",
+        artifact={"source": "ollama", "ref": "nemotron-3-nano:30b"},
+        model_key="nemotron-3-nano:30b",
+        model_id="llamacpp_mks/nemotron-3-nano:30b",
+        extra_config={"llama_cpp": {"ctx_size": 131072}},
+    )
+    _node_id, body = replication_request(row, 24564, None, [0])
+    assert body["register_config"]["placement"] == {"gpus": [0], "cpu": False}
+    # Sin GPUs conocidas (nodo antiguo), como antes.
+    _node_id, body = replication_request(row, 24564)
+    assert "placement" not in body["register_config"]
