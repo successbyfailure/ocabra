@@ -47,8 +47,9 @@ logger = structlog.get_logger(__name__)
 _SERVICE_USERNAME = "__ocabra_benchmark__"
 _SERVICE_KEY_NAME = "ocabra-benchmark"
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
-# Lo que deja el pod que se apaga por tener la GPU averiada (core/cloud/manager.py).
-GPU_BROKEN_MARK = "no funciona para cómputo"
+# Lo que deja un pod que se apaga sin llegar a servir (core/cloud/manager.py):
+# GPU averiada, o la máquina no llegó a arrancar el nodo (imagen, red).
+POD_RETRY_MARKS = ("no funciona para cómputo", "No llegó a unirse a la federación")
 # GPU averiada en el pod: se vuelve a pedir pasado este tiempo, y un tipo de
 # GPU que falla tantas veces se deja de pedir para esa batería.
 BROKEN_POD_RETRY_S = 300
@@ -2519,7 +2520,7 @@ class BenchmarkManager:
         return next((p for p in fm.get_online_peers() if p.name.lower() == str(name).lower()), None)
 
     async def _retry_broken_pod(self, run_id: uuid.UUID, spec: dict, node: dict) -> bool:
-        """Pide otra máquina si al pod le tocó una GPU averiada. ``True`` si lo hizo.
+        """Pide otra máquina si el pod no sirvió (GPU averiada, no arrancó). ``True`` si lo hizo.
 
         RunPod da a veces máquinas cuya GPU no inicializa (``cuInit`` 999): el
         pod lo detecta y se apaga (core/cloud/manager.py). Antes eso tumbaba
@@ -2529,7 +2530,7 @@ class BenchmarkManager:
         deja de pedir. Toda la batería pasa a la máquina nueva.
         """
         error = str(node.get("error") or "")
-        if GPU_BROKEN_MARK not in error:
+        if not any(mark in error for mark in POD_RETRY_MARKS):
             return False
         gpu = str(node.get("gpu_type_id") or "")
         strikes = (

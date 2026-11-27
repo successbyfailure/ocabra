@@ -510,3 +510,25 @@ async def test_un_modelo_que_no_llega_a_tiempo_falla_solo(tmp_path, monkeypatch)
         assert "atascado: no se pudo preparar en el pod: no estuvo listo en 90 min" in after.error
     finally:
         await _delete(run.id)
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_un_pod_que_no_llega_a_conectarse_tambien_se_reintenta(tmp_path: Path) -> None:
+    cloud = FakeCloud()
+    manager = _manager(cloud)
+    run = await _new_run(tmp_path)
+    try:
+        await manager._advance_provisioning()
+        rid = str((await _load(run.id)).cloud_request_id)
+        node_id = str(uuid.uuid4())
+        cloud.requests.rows[rid].update(status="launched", cloudNodeId=node_id)
+        cloud.nodes.append(
+            {"id": node_id, "status": "terminated", "gpu_type_id": "4090",
+             "error": "No llegó a unirse a la federación (¿imagen o red?)"}
+        )  # fmt: skip
+        await manager._advance_provisioning()
+        again = await _load(run.id)
+        assert again.status == "queued" and again.cloud["broken_gpus"] == {"4090": 1}
+    finally:
+        await _delete(run.id)

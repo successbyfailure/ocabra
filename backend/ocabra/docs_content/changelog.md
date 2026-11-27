@@ -16,6 +16,19 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.13 — 2026-11-27
+
+### Arreglos
+
+- **Un pod de benchmark que no llegaba a conectarse tumbaba la batería.** Si
+  la máquina no arranca el nodo en 30 minutos (imagen, red), el pod se apaga.
+  Ahora, igual que con una GPU averiada, se pide otra máquina a los 5
+  minutos, y un tipo de GPU que falla tres veces se deja de pedir.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.12 — 2026-11-27
 
 ### Arreglos
