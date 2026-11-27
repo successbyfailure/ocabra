@@ -473,3 +473,28 @@ async def test_un_runner_cortado_al_apagar_el_api_no_es_un_fallo(tmp_path: Path)
         assert outcome.return_code != 0 and outcome.interruption == "shutdown"
     finally:
         await _delete(run.id)
+
+
+@pytest.mark.asyncio
+async def test_dos_corrala_a_la_vez_no_comparten_base(monkeypatch) -> None:
+    from ocabra.benchmarks import manager as manager_module
+
+    monkeypatch.setattr(
+        manager_module.settings, "database_url", "postgresql+asyncpg://u:p@db:5432/ocabra"
+    )
+    monkeypatch.setattr(manager_module.settings, "benchmark_corrala_database_url", "")
+    created = []
+
+    async def ensure(url):
+        created.append(url.rsplit("/", 1)[1])
+
+    manager = _manager(FakeCloud())
+    monkeypatch.setattr(manager, "_ensure_postgres_database", ensure)
+    manager._running = {"Mapache": object(), "ocabra-bench-a": object()}
+    assert (await manager._corrala_database_url("Mapache")).endswith("/ocabra_bench")
+    assert (await manager._corrala_database_url("ocabra-bench-a")).endswith("/ocabra_bench_2")
+    # La misma máquina repite hueco; uno nuevo reutiliza el que quedó libre.
+    assert (await manager._corrala_database_url("Mapache")).endswith("/ocabra_bench")
+    manager._running = {"ocabra-bench-a": object(), "ocabra-bench-b": object()}
+    assert (await manager._corrala_database_url("ocabra-bench-b")).endswith("/ocabra_bench")
+    assert created[-1] == "ocabra_bench"

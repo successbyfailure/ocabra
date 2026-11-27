@@ -299,6 +299,8 @@ class BenchmarkManager:
         self._last_diagnosis_purge = 0.0
         # (nodo de la nube, modelo) ya borrados del pod: no se vuelve a pedir.
         self._freed_pod_models: set[tuple[str, str]] = set()
+        # Base de pruebas de Corrala de cada máquina que mide a la vez (hueco).
+        self._corrala_slots: dict[str, int] = {}
 
     @property
     def sampling_overrides(self) -> list[dict[str, object]]:
@@ -920,7 +922,7 @@ class BenchmarkManager:
             }
         )
         if await self._run_app(run_id) == "corrala":
-            env["CORRALA_BENCH_DATABASE_URL"] = await self._corrala_database_url()
+            env["CORRALA_BENCH_DATABASE_URL"] = await self._corrala_database_url(node or "")
         if progress_path is not None:
             env["OCABRA_BENCHMARK_PROGRESS_PATH"] = str(progress_path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1749,10 +1751,34 @@ class BenchmarkManager:
         wanted = node.lower()
         return [str(n) for n in nodes if str(n).lower() != wanted]
 
-    async def _corrala_database_url(self) -> str:
+    async def _corrala_database_url(self, target: str = "") -> str:
+        """La base de pruebas de Corrala para la máquina *target* («» = aquí).
+
+        Corrala vacía y rellena su base en cada medida: dos ejecuciones a la vez
+        (en máquinas distintas) sobre la misma se borraban los asistentes la
+        una a la otra (``conversations_assistant_id_fkey``). Cada máquina que
+        mide a la vez recibe un hueco propio (``…_bench``, ``…_bench_2``…), que
+        se reutiliza en cuanto queda libre.
+        """
         url = settings.benchmark_corrala_database_url.strip()
         if not url:
             url = corrala_benchmark_database_url(settings.database_url)
+        busy = {
+            slot
+            for other, slot in self._corrala_slots.items()
+            if other != target and other in self._running
+        }
+        slot = self._corrala_slots.get(target)
+        if slot is None or slot in busy:
+            slot = next(i for i in range(len(busy) + 1) if i not in busy)
+        self._corrala_slots[target] = slot
+        if slot:
+            from sqlalchemy.engine import make_url
+
+            parsed = make_url(url)
+            url = parsed.set(database=f"{parsed.database}_{slot + 1}").render_as_string(
+                hide_password=False
+            )
         await self._ensure_postgres_database(url)
         return url
 

@@ -16,6 +16,21 @@ y cómo rinde cada modelo, en [`/docs/models`](/docs/models).
 
 ---
 
+## 0.145.12 — 2026-11-27
+
+### Arreglos
+
+- **Dos benchmarks de Corrala a la vez se estropeaban la base de pruebas.**
+  Corrala vacía y rellena su base en cada medida. Dos ejecuciones en
+  máquinas distintas sobre la misma base se borraban los datos la una a la
+  otra, y fallaban con `conversations_assistant_id_fkey`. Ahora cada máquina
+  que mide a la vez usa su propia base (`…_bench`, `…_bench_2`…), que se
+  reutiliza en cuanto queda libre.
+
+**Acción:** ninguna.
+
+---
+
 ## 0.145.11 — 2026-11-27
 
 ### Arreglos
